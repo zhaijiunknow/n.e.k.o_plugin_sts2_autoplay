@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .planner_interface import PlannedOperation
@@ -672,6 +673,9 @@ class STS2HeuristicPlanner:
             parsed = self._safe_int(token)
             if parsed is not None:
                 return parsed
+        match = re.search(r"获得\s*(\d+)\s*点?(?:格挡|护盾|护甲)", effect_text)
+        if match:
+            return int(match.group(1))
         return 0
 
     def _is_unremovable_card(self, card: dict[str, Any]) -> bool:
@@ -993,6 +997,9 @@ class STS2HeuristicPlanner:
             parsed = self._safe_int(token)
             if parsed is not None:
                 return parsed
+        match = re.search(r"造成\s*(\d+)\s*点?伤害", effect_text)
+        if match:
+            return int(match.group(1))
         return 0
 
     def _card_energy_cost(self, card: dict[str, Any]) -> int:

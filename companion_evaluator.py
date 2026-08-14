@@ -177,8 +177,8 @@ class STS2CompanionEvaluator:
         block = self._safe_int(player.get("block"))
         incoming = sum(self._safe_int(enemy.get("intent_damage")) for enemy in enemies if isinstance(enemy, dict))
         remaining_block_needed = max(0, incoming - block)
-        damage = self._card_damage(selected_card)
-        card_block = self._card_block(selected_card)
+        damage = self._planner._card_damage(selected_card)
+        card_block = self._planner._card_block(selected_card)
         if target_name and damage > 0:
             target = next(
                 (enemy for enemy in enemies if isinstance(enemy, dict) and str(enemy.get("name") or enemy.get("enemy_id") or "").strip() == target_name),
@@ -232,6 +232,9 @@ class STS2CompanionEvaluator:
             if event_type == "player_card_or_action_committed":
                 return self.t("companion.suggestion.player_operation.action_committed", default="这步已经落下，建议接着看伤害交换、护盾变化和下一张牌的收益。")
         if summary_kind == "combat":
+            heuristic_suggestion = self._combat_heuristic_suggestion(payload, directives)
+            if heuristic_suggestion:
+                return self._post_action_wrap(heuristic_suggestion, trigger)
             return self._combat_voice(payload)
         if summary_kind == "reward":
             reward_cards = payload.get("reward_cards") if isinstance(payload.get("reward_cards"), list) else []
@@ -360,6 +363,12 @@ class STS2CompanionEvaluator:
         }
         preferences = self._combat_preferences(directives)
         guidance_override = self._planner._guidance_override_from_payload(summary_context)
+        # 没有文本指令时，按局面推导攻防偏好：先找斩杀，再考虑保命
+        if not guidance_override:
+            if self._combat_has_lethal_play(payload):
+                guidance_override = {"prefer_attack": True, "prefer_lethal": True}
+            elif self._combat_needs_defense(payload):
+                guidance_override = {"prefer_defense": True}
         preferred_card_index = self._planner._preferred_combat_card_index(snapshot, preferences, guidance_override)
         hand = snapshot["raw_state"]["combat"]["hand"]
         if preferred_card_index is None:
@@ -372,6 +381,9 @@ class STS2CompanionEvaluator:
             None,
         )
         if not isinstance(selected_card, dict):
+            return ""
+        # 需要保命却没有可选防御牌 → 交给通用建议，不强行命名非防御牌
+        if guidance_override.get("prefer_defense") and not self._is_defensive_card(selected_card):
             return ""
         card_name = str(selected_card.get("name") or selected_card.get("card_id") or "").strip()
         if not card_name:
@@ -398,6 +410,45 @@ class STS2CompanionEvaluator:
             card_name=card_name,
             reason=reason,
         )
+
+    def _combat_has_lethal_play(self, payload: dict[str, Any]) -> bool:
+        enemies = payload.get("enemies") if isinstance(payload.get("enemies"), list) else []
+        cards = payload.get("playable_card_summaries") if isinstance(payload.get("playable_card_summaries"), list) else []
+        if not enemies or not cards:
+            return False
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            damage = self._planner._card_damage(card)
+            if damage <= 0:
+                continue
+            for enemy in enemies:
+                if not isinstance(enemy, dict):
+                    continue
+                enemy_hp = self._safe_int(enemy.get("current_hp"), default=0)
+                if enemy_hp > 0 and damage >= enemy_hp:
+                    return True
+        return False
+
+    def _combat_needs_defense(self, payload: dict[str, Any]) -> bool:
+        player = payload.get("player") if isinstance(payload.get("player"), dict) else {}
+        enemies = payload.get("enemies") if isinstance(payload.get("enemies"), list) else []
+        current_hp = self._safe_int(player.get("current_hp"), default=0)
+        max_hp = max(1, self._safe_int(player.get("max_hp"), default=1))
+        block = self._safe_int(player.get("block"), default=0)
+        incoming = sum(self._safe_int(enemy.get("intent_damage"), default=0) for enemy in enemies if isinstance(enemy, dict))
+        hp_ratio = current_hp / max_hp if max_hp > 0 else 0.0
+        return incoming > block or hp_ratio <= 0.45
+
+    def _is_defensive_card(self, card: dict[str, Any]) -> bool:
+        text = " ".join(
+            [
+                str(card.get("name") or ""),
+                str(card.get("effect") or ""),
+                str(card.get("description") or ""),
+            ]
+        ).lower()
+        return any(token in text for token in ["block", "defend", "护盾", "格挡"])
 
     def _combat_hand_from_payload(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         cards = payload.get("playable_card_summaries") if isinstance(payload.get("playable_card_summaries"), list) else []

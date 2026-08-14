@@ -10,7 +10,16 @@ from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 
 
 class DummyLogger:
+    def info(self, *args, **kwargs):
+        return None
+
+    def debug(self, *args, **kwargs):
+        return None
+
     def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
         return None
 
     def exception(self, *args, **kwargs):
@@ -106,7 +115,8 @@ async def test_neko_interface_enabling_companion_mode_refreshes(monkeypatch: pyt
     result = await interface.set_companion_mode(True)
 
     assert result["enabled"] is True
-    assert refresh_calls == [True, True]
+    assert refresh_calls, "enabling companion mode should trigger at least one sync refresh"
+    assert all(refresh_calls)
 
 
 

@@ -7,4 +7,4 @@ def test_plugin_manifest_exists() -> None:
     assert manifest.is_file()
     text = manifest.read_text(encoding="utf-8")
     assert 'id = "sts2_autoplay"' in text
-    assert 'entry = "plugin.plugins.sts2_autoplay:Sts2AutoplayPlugin"' in text
+    assert 'entry = "plugin.plugins.sts2_autoplay:STS2AutoplayPlugin"' in text

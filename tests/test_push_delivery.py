@@ -16,7 +16,16 @@ class NotificationPlugin(STS2AutoplayPlugin):
 
 
 class DummyLogger:
+    def info(self, *args, **kwargs):
+        return None
+
+    def debug(self, *args, **kwargs):
+        return None
+
     def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
         return None
 
     def exception(self, *args, **kwargs):
@@ -376,8 +385,8 @@ def test_service_throttles_duplicate_companion_sync_pushes() -> None:
             "should_sync": True,
             "fingerprint": "sync-1",
             "reason": "screen_class:combat",
-            "min_interval_seconds": 0.0,
-            "force": True,
+            "min_interval_seconds": 60.0,
+            "force": False,
             "payload": {
                 "screen": "combat",
                 "summary_kind": "combat",
