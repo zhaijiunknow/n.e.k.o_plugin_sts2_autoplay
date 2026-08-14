@@ -6,7 +6,6 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.catgirl_llm import CatgirlCommentGenerator
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 
@@ -129,7 +128,6 @@ def test_maybe_emit_catgirl_llm_disabled_falls_back() -> None:
 
 @pytest.mark.unit
 def test_catgirl_llm_async_pushes_generated_text(monkeypatch) -> None:
-    import plugin.plugins.sts2_autoplay.service as svc_mod
 
     bridge = FakeDanmuBridge()
     service = STS2AutoplayService(DummyLogger(), lambda p: None, lambda **k: None, danmu_bridge=bridge)

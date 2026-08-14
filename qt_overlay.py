@@ -490,7 +490,6 @@ class DanmuOverlayWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        clip = QRect(0, 0, self.width(), self.height())
 
         for track in self.tracks:
             for item in track.items:

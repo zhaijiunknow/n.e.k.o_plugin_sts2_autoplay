@@ -11,8 +11,8 @@ from typing import Any, Callable
 from .action_engine import STS2ActionEngine
 from .action_registry import STS2ActionRegistry
 from .candidate_generator import STS2CandidateGenerator
-from .catgirl_llm import CatgirlCommentGenerator
 from .catgirl_bridge import STS2CatgirlBridge
+from .catgirl_llm import CatgirlCommentGenerator
 from .companion_evaluator import STS2CompanionEvaluator
 from .danmu_bridge import STS2DanmuBridge
 from .danmu_events import DanmuEventTracker
@@ -26,12 +26,11 @@ from .neko_interface import STS2NekoInterface
 from .preference_extractors import STS2PreferenceExtractor
 from .preference_store import STS2PreferenceStore
 from .runtime_state import STS2RuntimeState
+from .situation_summary_engine import STS2SituationSummaryEngine
 from .state_machine import STS2StateMachine
 from .strategy_repository import STS2StrategyRepository
 from .summary_context_builder import STS2SummaryContextBuilder
-from .situation_summary_engine import STS2SituationSummaryEngine
 from .transport_client import STS2TransportClient
-
 
 # 「当前游戏信息状态」面板：状态推送最小间隔（防刷爆 SSE 有界队列）/ 心跳间隔（空闲时也定期刷新）
 STATUS_PUSH_MIN_INTERVAL = 2.0

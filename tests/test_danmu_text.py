@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.danmu_text import _CORPUS_PATH, build_viewer_danmu
 
 

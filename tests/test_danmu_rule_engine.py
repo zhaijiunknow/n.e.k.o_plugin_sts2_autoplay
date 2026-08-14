@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.danmu_events import DanmuEvent, DanmuEventTracker
 from plugin.plugins.sts2_autoplay.danmu_spire import DanmuTriggerHit, match_events, pick_rule_phrase
 

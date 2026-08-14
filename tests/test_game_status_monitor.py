@@ -6,7 +6,6 @@ import time
 from types import SimpleNamespace
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.danmu_spire import _load_rules
 from plugin.plugins.sts2_autoplay.service import (
     STATUS_PUSH_HEARTBEAT,

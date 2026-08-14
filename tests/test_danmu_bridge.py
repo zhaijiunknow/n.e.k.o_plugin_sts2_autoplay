@@ -4,7 +4,6 @@ import asyncio
 import json
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.danmu_bridge import STS2DanmuBridge
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 

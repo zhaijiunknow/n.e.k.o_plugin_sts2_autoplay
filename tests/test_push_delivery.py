@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from plugin.plugins.sts2_autoplay import STS2AutoplayPlugin
 from plugin.plugins.sts2_autoplay.catgirl_bridge import STS2CatgirlBridge
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
@@ -156,7 +155,7 @@ def test_catgirl_sync_uses_fingerprint_and_read_delivery_by_default() -> None:
     original_time = service_module.time
     service_module.time = lambda: 105.0
     try:
-        allowed = service._should_deliver_sync(
+        service._should_deliver_sync(
             {
                 "fingerprint": "same",
                 "min_interval_seconds": 10.0,

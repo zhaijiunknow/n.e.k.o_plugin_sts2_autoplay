@@ -71,39 +71,6 @@ def extract(src: str) -> dict[str, list[dict]]:
     return collected
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="生成 DanmakuSpire 完整弹幕词条 JSON")
-    parser.add_argument("--src", required=True, help="反编译 DanmakuLibrary.cs 路径")
-    parser.add_argument("--out", required=True, help="输出 JSON 路径")
-    args = parser.parse_args()
-
-    src_path = Path(args.src)
-    if not src_path.is_file():
-        print(f"错误: 找不到 {src_path}")
-        return 1
-    src = src_path.read_text(encoding="utf-8")
-    extracted = extract(src)
-
-    # 按规则 ID 顺序输出；未知规则追加在后
-    ordered: dict[str, list[dict]] = {}
-    for rule in _RULE_ORDER:
-        if rule in extracted:
-            ordered[rule] = extracted[rule]
-    for rule in sorted(k for k in extracted if k not in ordered):
-        ordered[rule] = extracted[rule]
-
-    out_path = Path(args.out)
-    out_path.write_text(
-        json.dumps(ordered, ensure_ascii=False, indent=1) + "\n",
-        encoding="utf-8",
-    )
-    total = sum(len(v) for v in ordered.values())
-    print(f"已生成 {out_path}")
-    print(f"规则数: {len(ordered)}  词条总数: {total}")
-    print(f"空键: {[k for k, v in ordered.items() if not v]}")
-    return 0
-
-
 _CARD_SET_RE = re.compile(
     r'public static readonly HashSet<string> (\w+)\s*=\s*new HashSet<string>\s*\{\s*(.*?)\s*\};',
     re.S,

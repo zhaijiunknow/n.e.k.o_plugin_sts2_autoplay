@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.heuristic_planner import STS2HeuristicPlanner
 from plugin.plugins.sts2_autoplay.loop_runner import STS2LoopRunner
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
@@ -546,7 +545,7 @@ def test_main_menu_planner_uses_continue_run_when_no_character_select_path_exist
 def test_main_menu_planner_uses_timeline_epoch_when_character_select_missing() -> None:
     planner = STS2HeuristicPlanner()
 
-    operation = planner.plan(
+    planner.plan(
         {
             "classification": {"state_name": "main_menu"},
             "summary_context": {
@@ -614,8 +613,7 @@ async def test_loop_runner_tick_builds_policy_from_program_mode() -> None:
     runner = STS2LoopRunner(service)
 
     tick = await runner.tick()
-
-    payload = tick["snapshot"]["summary_context"]["decision_payload"]
+    _ = tick["snapshot"]["summary_context"]["decision_payload"]
 
 
 @pytest.mark.unit
@@ -628,7 +626,7 @@ async def test_get_status_falls_back_to_current_control_mode_when_snapshot_mode_
         "classification": {"screen_class": "run_navigation"},
     }
 
-    status = await service.get_status()
+    await service.get_status()
 
 
 

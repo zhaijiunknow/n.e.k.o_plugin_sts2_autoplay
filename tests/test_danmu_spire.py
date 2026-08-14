@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.danmu_spire import detect_trigger, pick_rule_phrase
 
 

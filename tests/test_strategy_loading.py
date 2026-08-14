@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.companion_evaluator import STS2CompanionEvaluator
 from plugin.plugins.sts2_autoplay.strategy_parser import STS2StrategyParser
 from plugin.plugins.sts2_autoplay.strategy_repository import STS2StrategyRepository
@@ -61,7 +60,7 @@ def test_strategy_parser_loads_base_scene_and_overrides(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_strategy_repository_maps_screen_to_scene() -> None:
-    repo = STS2StrategyRepository(DummyLogger(), DummyPreferenceStore(), default_strategy="defect")
+    STS2StrategyRepository(DummyLogger(), DummyPreferenceStore(), default_strategy="defect")
 
 
 
@@ -192,7 +191,7 @@ def test_companion_evaluator_uses_strategy_context_for_commentary() -> None:
 def test_companion_evaluator_combat_intent_drives_advice() -> None:
     evaluator = STS2CompanionEvaluator(None)
 
-    result = evaluator.evaluate(
+    evaluator.evaluate(
         summary_context={
             "summary_kind": "combat",
             "payload": {
@@ -290,7 +289,7 @@ def test_companion_evaluator_combat_includes_target_and_reason_text() -> None:
 def test_companion_evaluator_map_prefers_preferred_route_index_over_first_node() -> None:
     evaluator = STS2CompanionEvaluator(None)
 
-    result = evaluator.evaluate(
+    evaluator.evaluate(
         summary_context={
             "summary_kind": "map",
             "payload": {

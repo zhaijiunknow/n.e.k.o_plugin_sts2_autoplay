@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from plugin.plugins.sts2_autoplay.summary_context_builder import STS2SummaryContextBuilder
 from plugin.plugins.sts2_autoplay.state_machine import STS2StateMachine
+from plugin.plugins.sts2_autoplay.summary_context_builder import STS2SummaryContextBuilder
 
 
 class RuntimeStateStub:

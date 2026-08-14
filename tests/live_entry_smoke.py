@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from plugin.plugins.sts2_autoplay import STS2AutoplayPlugin
+from plugin.sdk.shared.constants import EVENT_META_ATTR
+from plugin.sdk.shared.models.result import Err, Ok
+
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -18,10 +22,6 @@ if "config" not in sys.modules and config_init.exists():
         module = importlib.util.module_from_spec(spec)
         sys.modules["config"] = module
         spec.loader.exec_module(module)
-
-from plugin.plugins.sts2_autoplay import STS2AutoplayPlugin
-from plugin.sdk.shared.constants import EVENT_META_ATTR
-from plugin.sdk.shared.models.result import Err, Ok
 
 
 class DummyLogger:

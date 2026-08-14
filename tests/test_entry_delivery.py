@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay import STS2AutoplayPlugin
 from plugin.plugins.sts2_autoplay.tests.live_entry_smoke import SPECIAL_ARGS, collect_entries
 
@@ -42,7 +41,7 @@ async def test_run_entry_finish_falls_back_to_message_when_summary_missing() -> 
     async def action() -> dict[str, str]:
         return {"status": "paused", "message": "已暂停自动游玩。"}
 
-    result = await plugin._run_entry(action, finish=True)
+    await plugin._run_entry(action, finish=True)
 
 
 

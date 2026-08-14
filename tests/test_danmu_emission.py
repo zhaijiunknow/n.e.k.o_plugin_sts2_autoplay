@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.danmu_spire import burst_profile, create_delays, pick_rule_burst, rule_intensity
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 

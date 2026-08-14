@@ -20,6 +20,7 @@ from typing import Any
 
 from .danmu_bridge import _plugin_server_base
 
+
 # 仓库虚拟环境（N.E.K.O 运行时，最可靠）——相对本模块向上 4 级定位
 def _repo_venv_python() -> str:
     return str(Path(__file__).resolve().parents[3] / ".venv" / "Scripts" / "python.exe")
@@ -192,8 +193,9 @@ class QtOverlayManager:
         """杀掉所有指向本插件 SSE 的 qt_overlay.py 进程（含手动启动的）。"""
         killed = False
         try:
-            import psutil
             import shlex
+
+            import psutil
 
             marker = f"{self._plugin_id}/ui-api/events"
             for p in psutil.process_iter(["cmdline"]):

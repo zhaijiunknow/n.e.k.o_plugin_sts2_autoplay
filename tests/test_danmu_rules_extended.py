@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.danmu_events import DanmuEventTracker
 from plugin.plugins.sts2_autoplay.danmu_spire import match_events
 

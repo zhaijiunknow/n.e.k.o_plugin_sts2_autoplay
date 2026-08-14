@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from plugin.plugins.sts2_autoplay.instructions import instruction_summary, normalize_guidance_instruction, normalize_strategy_instruction
+from plugin.plugins.sts2_autoplay.instructions import (
+    instruction_summary,
+    normalize_guidance_instruction,
+    normalize_strategy_instruction,
+)
 
 
 def test_normalize_guidance_instruction_produces_unified_schema() -> None:

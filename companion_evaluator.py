@@ -25,7 +25,6 @@ class STS2CompanionEvaluator:
     ) -> dict[str, Any]:
         payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
         summary_kind = str(situation_summary.get("kind") or summary_context.get("summary_kind") or "general")
-        static_text = str(situation_summary.get("static_text") or situation_summary.get("text") or "")
         strategy_name = str(strategy_context.get("strategy_name") or "unknown")
         directives = strategy_context.get("strategy_directives") if isinstance(strategy_context.get("strategy_directives"), dict) else {}
         player_operation_observation = dict(getattr(runtime_state, "latest_player_operation_observation", {}) or {}) if runtime_state is not None else {}
@@ -173,7 +172,6 @@ class STS2CompanionEvaluator:
     def _combat_reason_text(self, payload: dict[str, Any], selected_card: dict[str, Any], target_name: str) -> str:
         player = payload.get("player") if isinstance(payload.get("player"), dict) else {}
         enemies = payload.get("enemies") if isinstance(payload.get("enemies"), list) else []
-        current_hp = self._safe_int(player.get("current_hp"))
         block = self._safe_int(player.get("block"))
         incoming = sum(self._safe_int(enemy.get("intent_damage")) for enemy in enemies if isinstance(enemy, dict))
         remaining_block_needed = max(0, incoming - block)

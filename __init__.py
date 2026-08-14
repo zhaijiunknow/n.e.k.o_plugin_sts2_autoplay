@@ -82,8 +82,9 @@ class STS2AutoplayPlugin(NekoPluginBase):
         避免误杀含该字符串的调用者）。
         """
         try:
-            import psutil
             import shlex
+
+            import psutil
         except Exception:
             return
         plugin_marker = f"{self.plugin_id}/ui-api/events"
