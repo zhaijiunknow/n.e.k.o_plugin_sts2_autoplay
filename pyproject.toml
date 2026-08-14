@@ -1,0 +1,4 @@
+[project]
+name = "sts2_autoplay"
+version = "0.1.0"
+dependencies = []

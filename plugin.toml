@@ -1,0 +1,47 @@
+[sts2]
+base_url = "http://127.0.0.1:8080"
+connect_timeout_seconds = 5
+request_timeout_seconds = 15
+poll_interval_idle_seconds = 3
+poll_interval_active_seconds = 1
+action_interval_seconds = 1.5
+post_action_delay_seconds = 0.5
+autoplay_on_start = false
+character_strategy = "defect"
+max_consecutive_errors = 3
+llm_frontend_output_enabled = true
+llm_frontend_output_probability = 1.0
+autoplay_push_probability = 0.3
+neko_reporting_enabled = true
+neko_report_interval_steps = 1
+neko_report_hud_enabled = true
+neko_commentary_enabled = true
+neko_commentary_probability = 0.65
+companion_push_probability = 0.5
+neko_commentary_min_interval_seconds = 4
+neko_critical_commentary_always = true
+neko_guidance_max_queue = 50
+neko_auto_low_hp_threshold = 0.3
+neko_auto_safe_hp_threshold = 0.5
+neko_auto_dangerous_attack_threshold = 20
+neko_auto_resume_after_low_hp = true
+neko_desperate_enabled = true
+neko_desperate_hp_threshold = 0.2
+neko_maximize_enabled = true
+danmu_overlay_enabled = true
+danmu_top_mode = "standard"
+danmu_multiplayer_enabled = false
+danmu_density = 100
+danmu_dedup_enabled = false
+danmu_zone_fill = 0.5
+danmu_window_height = 1080
+danmu_window_width = 1920
+danmu_scrolling_delay_scale = 0.2
+danmu_ambient_enabled = true
+catgirl_llm_enabled = true
+catgirl_llm_min_interval_seconds = 10
+qt_overlay_window = "Slay the Spire"
+
+[plugin]
+id = "sts2_autoplay"
+entry = "plugin.plugins.sts2_autoplay:STS2AutoplayPlugin"

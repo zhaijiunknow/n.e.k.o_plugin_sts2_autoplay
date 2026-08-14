@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STS2 功能</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Microsoft YaHei', sans-serif; background:#15171c; color:#e8eaf0; padding:24px; }
+.wrap { max-width:520px; margin:0 auto; }
+h1 { font-size:20px; margin-bottom:4px; }
+p.sub { color:#9aa2b1; font-size:12px; margin-bottom:20px; }
+a { color:#7fd4ff; font-size:12px; text-decoration:none; }
+.back-btn {
+    display:inline-block; background:#2b303c; color:#e8eaf0; border:1px solid #3a4150;
+    border-radius:6px; padding:6px 14px; font-size:12px; text-decoration:none; transition:.15s;
+}
+.back-btn:hover { background:#3aa0ff; color:#fff; border-color:#3aa0ff; }
+.card { background:#1e222b; border:1px solid #2b303c; border-radius:10px; padding:18px; margin-bottom:14px; }
+.card h3 { font-size:13px; margin-bottom:12px; color:#7fd4ff; }
+.btn-row { display:flex; gap:10px; flex-wrap:wrap; }
+button {
+    border:none; border-radius:6px; padding:9px 16px; font-size:13px; cursor:pointer; transition:.15s;
+}
+button.primary { background:#3aa0ff; color:#fff; }
+button.primary:hover { background:#2f8ce6; }
+button.ghost { background:#262b36; color:#e8eaf0; border:1px solid #3a4150; }
+button.ghost:hover { border-color:#3aa0ff; }
+button.danger { background:#e86a3a; color:#fff; }
+button.danger:hover { background:#d1572b; }
+button:disabled { opacity:.5; cursor:not-allowed; }
+#result { background:#262b36; border:1px solid #2b303c; border-radius:8px; padding:10px 12px; font-size:12px; color:#9aa2b1; margin-top:4px; white-space:pre-wrap; max-height:160px; overflow:auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+    <div style="margin-bottom:12px"><a class="back-btn" href="index.html">← 返回</a></div>
+    <h1>STS2 功能</h1>
+    <p class="sub">杀戮尖塔 2 自动游玩与陪玩控制</p>
+
+    <div class="card">
+        <h3>运行控制</h3>
+        <div class="btn-row">
+            <button class="primary" onclick="runEntry('sts2_start_autoplay')">开始自动玩</button>
+            <button class="ghost" onclick="runEntry('sts2_pause_autoplay')">暂停</button>
+            <button class="ghost" onclick="runEntry('sts2_resume_autoplay')">恢复</button>
+            <button class="danger" onclick="runEntry('sts2_stop_autoplay')">停止</button>
+            <button class="ghost" onclick="runEntry('sts2_set_standby', {standby:true})">待机</button>
+            <button class="ghost" onclick="runEntry('sts2_set_standby', {standby:false})">取消待机</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>陪玩模式</h3>
+        <div class="btn-row">
+            <button class="primary" onclick="runEntry('sts2_enable_companion_mode')">开启陪玩</button>
+            <button class="ghost" onclick="runEntry('sts2_disable_companion_mode')">关闭陪玩</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>查询</h3>
+        <div class="btn-row">
+            <button class="ghost" onclick="runEntry('sts2_get_status')">查看状态</button>
+            <button class="ghost" onclick="runEntry('sts2_read_state')">当前局面</button>
+            <button class="ghost" onclick="runEntry('sts2_get_planned_operation')">规划动作</button>
+            <button class="ghost" onclick="runEntry('sts2_health_check')">健康检查</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>执行</h3>
+        <div class="btn-row">
+            <button class="primary" onclick="runEntry('sts2_execute_planned_operation')">执行规划动作</button>
+        </div>
+    </div>
+
+    <div id="result">点击按钮查看结果…</div>
+</div>
+
+<script>
+const PLUGIN_ID = 'sts2_autoplay';
+const resultEl = document.getElementById('result');
+
+async function runEntry(entryId, args) {
+    resultEl.textContent = '执行中…';
+    try {
+        const create = await fetch('/runs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ plugin_id: PLUGIN_ID, entry_id: entryId, args: args || {} }),
+        });
+        const created = await create.json();
+        if (!created.run_id) throw new Error('run 创建失败');
+        // 轮询直到完成
+        let done = null;
+        for (let i = 0; i < 20; i++) {
+            const r = await fetch(`/runs/${created.run_id}`, { cache: 'no-store' });
+            const d = await r.json();
+            if (d.stage === 'done' || d.status === 'succeeded' || d.status === 'failed') { done = d; break; }
+            await new Promise(res => setTimeout(res, 1000));
+        }
+        if (!done) { resultEl.textContent = '执行超时'; return; }
+        if (done.status === 'failed') {
+            resultEl.textContent = '失败: ' + JSON.stringify(done.error || {}, null, 2);
+            return;
+        }
+        const exp = await fetch(`/runs/${created.run_id}/export`, { cache: 'no-store' });
+        const exportData = await exp.json();
+        const item = (exportData.items || [])[0] || {};
+        const json = item.json || {};
+        // 显示摘要或结果
+        const data = json.data || {};
+        const summary = data.summary || data.message || data;
+        resultEl.textContent = typeof summary === 'string' ? summary : JSON.stringify(summary, null, 2);
+    } catch (err) {
+        resultEl.textContent = '执行失败: ' + err;
+    }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "N.E.K.O: check sts2_autoplay",
+      "type": "shell",
+      "command": "uv run python -m plugin.neko_plugin_cli.cli check sts2_autoplay",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "N.E.K.O: sync sts2_autoplay",
+      "type": "shell",
+      "command": "uv run --with pip python -m plugin.neko_plugin_cli.cli sync sts2_autoplay --clean",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "N.E.K.O: check -r sts2_autoplay",
+      "type": "shell",
+      "command": "uv run python -m plugin.neko_plugin_cli.cli check -r sts2_autoplay",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "N.E.K.O: build sts2_autoplay",
+      "type": "shell",
+      "command": "uv run python -m plugin.neko_plugin_cli.cli build sts2_autoplay",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

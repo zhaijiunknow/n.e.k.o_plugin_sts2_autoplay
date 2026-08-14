@@ -1,0 +1,157 @@
+/*
+ * STS2 陪玩点评弹幕浮层 — 弹幕渲染样式
+ *
+ * 视觉语言借鉴 N.E.K.O 字幕窗的弹幕样式（static/css/subtitle.css）：
+ *   - 边缘渐隐 mask（原为左右对称，这里改为不对称：左 90px 淡出、右 120px 淡入，
+ *     对齐 danmuai 的 FADE_OUT_PX=90 / FADE_IN_PX=120）
+ *   - 文字描边 + 阴影（浅色字在任何游戏画面下可读）
+ * 渲染模型与 subtitle 不同：每条点评是一个独立 .dm-item 一次性动画
+ * （animationend 后移除），而不是整条 lane 无限循环。
+ */
+
+:root {
+    --dm-font-size: 26px;
+    --dm-speed-px-s: 120;
+    --dm-line-height: 40px;
+    --dm-fade-in: 120px;    /* 右缘淡入（对齐 danmuai FADE_IN_PX） */
+    --dm-fade-out: 90px;    /* 左缘淡出（对齐 danmuai FADE_OUT_PX） */
+    --dm-avatar-size: 36px; /* 猫娘头像尺寸，须与 danmaku.js CFG.avatarSize 一致 */
+    --dm-avatar-gap: 6px;
+}
+
+html.dm-window-host,
+html.dm-window-host body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;      /* Electron transparent:true 时透出桌面 */
+    overflow: hidden;
+}
+
+.dm-window-host body {
+    position: relative;
+}
+
+/* 弹幕舞台 */
+.dm-stage {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;          /* 鼠标穿透，对齐 Electron setIgnoreMouseEvents */
+
+    /* 不对称渐隐：右缘 120px 淡入（弹幕从右进入），左缘 90px 淡出（向左退出） */
+    -webkit-mask: linear-gradient(
+        90deg,
+        transparent 0,
+        #000 var(--dm-fade-out),
+        #000 calc(100% - var(--dm-fade-in)),
+        transparent 100%
+    );
+    mask: linear-gradient(
+        90deg,
+        transparent 0,
+        #000 var(--dm-fade-out),
+        #000 calc(100% - var(--dm-fade-in)),
+        transparent 100%
+    );
+}
+
+/* 轨道：每条固定高度，从上往下排列 */
+.dm-lane {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: var(--dm-line-height);
+}
+
+/* 弹幕项：从右缘进入，一次性滚到左缘外后移除 */
+.dm-item {
+    position: absolute;
+    top: 0;
+    left: 100%;                      /* 左缘贴舞台右缘 */
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    transform: translate3d(0, 0, 0); /* 初始在右屏外（left:100% 已足够） */
+    will-change: transform;          /* 强制合成器图层，滚动走 GPU */
+    font-size: var(--dm-font-size);
+    line-height: var(--dm-line-height);
+    color: #ffffff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55), 0 0 3px rgba(0, 0, 0, 0.35);
+    -webkit-text-stroke: 0.4px rgba(0, 0, 0, 0.55);
+    paint-order: stroke fill;
+    animation-name: dm-scroll;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;   /* 动画结束后保持终态（左屏外），等 JS 移除 */
+}
+
+/* 猫娘头像：角色弹幕（catgirl）时在文字前显示圆形头像 */
+.dm-avatar {
+    width: var(--dm-avatar-size);
+    height: var(--dm-avatar-size);
+    border-radius: 50%;
+    margin-right: var(--dm-avatar-gap);
+    object-fit: cover;
+    border: 2px solid rgba(255, 255, 255, 0.75);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+    flex-shrink: 0;
+}
+
+@keyframes dm-scroll {
+    to {
+        /* travel 由 JS 以 --dm-travel 注入：= 舞台宽 + item 宽 */
+        transform: translate3d(calc(-1 * var(--dm-travel, 100vw)), 0, 0);
+    }
+}
+
+/* 顶部弹幕：静止居中，淡入淡出驻留后移除（对齐 DanmakuSpire TopDurationSeconds） */
+.dm-item.dm-item-top {
+    left: auto;                     /* 位置由 JS 居中设置 */
+    animation-name: dm-fade;
+    animation-timing-function: ease-in-out;
+}
+@keyframes dm-fade {
+    0% { opacity: 0; }
+    8% { opacity: 1; }
+    85% { opacity: 1; }
+    100% { opacity: 0; }
+}
+
+/* ---- 调试状态条（MVP 用，生产集成隐藏） ---- */
+.dm-debug-bar {
+    position: fixed;
+    top: 6px;
+    right: 6px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.45);
+    color: #eee;
+    font: 12px/1.6 system-ui, "Microsoft YaHei", sans-serif;
+    pointer-events: auto;
+    user-select: none;
+}
+.dm-debug-bar .dm-stat b {
+    color: #7fd4ff;
+    font-weight: 600;
+}
+.dm-debug-bar .dm-demo-btn {
+    border: none;
+    border-radius: 4px;
+    padding: 2px 8px;
+    background: #3aa0ff;
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+}
+.dm-debug-bar .dm-demo-btn.dm-demo-on {
+    background: #e86a3a;
+}
+/* 生产模式：隐藏调试条 */
+.dm-window-host.dm-prod .dm-debug-bar {
+    display: none;
+}
