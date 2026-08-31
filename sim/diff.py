@@ -91,6 +91,8 @@ def from_live_state(combat: dict[str, Any]) -> BattleState:
     pots = run.get("potions") if isinstance(run.get("potions"), list) else []
     local.potions = [str(p.get("potion_id")) for p in pots
                      if isinstance(p, dict) and p.get("potion_id")]
+    rels = run.get("relics") if isinstance(run.get("relics"), list) else []
+    local.relics = [str(r.get("relic_id")) for r in rels if isinstance(r, dict) and r.get("relic_id")]
     enemies: list[EnemyState] = []
     for i, e in enumerate(combat.get("enemies") or []):
         if not isinstance(e, dict):

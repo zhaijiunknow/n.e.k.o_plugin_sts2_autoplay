@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from .cards import card as get_card
-from .effects import apply_card, apply_potion, draw_cards, tick_turn_end, process_orbs_turn_end
+from .effects import (apply_card, apply_potion, apply_relic_hook,
+                      draw_cards, tick_turn_end, process_orbs_turn_end)
 from .monster_ai import predict_next, table
 from .state import BattleState, CardInstance, EnemyState, PlayerState
 
@@ -26,14 +27,21 @@ def new_turn(state: BattleState, player: PlayerState, *, draw: int = 5) -> None:
     player.hand = kept
     player.energy = player.max_energy
     draw_cards(state, player, draw)
+    relic_turn_start(state, player)
 
 
 def start_combat(state: BattleState, player: PlayerState, *, deck: list[CardInstance]) -> None:
-    """开局：INNATE 卡直接进初始手牌，其余进抽牌堆。"""
+    """开局：INNATE 卡直接进初始手牌，其余进抽牌堆；再应用开局遗物（BeforeCombatStart 等）。"""
     innate = [c for c in deck if "INNATE" in {k.upper() for k in (c.keywords or [])}]
     player.hand = innate
     player.draw = [c.card_id for c in deck if c not in innate]
     player.energy = player.max_energy
+    apply_relic_hook(state, player, "BeforeCombatStart")
+
+
+def relic_turn_start(state: BattleState, player: PlayerState) -> None:
+    apply_relic_hook(state, player, "AfterSideTurnStart")
+    apply_relic_hook(state, player, "AfterPlayerTurnStart")
 
 
 def play_hand_index(

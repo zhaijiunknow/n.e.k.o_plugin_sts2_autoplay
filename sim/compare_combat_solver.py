@@ -96,6 +96,7 @@ def main() -> None:
     try:
         from sim import effects as fx
         from sim.potion_data import POTION_TABLE
+        from sim.relic_data import RELIC_TABLE
         from sim import monster_data as md
     except Exception as e:  # 非 sim 包上下文时跳过
         fx = None
@@ -108,9 +109,9 @@ def main() -> None:
                      + ["poison_power"]) if fx else 0
     print(f"\n=== 我们各类别覆盖 vs CombatSolver ===")
     print(f"  卡片    : 我们字段级 {cards_n} 数据 | CombatSolver 处理 {handled.get('Card',0)} 个hook")
-    print(f"  药水    : 我们数据 {len(POTION_TABLE)} | CombatSolver 处理 {handled.get('Potion',0)} (我们尚无 use_potion 动作)")
+    print(f"  药水    : 我们数据 {len(POTION_TABLE)} | CombatSolver 处理 {handled.get('Potion',0)} (use_potion 动作已接; Complex 类未知)")
     print(f"  Power   : 我们效果 {our_powers} 种 | CombatSolver 处理 {handled.get('Power',0)}")
-    print(f"  遗物    : 我们 0 | CombatSolver 处理 {handled.get('Relic',0)}")
+    print(f"  遗物    : 我们数据 {len(RELIC_TABLE)} (hook引擎: combat-start/turn-start/胜利治疗 + 能量/抽牌/增伤 mod) | CombatSolver 处理 {handled.get('Relic',0)}")
     print(f"  球      : 我们 {handled.get('Orb',0)} (基础4类) | CombatSolver {handled.get('Orb',0)}")
     print(f"  怪招    : 我们 {len(md.MOVE_TABLES) if md else 0} | CombatSolver 处理 {handled.get('MonsterMove',0)}")
     print(f"\n=== 药水缺口(CombatSolver 处理、我们 kind 未知/未接) ===")

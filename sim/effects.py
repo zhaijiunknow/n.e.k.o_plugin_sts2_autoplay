@@ -287,6 +287,31 @@ def apply_potion(battle: BattleState, player: PlayerState, potion_id: str, targe
     return True
 
 
+def apply_relic_hook(battle: BattleState, player: PlayerState, hook_name: str) -> None:
+    """按遗物 hook 类型应用战斗被动（数据驱动，relic_data）。
+
+    支持简单 Var 类型：HealVar->治疗, BlockVar->格挡, CardsVar->抽牌, EnergyVar->能量。
+    复杂 hook（召唤/奥术/打牌触发等）留待扩展。
+    """
+    from .relic_data import RELIC_TABLE
+    for rid in player.relics:
+        e = RELIC_TABLE.get(rid)
+        if not e or hook_name not in e.get("hooks", []):
+            continue
+        value = int(e.get("value") or 0)
+        vt = e.get("var_type", "")
+        if not value:
+            continue
+        if "HealVar" in vt:
+            player.hp = min(player.max_hp, player.hp + value)
+        elif "BlockVar" in vt:
+            give_block(player, value)
+        elif "CardsVar" in vt:
+            draw_cards(battle, player, value)
+        elif "EnergyVar" in vt:
+            player.max_energy = max(1, player.max_energy + value)
+
+
 def tick_turn_end(battle: BattleState, combatant: Combatant) -> None:
     """回合末结算所有 game-affecting 的 Power。poison：扣 stacks 血，然后 -1。"""
     poison = combatant.power("poison_power")
