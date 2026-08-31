@@ -14,12 +14,13 @@ POTIONS_DIR = r"D:/NekoClaw/.decompiled/sts2-v0.111.0/MegaCrit.Sts2.Core.Models.
 OUT = os.path.join(os.path.dirname(__file__), "potion_data.py")
 
 _COMMAND_KIND = [
-    re.compile(r"\.Attack\("), re.compile(r"DealDamage|DamageCmd"),
+    re.compile(r"\.Attack\(|DealDamage|DamageCmd"),
     re.compile(r"\.GainBlock\("),
     re.compile(r"\.Heal\("),
     re.compile(r"Apply<(\w+)>"),
     re.compile(r"DrawCards\(|\.Draw\("),
     re.compile(r"\.Summon\("),
+    re.compile(r"GainEnergy\(|EnergyVar"),
 ]
 
 def snake(name: str) -> str:
@@ -38,22 +39,33 @@ def parse(src: str) -> dict | None:
     m = re.search(r"TargetType\s*=>\s*TargetType\.(\w+)", src)
     if m:
         target = m.group(1)
-    # canonical 数值：DynamicVar("X", Val) / BlockVar(Val, ...) / IntVar("X", Val)
+    # canonical 数值：任意 Var 构造，取第一个数值（DamageVar(10m)/EnergyVar(2)/DynamicVar("X",20m)…）
     value = 0
-    m = re.search(r"(?:DynamicVar|BlockVar|IntVar)\("  # heuristic
-        r"(?:\"(\w+)\",\s*)?([\d.]+)m?", src)
-    if m:
-        value = int(float(m.group(2)))
-    # 效果种类：整文件里找效果命令（药水文件小，首个命令即效果；跳过属性/静态定义区）
-    body = src
-    kind = "unknown"
-    for i, rx in enumerate(_COMMAND_KIND):
-        mm = rx.search(body)
-        if mm:
-            kind = ["attack", "attack", "block", "heal", "buff", "draw", "summon"][i]
-            if kind == "buff":
-                kind = f"buff:{snake(mm.group(1))}"
+    var_type = None
+    for m in re.finditer(r"new\s+(\w+Var)\(([^)]*)\)", src):
+        var_type = m.group(1)
+        nums = re.findall(r"(\d+(?:\.\d+)?)m?", m.group(2))
+        if nums:
+            value = int(float(nums[0]))
             break
+    # 效果种类：先用 Var 类型推断，再用命令确认
+    kind = "unknown"
+    if var_type == "DamageVar":
+        kind = "attack"
+    elif var_type == "BlockVar":
+        kind = "block"
+    elif var_type == "EnergyVar":
+        kind = "energy"
+    elif var_type == "HealVar":
+        kind = "heal"
+    else:
+        for i, rx in enumerate(_COMMAND_KIND):
+            mm = rx.search(src)
+            if mm:
+                kind = ["attack", "block", "heal", "buff", "draw", "summon", "energy"][i]
+                if kind == "buff":
+                    kind = f"buff:{snake(mm.group(1))}"
+                break
     return {"id": pid, "usage": usage, "target": target, "value": value, "kind": kind}
 
 def main() -> int:

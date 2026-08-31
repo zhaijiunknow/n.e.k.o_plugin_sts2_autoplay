@@ -278,6 +278,8 @@ def apply_potion(battle: BattleState, player: PlayerState, potion_id: str, targe
         deal_damage_to(battle, en, value, player)
     elif kind == "draw" and value:
         draw_cards(battle, player, max(1, value))
+    elif kind == "energy" and value:
+        player.energy += value
     else:
         return False  # unknown / 0值：先不推荐用
     if potion_id in player.potions:
