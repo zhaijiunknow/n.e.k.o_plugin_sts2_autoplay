@@ -25,6 +25,7 @@ class CardInstance:
     hp_loss: int = 0
     powers_applied: list[tuple[str, int]] = field(default_factory=list)  # [(power_id, amount)]
     keywords: list[str] = field(default_factory=list)   # EXHAUST / RETAIN / INNATE / ETHEREAL / ETERNAL / UNPLAYABLE
+    orb_action: list[tuple[str, str, int]] = field(default_factory=list)  # (channel|evoke, orb_id, times)
 
 
 @dataclass
@@ -48,6 +49,13 @@ class Combatant:
 
 
 @dataclass
+class Orb:
+    orb_id: str = "LIGHTNING"   # LIGHTNING / FROST / PLASMA / DARK
+    passive: int = 0            # 被动值
+    evoke: int = 0              # 激发值
+
+
+@dataclass
 class PlayerState(Combatant):
     energy: int = 0
     max_energy: int = 3
@@ -55,6 +63,9 @@ class PlayerState(Combatant):
     draw: list[str] = field(default_factory=list)       # card_id 队列
     discard: list[str] = field(default_factory=list)
     exhausted: list[str] = field(default_factory=list)
+    orbs: list[Orb] = field(default_factory=list)       # 有序球队列，index0=front
+    orb_capacity: int = 0
+    focus: int = 0
 
     def clone(self) -> "PlayerState":
         return PlayerState(
@@ -62,6 +73,7 @@ class PlayerState(Combatant):
             powers=dict(self.powers), energy=self.energy, max_energy=self.max_energy,
             hand=list(self.hand), draw=list(self.draw), discard=list(self.discard),
             exhausted=list(self.exhausted),
+            orbs=list(self.orbs), orb_capacity=self.orb_capacity, focus=self.focus,
         )
 
 

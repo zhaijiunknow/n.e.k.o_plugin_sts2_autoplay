@@ -44,9 +44,19 @@ def _normalize_powers(powers_applied: Any) -> list[tuple[str, int]]:
     return out
 
 
+# 球动作卡（缺陷）：cards.json 没有显式球字段，按卡 id 特判。action: channel|evoke
+_ORB_CARDS: dict[str, list[tuple[str, str, int]]] = {
+    "ZAP": [("channel", "LIGHTNING", 1)],
+    "DUALCAST": [("evoke", "", 2)],
+    "COLD_SNAP": [("channel", "FROST", 1)],
+    "DISCHARGE": [("evoke", "", 0)],
+}
+
+
 def card_from_json(entry: dict[str, Any]) -> CardInstance:
+    cid = str(entry.get("id") or "")
     return CardInstance(
-        card_id=str(entry.get("id") or ""),
+        card_id=cid,
         name=str(entry.get("name") or ""),
         cost=int(entry.get("cost") or 0),
         card_type=str(entry.get("type") or ""),
@@ -58,6 +68,8 @@ def card_from_json(entry: dict[str, Any]) -> CardInstance:
         energy_gain=int(entry.get("energy_gain") or 0),
         hp_loss=int(entry.get("hp_loss") or 0),
         powers_applied=_normalize_powers(entry.get("powers_applied")),
+        keywords=list(entry.get("keywords") or []),
+        orb_action=list(_ORB_CARDS.get(cid) or []),
     )
 
 

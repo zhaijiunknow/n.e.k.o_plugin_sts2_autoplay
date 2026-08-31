@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .cards import card as get_card
-from .effects import apply_card, draw_cards, tick_turn_end
+from .effects import apply_card, draw_cards, tick_turn_end, process_orbs_turn_end
 from .monster_ai import predict_next, table
 from .state import BattleState, CardInstance, EnemyState, PlayerState
 
@@ -56,6 +56,7 @@ def play_hand_index(
 def end_turn(state: BattleState, player: PlayerState) -> None:
     """回合末：tick 玩家 Power（中毒），敌人按当前意图行动，然后用 follow-up 表预测下一招。"""
     tick_turn_end(state, player)
+    process_orbs_turn_end(state, player)   # 玩家回合末：球被动+激发前端
     for enemy in state.enemies:
         if not enemy.alive:
             continue

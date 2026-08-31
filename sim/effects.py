@@ -150,6 +150,14 @@ EFFECT_HANDLERS: dict[str, EffectHandler] = {
 }
 
 
+ORB_BASE: dict[str, tuple[int, int]] = {
+    "LIGHTNING": (3, 8),
+    "FROST": (2, 5),
+    "PLASMA": (0, 2),
+    "DARK": (0, 6),
+}
+
+
 def apply_card(
     battle: BattleState,
     player: PlayerState,
@@ -164,6 +172,12 @@ def apply_card(
         value = getattr(card, field, None)
         if value:
             handler(battle, player, card, value, target)
+    for action, orb_id, times in (card.orb_action or []):
+        if action == "channel":
+            base = ORB_BASE.get(orb_id, (0, 0))
+            channel_orb(player, orb_id, passive=base[0], evoke=base[1])
+        elif action == "evoke":
+            evoke_orb(battle, player, times=times)
     # 关键字决定去向：EXHAUST→消耗堆；ETERNAL→回手；否则→弃牌堆
     kws = {k.upper() for k in (card.keywords or [])}
     if "EXHAUST" in kws:
@@ -177,6 +191,51 @@ def apply_card(
 # ---------------------------------------------------------------------------
 # Power 回合行为（回合末 tick 等）
 # ---------------------------------------------------------------------------
+
+from .state import Orb
+
+
+def channel_orb(player: PlayerState, orb_id: str, *, passive: int = 0, evoke: int = 0) -> None:
+    """充能球：加入队列（不超槽位）。"""
+    orb = Orb(orb_id=orb_id, passive=passive, evoke=evoke)
+    if len(player.orbs) < player.orb_capacity:
+        player.orbs.append(orb)
+
+
+def evoke_orb(battle: BattleState, player: PlayerState, *, times: int = 1) -> None:
+    """激发最前端的球（弹出），并按其效果结算。"""
+    for _ in range(max(1, times)):
+        if not player.orbs:
+            return
+        orb = player.orbs.pop(0)
+        value = orb.evoke + player.focus
+        if orb.orb_id == "LIGHTNING":
+            for enemy in battle.enemies:
+                if enemy.alive:
+                    deal_damage_to(battle, enemy, value, player)
+        elif orb.orb_id == "FROST":
+            give_block(player, value)
+        elif orb.orb_id == "PLASMA":
+            player.energy += value
+        elif orb.orb_id == "DARK":
+            target = next((e for e in battle.enemies if e.alive), None)
+            if target:
+                deal_damage_to(battle, target, value, player)
+
+
+def process_orbs_turn_end(battle: BattleState, player: PlayerState) -> None:
+    """回合末：每个球触发一次被动，然后激发最前端球。"""
+    for orb in list(player.orbs):
+        value = orb.passive + player.focus
+        if orb.orb_id == "LIGHTNING":
+            for enemy in battle.enemies:
+                if enemy.alive:
+                    deal_damage_to(battle, enemy, value, player)
+        elif orb.orb_id == "FROST":
+            give_block(player, value)
+    if player.orbs:
+        evoke_orb(battle, player, times=1)
+
 
 def tick_turn_end(battle: BattleState, combatant: Combatant) -> None:
     """回合末结算所有 game-affecting 的 Power。poison：扣 stacks 血，然后 -1。"""
