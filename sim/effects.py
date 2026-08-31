@@ -198,6 +198,7 @@ ORB_BASE: dict[str, tuple[int, int]] = {
     "FROST": (2, 5),
     "PLASMA": (0, 2),
     "DARK": (0, 6),
+    "GLASS": (4, 8),   # 玻璃球：被动打全体, 激发=被动×2
 }
 
 
@@ -253,7 +254,7 @@ def evoke_orb(battle: BattleState, player: PlayerState, *, times: int = 1) -> No
             return
         orb = player.orbs.pop(0)
         value = orb.evoke + player.focus
-        if orb.orb_id == "LIGHTNING":
+        if orb.orb_id in ("LIGHTNING", "GLASS"):
             for enemy in battle.enemies:
                 if enemy.alive:
                     deal_damage_to(battle, enemy, value, player)
@@ -271,7 +272,7 @@ def process_orbs_turn_end(battle: BattleState, player: PlayerState) -> None:
     """回合末：每个球触发一次被动，然后激发最前端球。"""
     for orb in list(player.orbs):
         value = orb.passive + player.focus
-        if orb.orb_id == "LIGHTNING":
+        if orb.orb_id in ("LIGHTNING", "GLASS"):
             for enemy in battle.enemies:
                 if enemy.alive:
                     deal_damage_to(battle, enemy, value, player)
