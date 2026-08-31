@@ -44,9 +44,8 @@ def parse(src: str) -> dict | None:
         r"(?:\"(\w+)\",\s*)?([\d.]+)m?", src)
     if m:
         value = int(float(m.group(2)))
-    # 效果种类：apply 方法体
-    buf = m2 = re.search(r"(?:public|protected|private)[\s\S]*?MethodName\.Apply[\s\S]*?\{(.*?)\n\s*\}", src, re.S)
-    body = m2.group(1) if m2 else src
+    # 效果种类：整文件里找效果命令（药水文件小，首个命令即效果；跳过属性/静态定义区）
+    body = src
     kind = "unknown"
     for i, rx in enumerate(_COMMAND_KIND):
         mm = rx.search(body)

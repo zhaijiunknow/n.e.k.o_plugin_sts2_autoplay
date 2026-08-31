@@ -66,6 +66,7 @@ class PlayerState(Combatant):
     orbs: list[Orb] = field(default_factory=list)       # 有序球队列，index0=front
     orb_capacity: int = 0
     focus: int = 0
+    potions: list[str] = field(default_factory=list)      # 持有的药水 id（战斗内可用）
 
     def clone(self) -> "PlayerState":
         return PlayerState(
@@ -74,6 +75,7 @@ class PlayerState(Combatant):
             hand=list(self.hand), draw=list(self.draw), discard=list(self.discard),
             exhausted=list(self.exhausted),
             orbs=list(self.orbs), orb_capacity=self.orb_capacity, focus=self.focus,
+            potions=list(self.potions),
         )
 
 

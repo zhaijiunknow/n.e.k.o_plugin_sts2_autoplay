@@ -256,6 +256,35 @@ def process_orbs_turn_end(battle: BattleState, player: PlayerState) -> None:
         evoke_orb(battle, player, times=1)
 
 
+def apply_potion(battle: BattleState, player: PlayerState, potion_id: str, target: int | None = None) -> bool:
+    """按药水效果表结算一瓶药水；成功返回 True 并消耗。kind 未知/数值为0 的当作不可用。"""
+    from .potion_data import POTION_TABLE
+    entry = POTION_TABLE.get(potion_id)
+    if not entry:
+        return False
+    kind = entry.get("kind", "unknown")
+    value = int(entry.get("value") or 0)
+    if kind == "block" and value:
+        give_block(player, value)
+    elif kind == "heal" and value:
+        player.hp = min(player.max_hp, player.hp + int(player.max_hp * value / 100))
+    elif kind.startswith("buff:") and value:
+        player.add_power(kind.split(":", 1)[1], value)
+    elif kind == "attack" and value:
+        en = battle.enemy_by_index(target) if isinstance(target, int) else \
+            next((e for e in battle.enemies if e.alive), None)
+        if en is None:
+            return False
+        deal_damage_to(battle, en, value, player)
+    elif kind == "draw" and value:
+        draw_cards(battle, player, max(1, value))
+    else:
+        return False  # unknown / 0值：先不推荐用
+    if potion_id in player.potions:
+        player.potions.remove(potion_id)
+    return True
+
+
 def tick_turn_end(battle: BattleState, combatant: Combatant) -> None:
     """回合末结算所有 game-affecting 的 Power。poison：扣 stacks 血，然后 -1。"""
     poison = combatant.power("poison_power")

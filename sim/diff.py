@@ -86,6 +86,11 @@ def from_live_state(combat: dict[str, Any]) -> BattleState:
             )
             partners.append(others)
     players = [local] + partners
+    # 药水：从 run.potions[]（occupied 的有 potion_id）读入本地玩家
+    run = combat.get("run") if isinstance(combat.get("run"), dict) else {}
+    pots = run.get("potions") if isinstance(run.get("potions"), list) else []
+    local.potions = [str(p.get("potion_id")) for p in pots
+                     if isinstance(p, dict) and p.get("potion_id")]
     enemies: list[EnemyState] = []
     for i, e in enumerate(combat.get("enemies") or []):
         if not isinstance(e, dict):

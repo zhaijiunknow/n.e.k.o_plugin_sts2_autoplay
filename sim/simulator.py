@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .cards import card as get_card
-from .effects import apply_card, draw_cards, tick_turn_end, process_orbs_turn_end
+from .effects import apply_card, apply_potion, draw_cards, tick_turn_end, process_orbs_turn_end
 from .monster_ai import predict_next, table
 from .state import BattleState, CardInstance, EnemyState, PlayerState
 
@@ -51,6 +51,14 @@ def play_hand_index(
     apply_card(state, player, card, target)
     player.hand.pop(hand_index)
     return True
+
+
+def use_potion(state: BattleState, player: PlayerState, potion_index: int, target: int | None = None) -> bool:
+    """按玩家药水清单下标用一瓶。成功返回 True。"""
+    if potion_index < 0 or potion_index >= len(player.potions):
+        return False
+    pid = player.potions[potion_index]
+    return apply_potion(state, player, pid, target)
 
 
 def end_turn(state: BattleState, player: PlayerState) -> None:

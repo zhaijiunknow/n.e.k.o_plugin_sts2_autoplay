@@ -14,7 +14,22 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .state import BattleState, PlayerState
-from .simulator import play_hand_index, end_turn, new_turn
+from .simulator import play_hand_index, end_turn, new_turn, use_potion
+
+
+def _usable_potion(pid: str) -> bool:
+    """战斗内可用+有数值效果(kind 已知且 value>0)的药水才进搜索。"""
+    from .potion_data import POTION_TABLE
+    e = POTION_TABLE.get(pid)
+    if not e:
+        return False
+    if e.get("usage") != "CombatOnly":
+        return False
+    if not e.get("value"):
+        return False
+    if str(e.get("kind", "")).startswith("unknown") or not e.get("kind"):
+        return False
+    return True
 
 
 @dataclass
@@ -96,6 +111,19 @@ def search(
                     break
                 nextm.sort(key=lambda n: n.score, reverse=True)
                 mid = nextm[:beam_width]
+            # 药水动作（CombatOnly + 有数值效果）
+            potion_nodes = []
+            for m in mid:
+                p = m.state.players[0]
+                for pi, pid in enumerate(p.potions):
+                    if not _usable_potion(pid):
+                        continue
+                    c = m.state.clone()
+                    if use_potion(c, c.players[0], pi, None):
+                        potion_nodes.append(SearchNode(c, m.line + [("POTION", pid, None)], _score(c)))
+            if potion_nodes:
+                potion_nodes.sort(key=lambda n: n.score, reverse=True)
+                mid = (mid + potion_nodes)[:beam_width]
             # --- 每个回合内状态都"结束回合" → 进入下一回合 ---
             for m in mid:
                 e = m.state.clone()
