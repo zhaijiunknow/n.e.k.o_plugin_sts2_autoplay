@@ -116,7 +116,8 @@ def main() -> None:
     print(f"  Power   : 我们行为 {our_powers}/{len(POWER_TABLE)} 数据 | CombatSolver 处理 {handled.get('Power',0)}")
     print(f"  遗物    : 我们数据 {len(RELIC_TABLE)} (hook引擎: combat-start/turn-start/胜利治疗 + 能量/抽牌/增伤 mod) | CombatSolver 处理 {handled.get('Relic',0)}")
     print(f"  球      : 我们 {handled.get('Orb',0)} (基础4类) | CombatSolver {handled.get('Orb',0)}")
-    print(f"  怪招    : 我们 {len(md.MOVE_TABLES) if md else 0} | CombatSolver 处理 {handled.get('MonsterMove',0)}")
+    _our_moves = sum(len(v) for v in md.MOVE_TABLES.values()) if md else 0
+    print(f"  怪招    : 我们 {_our_moves} 招式({len(md.MOVE_TABLES) if md else 0}只怪) | CombatSolver 处理 {handled.get('MonsterMove',0)} hook")
     print(f"\n=== 药水缺口(CombatSolver 处理、我们 kind 未知/未接) ===")
     unknown = [k for k, v in POTION_TABLE.items() if v["kind"] == "unknown"]
     print(f"  共 {len(unknown)} 个药水效果 kind=unknown(需补): {unknown[:15]}")
