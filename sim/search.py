@@ -47,6 +47,9 @@ def _playable_moves(state: BattleState, player: PlayerState) -> list[tuple[int, 
         if tgt in ("anyenemy", "allenemies"):
             for cur in range(len(state.enemies)):
                 moves.append((i, cur))
+        elif tgt in ("anyally", "anyplayer", "players", "ally") and len(state.players) > 1:
+            # co-op：对队友目标，target=None，靠 card.target 在 handler 里解析到队友
+            moves.append((i, None))
         else:
             moves.append((i, None))
     return moves

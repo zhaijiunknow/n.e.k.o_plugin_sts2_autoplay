@@ -99,6 +99,22 @@ def draw_cards(state: BattleState, player: PlayerState, n: int) -> None:
 EffectHandler = Any  # (battle, player, card, value, target) -> None
 
 
+def _partner(battle: BattleState, player: PlayerState) -> PlayerState | None:
+    """co-op：队友（非玩家本人）。单玩家时无。"""
+    for p in battle.players:
+        if p.id != player.id and p != player:
+            return p
+    return None
+
+
+def _ally_target(battle: BattleState, player: PlayerState, target: Any, card: CardInstance) -> Combatant | None:
+    """解析对"盟友/玩家"目标的效果落点（AnyAlly/AnyPlayer → 队友）。"""
+    t = (card.target or "").lower()
+    if t in ("anyally", "anyplayer", "players", "ally"):
+        return _partner(battle, player) or player
+    return None
+
+
 def _h_damage(battle, player, card, value, target):
     base = int(value or card.damage)
     target_c = battle.enemy_by_index(target) if isinstance(target, int) else None
@@ -128,14 +144,16 @@ def _h_hp_loss(battle, player, card, value, target):
 def _h_power(battle, player, card, value, target):
     # value = [(power_id, amount)]；target 决定施加给谁
     for pid, amount in (value or card.powers_applied):
-        # target: None/Self=player, int=敌方下标, "ally"=另一个玩家
-        if target == "self" or target is None:
+        if (card.target or "").lower() in ("anyally", "anyplayer", "ally", "players"):
+            ally = _partner(battle, player)
+            if ally:
+                ally.add_power(pid, amount)
+        elif target == "self" or target is None:
             player.add_power(pid, amount)
         elif isinstance(target, int):
             en = battle.enemy_by_index(target)
             if en:
                 en.add_power(pid, amount)
-        # "ally" 略（co-op 扩展）
 
 
 # 字段 -> handler（新卡只要用这些字段，就零代码）
@@ -173,11 +191,12 @@ def apply_card(
         if value:
             handler(battle, player, card, value, target)
     for action, orb_id, times in (card.orb_action or []):
+        ally = _ally_target(battle, player, target, card)
         if action == "channel":
             base = ORB_BASE.get(orb_id, (0, 0))
-            channel_orb(player, orb_id, passive=base[0], evoke=base[1])
+            channel_orb(ally or player, orb_id, passive=base[0], evoke=base[1])
         elif action == "evoke":
-            evoke_orb(battle, player, times=times)
+            evoke_orb(battle, ally or player, times=times)
     # 关键字决定去向：EXHAUST→消耗堆；ETERNAL→回手；否则→弃牌堆
     kws = {k.upper() for k in (card.keywords or [])}
     if "EXHAUST" in kws:

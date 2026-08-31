@@ -57,18 +57,35 @@ def card_instance_from_json(card: dict[str, Any]) -> CardInstance:
 
 
 def from_live_state(combat: dict[str, Any]) -> BattleState:
-    player_json = combat.get("player") or {}
-    player = PlayerState(
-        id="p0",
-        hp=int(player_json.get("current_hp") or player_json.get("hp") or 0),
-        max_hp=int(player_json.get("max_hp") or 1),
-        block=int(player_json.get("block") or 0),
-        energy=int(player_json.get("energy") or 0),
+    # 本地玩家：读 combat.player（有手牌/能量/球）+ combat.players 里的 HP/格挡。
+    players_list = combat.get("players") or []
+    local_json = combat.get("player") or {}
+    local_id = str(local_json.get("id") or local_json.get("player_id") or "p0")
+    local = PlayerState(
+        id=local_id,
+        hp=int(local_json.get("current_hp") or local_json.get("hp") or 0),
+        max_hp=int(local_json.get("max_hp") or 1),
+        block=int(local_json.get("block") or 0),
+        energy=int(local_json.get("energy") or 0),
         max_energy=3,
         hand=[card_instance_from_json(c) for c in (combat.get("hand") or []) if isinstance(c, dict)],
         draw=[str(c.get("card_id")) for c in (combat.get("draw_cards") or []) if isinstance(c, dict)],
         discard=[],
     )
+    # 其它玩家（co-op 伙伴）：只有 HP/格挡/能量，无手牌（/state 不暴露对方手牌）。
+    partners: list[PlayerState] = []
+    for i, p in enumerate(players_list):
+        if isinstance(p, dict) and str(p.get("player_id") or p.get("id")) != local_id:
+            others = PlayerState(
+                id=str(p.get("player_id") or p.get("id") or f"p{i+1}"),
+                hp=int(p.get("current_hp") or p.get("hp") or 0),
+                max_hp=int(p.get("max_hp") or 1),
+                block=int(p.get("block") or 0),
+                energy=int(p.get("energy") or 0),
+                max_energy=3,
+            )
+            partners.append(others)
+    players = [local] + partners
     enemies: list[EnemyState] = []
     for i, e in enumerate(combat.get("enemies") or []):
         if not isinstance(e, dict):
@@ -86,7 +103,8 @@ def from_live_state(combat: dict[str, Any]) -> BattleState:
             move_id=str(e.get("intent") or e.get("move_id") or ""),
             enemy_id=str(e.get("enemy_id") or ""),
         ))
-    return BattleState(players=[player], enemies=enemies)
+    return BattleState(players=players, enemies=enemies,
+                       ctx={"local_id": local_id, "players": list(players), "enemies": list(enemies)})
 
 
 __all__ = ["from_live_state"]
