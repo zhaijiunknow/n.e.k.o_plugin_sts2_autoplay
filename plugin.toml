@@ -51,6 +51,25 @@ keywords = ["slay the spire", "杀戮尖塔", "陪玩", "弹幕", "autoplay", "c
 version = "0.1.1"
 entry = "plugin.plugins.sts2_autoplay:STS2AutoplayPlugin"
 
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "main"
+title = "尖塔2陪玩"
+entry = "static/index.html"
+context = "sts2_autoplay"
+permissions = [
+    "state:read",
+    "action:call",
+]
+
+[[plugin.ui.guide]]
+id = "quickstart"
+title = "快速开始"
+entry = "doc/README.md"
+permissions = ["state:read"]
+
 [plugin.sdk]
 recommended = ">=0.1.0,<0.2.0"
 supported = ">=0.1.0,<0.3.0"

@@ -1,0 +1,11 @@
+{
+  "id": "neko_comm",
+  "pck_name": "neko_comm",
+  "name": "NEKO通信",
+  "author": "N.E.K.O Team",
+  "description": "NEKO 陪玩通信桥：将 Slay the Spire 2 局面/操作与 NEKO 客户端互通（co-op / 陪玩）。",
+  "version": "0.0.1",
+  "has_pck": true,
+  "has_dll": true,
+  "dependencies": []
+}
