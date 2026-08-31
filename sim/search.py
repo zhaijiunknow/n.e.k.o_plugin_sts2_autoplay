@@ -24,15 +24,26 @@ class SearchNode:
     score: float = 0.0
 
 
+# CombatSolver SolverWeights 的评分口径（映射到我们量级）：
+#   Hp 值=30k, EnemyHp 值=10k → 保自己的HP是打敌人HP的 3 倍重要（偏防守）
+#   死亡/胜利 是巨量奖罚；SoldHp 卖血是惩罚。
+HP_VALUE = 3.0        # 每点自己HP的加权损失
+ENEMY_HP_VALUE = 1.0  # 每点敌人HP的加权收益
+VICTORY_BONUS = 1e9
+DEATH_PENALTY = -1e12
+
+
 def _score(state: BattleState) -> float:
-    """落点评分（CombatSolver 式）：斩杀优先，然后掉血/战损，最后剩HP。"""
+    """落点评分（用 CombatSolver 权重口径）：胜利/死亡巨大，保HP(3x)>打敌人HP，格挡+。"""
+    player = state.players[0]
+    if player.hp <= 0:
+        return DEATH_PENALTY
     total_enemy = sum(e.hp for e in state.enemies if e.alive)
     if total_enemy == 0:
-        return 1e6
-    player = state.players[0]
-    progress = sum(e.max_hp - e.hp for e in state.enemies) / max(1, sum(e.max_hp for e in state.enemies))
+        return VICTORY_BONUS
+    enemy_damage = sum(e.max_hp - e.hp for e in state.enemies)   # 已打掉的敌人HP
     hp_lost = player.max_hp - player.hp
-    return progress * 20.0 - hp_lost * 3.0 + player.block * 0.5
+    return enemy_damage * ENEMY_HP_VALUE - hp_lost * HP_VALUE + player.block * 0.5
 
 
 def _playable_moves(state: BattleState, player: PlayerState) -> list[tuple[int, int | None]]:
