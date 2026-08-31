@@ -1149,6 +1149,19 @@ internal static class GameStateService
         return scene != null && GetMultiplayerTestLobby(scene) == null;
     }
 
+    /// <summary>
+    /// R2 real menu: whether the live multiplayer submenu can be opened from the main menu.
+    /// </summary>
+    public static bool CanOpenMultiplayerMenu(IScreenContext? currentScreen)
+    {
+        return currentScreen is NMainMenu;
+    }
+
+    public static bool IsMultiplayerSubmenu(IScreenContext? currentScreen)
+    {
+        return currentScreen is NMultiplayerSubmenu;
+    }
+
     public static bool CanReadyMultiplayerLobby(IScreenContext? currentScreen)
     {
         var scene = GetMultiplayerTestScene();
@@ -2207,6 +2220,17 @@ internal static class GameStateService
         if (CanHostMultiplayerLobby(currentScreen))
         {
             names.Add("host_multiplayer_lobby");
+        }
+
+        if (CanOpenMultiplayerMenu(currentScreen))
+        {
+            names.Add("open_multiplayer_menu");
+        }
+
+        if (IsMultiplayerSubmenu(currentScreen))
+        {
+            names.Add("start_multiplayer_host");
+            names.Add("join_multiplayer_direct");
         }
 
         if (CanJoinMultiplayerLobby(currentScreen))

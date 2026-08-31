@@ -5,6 +5,7 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
+using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Entities.RestSite;
@@ -133,6 +134,9 @@ internal static class GameActionService
             "embark" => ExecuteEmbarkAsync(),
             "unready" => ExecuteUnreadyAsync(),
             "host_multiplayer_lobby" => ExecuteHostMultiplayerLobbyAsync(),
+            "open_multiplayer_menu" => ExecuteOpenMultiplayerMenuAsync(),
+            "start_multiplayer_host" => ExecuteStartMultiplayerHostAsync(),
+            "join_multiplayer_direct" => ExecuteJoinMultiplayerDirectAsync(),
             "join_multiplayer_lobby" => ExecuteJoinMultiplayerLobbyAsync(),
             "ready_multiplayer_lobby" => ExecuteReadyMultiplayerLobbyAsync(),
             "disconnect_multiplayer_lobby" => ExecuteDisconnectMultiplayerLobbyAsync(),
@@ -3321,6 +3325,134 @@ internal static class GameActionService
             message = stable ? "Action completed." : "Action queued but state is still transitioning.",
             state = GameStateService.BuildStatePayload()
         };
+    }
+
+    private static async Task<ActionResponsePayload> ExecuteOpenMultiplayerMenuAsync()
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+
+        if (currentScreen is not NMainMenu mainMenu || !GameStateService.CanOpenMultiplayerMenu(currentScreen))
+        {
+            throw new ApiException(409, "invalid_action", "Action is not available in the current state.", new
+            {
+                action = "open_multiplayer_menu",
+                screen
+            });
+        }
+
+        mainMenu.SubmenuStack.PushSubmenuType<NMultiplayerSubmenu>();
+        var stable = await WaitForMainMenuSubmenuOpenAsync<NMultiplayerSubmenu>(mainMenu, TimeSpan.FromSeconds(10));
+
+        return new ActionResponsePayload
+        {
+            action = "open_multiplayer_menu",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable ? "Action completed." : "Action queued but state is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
+    private static async Task<ActionResponsePayload> ExecuteStartMultiplayerHostAsync()
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+
+        if (currentScreen is not NMultiplayerSubmenu submenu)
+        {
+            throw new ApiException(409, "invalid_action", "Action is not available in the current state.", new
+            {
+                action = "start_multiplayer_host",
+                screen
+            });
+        }
+        var submenuStack = GameStateService.GetMainMenuSubmenuStack(submenu)
+            ?? throw new ApiException(503, "state_unavailable", "Main menu submenu stack is unavailable.", new
+            {
+                action = "start_multiplayer_host",
+                screen
+            }, retryable: true);
+
+        // R2 same-machine direct connect: force a plain ENet host on 33771 (bypass the Steam-host
+        // decision) so the catgirl client can connect directly to 127.0.0.1:33771.
+        var netService = new NetHostGameService(PeerVersionInfo.LocalDefault());
+        var netError = netService.StartENetHost(33771, 4);
+        if (netError.HasValue)
+        {
+            throw new ApiException(409, "invalid_action", $"Failed to start ENet host: {netError}", new
+            {
+                action = "start_multiplayer_host",
+                screen
+            });
+        }
+
+        var characterSelect = submenuStack.GetSubmenuType<NCharacterSelectScreen>();
+        characterSelect.InitializeMultiplayerAsHost(netService, 4);
+        submenuStack.Push(characterSelect);
+
+        var stable = await WaitForCharacterSelectOpenAsync(TimeSpan.FromSeconds(10));
+
+        return new ActionResponsePayload
+        {
+            action = "start_multiplayer_host",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable ? "Action completed." : "Action queued but state is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
+    private static async Task<ActionResponsePayload> ExecuteJoinMultiplayerDirectAsync()
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+
+        if (currentScreen is not NMultiplayerSubmenu submenu)
+        {
+            throw new ApiException(409, "invalid_action", "Action is not available in the current state.", new
+            {
+                action = "join_multiplayer_direct",
+                screen
+            });
+        }
+        var submenuStack = GameStateService.GetMainMenuSubmenuStack(submenu)
+            ?? throw new ApiException(503, "state_unavailable", "Main menu submenu stack is unavailable.", new
+            {
+                action = "join_multiplayer_direct",
+                screen
+            }, retryable: true);
+
+        var netId = (ulong)global::System.Environment.ProcessId;
+        var initializer = new ENetClientConnectionInitializer(netId, "127.0.0.1", 33771);
+        var netService = new NetClientGameService(PeerVersionInfo.LocalDefault());
+        var joinFlow = new JoinFlow(netService);
+        var joinResult = await joinFlow.Begin(initializer, NGame.Instance?.GetTree());
+
+        if (joinResult.sessionState.GetValueOrDefault() == RunSessionState.InLobby && joinResult.joinResponse.HasValue)
+        {
+            var characterSelect = submenuStack.GetSubmenuType<NCharacterSelectScreen>();
+            characterSelect.InitializeMultiplayerAsClient(joinFlow.NetService, joinResult.joinResponse.Value);
+            submenuStack.Push(characterSelect);
+
+            var stable = await WaitForCharacterSelectOpenAsync(TimeSpan.FromSeconds(10));
+
+            return new ActionResponsePayload
+            {
+                action = "join_multiplayer_direct",
+                status = stable ? "completed" : "pending",
+                stable = stable,
+                message = stable ? "Action completed." : "Action queued but state is still transitioning.",
+                state = GameStateService.BuildStatePayload()
+            };
+        }
+
+        throw new ApiException(409, "invalid_action", "Failed to join the direct-connect lobby.", new
+        {
+            action = "join_multiplayer_direct",
+            session_state = joinResult.sessionState?.ToString(),
+            screen
+        });
     }
 
     private static async Task<ActionResponsePayload> ExecuteHostMultiplayerLobbyAsync()
