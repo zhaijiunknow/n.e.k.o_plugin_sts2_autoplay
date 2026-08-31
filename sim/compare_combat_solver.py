@@ -92,10 +92,30 @@ def main() -> None:
     print(f"\n共 {len(gaps)} 只真正缺口（手写表未覆盖）：{gaps}")
     print(f"\n共 {len(gaps)} 只因'模型无格挡/buff 但 CombatSolver 有'可能缺：{gaps[:20]}")
 
-    # 6) 我们数据规模
+    # 6) 我们数据规模 vs CombatSolver 覆盖（各类别")
+    try:
+        from sim import effects as fx
+        from sim.potion_data import POTION_TABLE
+        from sim import monster_data as md
+    except Exception as e:  # 非 sim 包上下文时跳过
+        fx = None
+        POTION_TABLE = {}
+        md = None
     with open(_CARDS, encoding="utf-8") as f: cards_n = len(json.load(f))
     with open(_POWERS, encoding="utf-8") as f: powers_n = len(json.load(f))
-    print(f"\n=== 我们数据规模 ===\n  cards={cards_n}  powers={powers_n}  monster_moves_tables={len(OUR_TABLES)}")
+    our_powers = len([k for k in (fx.ATTACK_MOD_POWERS if fx else {})]
+                     + [k for k in (fx.DEFENSE_MOD_POWERS if fx else {})]
+                     + ["poison_power"]) if fx else 0
+    print(f"\n=== 我们各类别覆盖 vs CombatSolver ===")
+    print(f"  卡片    : 我们字段级 {cards_n} 数据 | CombatSolver 处理 {handled.get('Card',0)} 个hook")
+    print(f"  药水    : 我们数据 {len(POTION_TABLE)} | CombatSolver 处理 {handled.get('Potion',0)} (我们尚无 use_potion 动作)")
+    print(f"  Power   : 我们效果 {our_powers} 种 | CombatSolver 处理 {handled.get('Power',0)}")
+    print(f"  遗物    : 我们 0 | CombatSolver 处理 {handled.get('Relic',0)}")
+    print(f"  球      : 我们 {handled.get('Orb',0)} (基础4类) | CombatSolver {handled.get('Orb',0)}")
+    print(f"  怪招    : 我们 {len(md.MOVE_TABLES) if md else 0} | CombatSolver 处理 {handled.get('MonsterMove',0)}")
+    print(f"\n=== 药水缺口(CombatSolver 处理、我们 kind 未知/未接) ===")
+    unknown = [k for k, v in POTION_TABLE.items() if v["kind"] == "unknown"]
+    print(f"  共 {len(unknown)} 个药水效果 kind=unknown(需补): {unknown[:15]}")
 
 
 if __name__ == "__main__":
