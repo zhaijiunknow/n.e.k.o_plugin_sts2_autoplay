@@ -83,6 +83,31 @@ def give_block(player: PlayerState, amount: int) -> None:
     player.block += amount + player.power("dexterity_power")
 
 
+def player_receive_damage(battle: BattleState, player: PlayerState, amount: int) -> None:
+    """玩家受到伤害：Buffer 免伤一次, Intangible 封顶1, 再有格挡抵消。"""
+    if player.power("buffer_power") > 0:
+        player.powers["buffer_power"] = player.power("buffer_power") - 1
+        return
+    if player.power("intangible_power") > 0:
+        amount = min(amount, 1)
+    if player.block > 0:
+        absorbed = min(player.block, amount)
+        player.block -= absorbed
+        amount -= absorbed
+    if amount > 0:
+        player.hp = max(0, player.hp - amount)
+
+
+def power_turn_start(battle: BattleState, player: PlayerState) -> None:
+    """回合开始 Power：Ritual 力 += 层数；PlatedArmor 格挡 += 层数。"""
+    ritual = player.power("ritual_power")
+    if ritual:
+        player.add_power("strength_power", ritual)
+    plated = player.power("plated_armor_power")
+    if plated:
+        give_block(player, plated)
+
+
 def draw_cards(state: BattleState, player: PlayerState, n: int) -> None:
     for _ in range(n):
         if not player.draw:
@@ -318,7 +343,9 @@ def tick_turn_end(battle: BattleState, combatant: Combatant) -> None:
     if poison > 0:
         combatant.hp = max(0, combatant.hp - poison)
         combatant.powers["poison_power"] = poison - 1
-    # 后续 Power（如 每回合+力量的 RITUAL 等）在此扩展
+    regen = combatant.power("regen_power")
+    if regen > 0:
+        combatant.hp = min(combatant.max_hp, combatant.hp + regen)
     combatant.powers.setdefault("_ticked", 0)
 
 

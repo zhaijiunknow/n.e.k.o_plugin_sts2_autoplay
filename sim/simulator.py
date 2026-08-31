@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from .cards import card as get_card
 from .effects import (apply_card, apply_potion, apply_relic_hook,
-                      draw_cards, tick_turn_end, process_orbs_turn_end)
+                      draw_cards, tick_turn_end, process_orbs_turn_end,
+                      player_receive_damage, power_turn_start)
 from .monster_ai import predict_next, table
 from .state import BattleState, CardInstance, EnemyState, PlayerState
 
@@ -28,6 +29,7 @@ def new_turn(state: BattleState, player: PlayerState, *, draw: int = 5) -> None:
     player.energy = player.max_energy
     draw_cards(state, player, draw)
     relic_turn_start(state, player)
+    power_turn_start(state, player)
 
 
 def start_combat(state: BattleState, player: PlayerState, *, deck: list[CardInstance]) -> None:
@@ -80,13 +82,7 @@ def end_turn(state: BattleState, player: PlayerState) -> None:
         cur = table(enemy.enemy_id).get(enemy.move_id) if enemy.enemy_id else None
         if enemy.intent_attack and enemy.intent_damage and state.players:
             target = _primary_target(state, player)
-            remaining = enemy.intent_damage
-            if target.block > 0:
-                absorbed = min(target.block, remaining)
-                target.block -= absorbed
-                remaining -= absorbed
-            if remaining > 0:
-                target.hp = max(0, target.hp - remaining)
+            player_receive_damage(state, target, enemy.intent_damage)
         if cur is not None:
             if cur.block:
                 enemy.block += cur.block
