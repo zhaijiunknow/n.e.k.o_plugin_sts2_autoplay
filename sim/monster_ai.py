@@ -18,6 +18,7 @@ class EnemyMove:
     move_id: str
     damage: int = 0
     block: int = 0
+    hits: int = 1                   # 多段攻击次数
     buff_power: str | None = None   # power_id,施放给自己
     buff_amount: int = 0
     followup: str | None = None     # 下一招 move_id
@@ -50,8 +51,19 @@ MOVE_TABLES: dict[str, dict[str, EnemyMove]] = {
 }
 
 
+_GEN_CACHE: dict[str, dict[str, EnemyMove]] | None = None
+
+
 def table(enemy_id: str) -> dict[str, EnemyMove]:
-    return MOVE_TABLES.get(enemy_id.upper(), {})
+    """先查手写（已验证、含格挡/正确 followup），再用自动生成表兜底（覆盖面，但格挡等是启发式）。"""
+    key = enemy_id.upper()
+    if key in MOVE_TABLES:
+        return MOVE_TABLES[key]
+    global _GEN_CACHE
+    if _GEN_CACHE is None:
+        from . import monster_data  # 延迟导入，避免循环
+        _GEN_CACHE = monster_data.MOVE_TABLES
+    return _GEN_CACHE.get(key, {})
 
 
 def predict_next(enemy_id: str, current_move_id: str | None) -> EnemyMove:
