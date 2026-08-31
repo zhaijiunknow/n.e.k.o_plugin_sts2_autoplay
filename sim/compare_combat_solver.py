@@ -83,7 +83,7 @@ def main() -> None:
                      if fld in field_values and field_values[fld] != 0]
         if not found_oks:
             continue
-        ours = merged(monster)
+        ours = merged(snake(monster))   # StaticValues 怪名 camelCase → UPPER_SNAKE
         has_extra = any(m.block > 0 or m.buff_power or m.status_card for m in ours.values())
         if not has_extra:
             gaps.append(monster)

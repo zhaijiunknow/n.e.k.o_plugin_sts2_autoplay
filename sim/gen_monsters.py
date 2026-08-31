@@ -22,10 +22,11 @@ OUT_PATH = os.path.join(os.path.dirname(__file__), "monster_data.py")
 _RE_CLASS = re.compile(r"class\s+(\w+)\s*:\s*MonsterModel")
 _RE_DAMAGE = re.compile(
     r"private\s+int\s+(\w+)\s*=>\s*AscensionHelper\.GetValueIfAscension\(AscensionLevel\.\w+,\s*(\d+),\s*(\d+)\)")
-_RE_MOVE = re.compile(r"(\w+)\s*=\s*new MoveState\(\"([A-Za-z0-9_]+)\",\s*\w+,\s*((?:[^()]|\([^()]*\))+)\)")
+_RE_MOVE = re.compile(r"(\w+)\s*=\s*new MoveState\(\"([A-Za-z0-9_]+)\",\s*(\w+),\s*((?:[^()]|\([^()]*\))+)\)")
 _RE_FOLLOW = re.compile(r"(\w+)\.FollowUpState\s*=\s*(?:\(MoveState\))?\s*(\w+);")
+_RE_METHOD_BODY = re.compile(r"private\s+(?:async\s+)?Task\s+(\w+)\s*\([^)]*\)\s*\{(.*?)\n\s*\}", re.S)
 _RE_GAINBLOCK = re.compile(r"\.GainBlock\([^,]+,\s*(\w+),")
-_RE_APPLYPOWER = re.compile(r"Apply<(\w+)>\([^,]+,\s*(\w+),")
+_RE_APPLYPOWER = re.compile(r"Apply<(\w+)>\(([^)]*)\)")
 
 
 def _snake(name: str) -> str:
@@ -55,10 +56,10 @@ def parse_monster(src: str) -> dict | None:
     enemy_id = _snake(cls.group(1))
     props = {name: int(asc) for name, asc, _x in _RE_DAMAGE.findall(src)}
 
-    # 招式：var name -> (move_id, intents_str)
-    moves: dict[str, tuple[str, str]] = {}
-    for var, move_id, intents in _RE_MOVE.findall(src):
-        moves[var] = (move_id, intents)
+    # 招式：var name -> (move_id, method_name, intents_str)
+    moves: dict[str, tuple[str, str, str]] = {}
+    for var, move_id, method_name, intents in _RE_MOVE.findall(src):
+        moves[var] = (move_id, method_name, intents)
     if not moves:
         return None
 
@@ -68,31 +69,37 @@ def parse_monster(src: str) -> dict | None:
         if a in moves and b in moves:
             follow[a] = b
 
-    # block / buff 从招式方法体提取（GainBlock / Apply<Power>）
-    method_bodies = re.findall(r"private\s+async\s+Task\s+\w+\([^)]*\)\s*\{(.*?)\n\t\}", src, re.S)
-    blocks_by_method = {}
-    buffs_by_method = {}
-    for body in method_bodies:
+    # 招式方法体：method_name -> body（GainBlock / Apply<Power> 在方法体里）
+    method_bodies: dict[str, str] = {m.group(1): m.group(2) for m in _RE_METHOD_BODY.finditer(src)}
+    def _body_block_buff(body: str) -> tuple[int, tuple[str, int] | None]:
+        block = 0
         for m in _RE_GAINBLOCK.finditer(body):
-            blocks_by_method.setdefault(body, []).append(props.get(m.group(1), 0))
+            block += props.get(m.group(1), 0)
+        buff = None
         for m in _RE_APPLYPOWER.finditer(body):
-            potype = _snake(m.group(1))
-            buffs_by_method.setdefault(body, []).append((potype, props.get(m.group(2), 0)))
+            power = _snake(m.group(1))
+            amount = 0
+            for tok in re.findall(r"\b(\w+)\b", m.group(2)):
+                if tok in props:
+                    amount = props[tok]
+                    break
+            buff = (power, amount)
+        return block, buff
 
     out_moves: dict[str, dict] = {}
-    for var, (move_id, intents) in moves.items():
+    for var, (move_id, method_name, intents) in moves.items():
         entry = {
             "move_id": move_id,
             "damage": _intent_damage(intents, props),
             "hits": _intent_hits(intents),
             "followup": moves.get(follow.get(var, ""), (None,))[0],
         }
-        # block/buff 用 body 级启发式（GainBlock / Apply 首次）
-        pb = blocks_by_method.get(intents, [])
-        if pb:
-            entry["block"] = pb[0]
-        if re.search(r"DefendIntent\(\)", intents):
-            entry.setdefault("block", 0)
+        body = method_bodies.get(method_name, "")
+        block, buff = _body_block_buff(body)
+        if block:
+            entry["block"] = block
+        if buff:
+            entry["buff_power"], entry["buff_amount"] = buff
         out_moves[move_id] = entry
     return {"enemy_id": enemy_id, "moves": out_moves}
 
@@ -114,9 +121,13 @@ def main() -> int:
         lines.append(f"    {r['enemy_id']!r}: {{")
         for mid, m in r["moves"].items():
             follow = m.get("followup") or ""
-            lines.append(f"        {mid!r}: EnemyMove({mid!r}, damage={m.get('damage', 0)}, "
-                         f"block={m.get('block', 0)}, hits={m.get('hits', 1)}, "
-                         f"followup={follow!r}),")
+            parts = [f"damage={m.get('damage', 0)}", f"block={m.get('block', 0)}",
+                     f"hits={m.get('hits', 1)}"]
+            if m.get("buff_power"):
+                parts.append(f"buff_power={m['buff_power']!r}")
+                parts.append(f"buff_amount={m.get('buff_amount', 0)}")
+            parts.append(f"followup={follow!r}")
+            lines.append(f"        {mid!r}: EnemyMove({mid!r}, {', '.join(parts)}),")
         lines.append("    },")
     lines.append("}")
     with open(OUT_PATH, "w", encoding="utf-8") as f:
