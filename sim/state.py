@@ -24,6 +24,7 @@ class CardInstance:
     energy_gain: int = 0
     hp_loss: int = 0
     powers_applied: list[tuple[str, int]] = field(default_factory=list)  # [(power_id, amount)]
+    keywords: list[str] = field(default_factory=list)   # EXHAUST / RETAIN / INNATE / ETHEREAL / ETERNAL / UNPLAYABLE
 
 
 @dataclass

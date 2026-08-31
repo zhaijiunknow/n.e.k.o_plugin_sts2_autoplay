@@ -13,11 +13,27 @@ def start_turn(state: BattleState, player: PlayerState, *, draw: int = 5) -> Non
 
 
 def new_turn(state: BattleState, player: PlayerState, *, draw: int = 5) -> None:
-    """回合结束进入下一回合：弃掉手中牌 → 重置能量 → 抽满手牌。"""
-    player.discard.extend(c.card_id for c in player.hand)
-    player.hand = []
+    """回合结束进入下一回合：RETAIN 留手、ETHEREAL 在手则消耗、其余弃掉 → 重置能量 → 抽满。"""
+    kept: list[CardInstance] = []
+    for card in player.hand:
+        kws = {k.upper() for k in (card.keywords or [])}
+        if "RETAIN" in kws:
+            kept.append(card)
+        elif "ETHEREAL" in kws:
+            player.exhausted.append(card.card_id)
+        else:
+            player.discard.append(card.card_id)
+    player.hand = kept
     player.energy = player.max_energy
     draw_cards(state, player, draw)
+
+
+def start_combat(state: BattleState, player: PlayerState, *, deck: list[CardInstance]) -> None:
+    """开局：INNATE 卡直接进初始手牌，其余进抽牌堆。"""
+    innate = [c for c in deck if "INNATE" in {k.upper() for k in (c.keywords or [])}]
+    player.hand = innate
+    player.draw = [c.card_id for c in deck if c not in innate]
+    player.energy = player.max_energy
 
 
 def play_hand_index(
@@ -59,6 +75,10 @@ def end_turn(state: BattleState, player: PlayerState) -> None:
                 enemy.block += cur.block
             if cur.buff_power:
                 enemy.add_power(cur.buff_power, cur.buff_amount)
+            if cur.status_card and cur.status_amount:
+                for _ in range(cur.status_amount):
+                    player.hand.append(CardInstance(card_id="STATUS", name="状态卡",
+                                                    cost=1, keywords=["UNPLAYABLE"]))
         # 预测下一招（monster_ai.followup 循环）
         nxt = predict_next(enemy.enemy_id, enemy.move_id)
         enemy.move_id = nxt.move_id

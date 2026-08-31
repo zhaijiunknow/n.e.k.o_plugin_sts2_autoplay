@@ -21,6 +21,8 @@ class EnemyMove:
     hits: int = 1                   # 多段攻击次数
     buff_power: str | None = None   # power_id,施放给自己
     buff_amount: int = 0
+    status_card: str | None = None  # 往玩家手牌塞的状态卡（如黏糊）
+    status_amount: int = 0
     followup: str | None = None     # 下一招 move_id
 
 
@@ -38,15 +40,15 @@ MOVE_TABLES: dict[str, dict[str, EnemyMove]] = {
     },
     "LEAF_SLIME_S": {  # TACKLE(4) ↔ GOOP(状态卡)
         "TACKLE_MOVE": EnemyMove("TACKLE_MOVE", damage=4, followup="GOOP_MOVE"),
-        "GOOP_MOVE": EnemyMove("GOOP_MOVE", followup="TACKLE_MOVE"),
+        "GOOP_MOVE": EnemyMove("GOOP_MOVE", status_card="STATUS", status_amount=1, followup="TACKLE_MOVE"),
     },
     "TWIG_SLIME_M": {  # STICKY(状态卡) ↔ POKEY_POUNCE(12)
-        "STICKY_SHOT_MOVE": EnemyMove("STICKY_SHOT_MOVE", followup="POKEY_POUNCE_MOVE"),
+        "STICKY_SHOT_MOVE": EnemyMove("STICKY_SHOT_MOVE", status_card="STATUS", status_amount=1, followup="POKEY_POUNCE_MOVE"),
         "POKEY_POUNCE_MOVE": EnemyMove("POKEY_POUNCE_MOVE", damage=12, followup="STICKY_SHOT_MOVE"),
     },
     "LEAF_SLIME_M": {  # STICKY(状态卡2) ↔ CLUMP(9)
         "CLUMP_SHOT_MOVE": EnemyMove("CLUMP_SHOT_MOVE", damage=9, followup="STICKY_SHOT_MOVE"),
-        "STICKY_SHOT_MOVE": EnemyMove("STICKY_SHOT_MOVE", followup="CLUMP_SHOT_MOVE"),
+        "STICKY_SHOT_MOVE": EnemyMove("STICKY_SHOT_MOVE", status_card="STATUS", status_amount=2, followup="CLUMP_SHOT_MOVE"),
     },
 }
 

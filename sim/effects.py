@@ -164,8 +164,12 @@ def apply_card(
         value = getattr(card, field, None)
         if value:
             handler(battle, player, card, value, target)
-    if card.card_type == "Exhaust" or getattr(card, "exhaust", False):
+    # 关键字决定去向：EXHAUST→消耗堆；ETERNAL→回手；否则→弃牌堆
+    kws = {k.upper() for k in (card.keywords or [])}
+    if "EXHAUST" in kws:
         player.exhausted.append(card.card_id)
+    elif "ETERNAL" in kws:
+        player.hand.append(card)
     else:
         player.discard.append(card.card_id)
 
