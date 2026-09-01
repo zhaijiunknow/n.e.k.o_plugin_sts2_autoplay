@@ -437,8 +437,5 @@ sts2_run_validation() {
   shift
 
   sts2_require_command uv "On macOS, install it with: brew install uv" >/dev/null
-  (
-    cd -- "$repo_root/mcp_server"
-    uv run python ../scripts/run_sts2_validation.py "$@"
-  )
+  uv run python "$repo_root/scripts/run_sts2_validation.py" "$@"
 }

@@ -273,15 +273,6 @@ elif ! run_step "build mod" "${build_mod_args[@]}"; then
 elif ! run_step "mod load deep check" "$script_dir/test-mod-load.sh" --deep-check --api-port "$api_port" "${runtime_start_args[@]}"; then
   failed=1
   failure_message="mod load deep check failed"
-elif ! run_step "debug console gating (disabled)" "$script_dir/test-debug-console-gating.sh" --api-port "$api_port" "${runtime_start_args[@]}"; then
-  failed=1
-  failure_message="debug console gating (disabled) failed"
-elif ! run_step "debug console gating (enabled)" "$script_dir/test-debug-console-gating.sh" --enable-debug-actions --api-port "$api_port" "${runtime_start_args[@]}"; then
-  failed=1
-  failure_message="debug console gating (enabled) failed"
-elif ! run_step "mcp tool profile" "$script_dir/test-mcp-tool-profile.sh"; then
-  failed=1
-  failure_message="mcp tool profile failed"
 elif ! run_step "start debug session for main-menu lifecycle" start_debug_session; then
   failed=1
   failure_message="start debug session for main-menu lifecycle failed"

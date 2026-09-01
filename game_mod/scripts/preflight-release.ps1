@@ -30,13 +30,9 @@ function Invoke-Step {
 }
 
 $modProject = Join-Path $ProjectRoot "neko_comm/neko_comm.csproj"
-$mcpRoot = Join-Path $ProjectRoot "mcp_server"
-$clientPy = Join-Path $mcpRoot "src/sts2_mcp/client.py"
-$serverPy = Join-Path $mcpRoot "src/sts2_mcp/server.py"
 $buildScript = Join-Path $ProjectRoot "scripts/build-mod.ps1"
 $testScript = Join-Path $ProjectRoot "scripts/test-mod-load.ps1"
 $stateInvariantScript = Join-Path $ProjectRoot "scripts/test-state-invariants.ps1"
-$mcpToolProfileScript = Join-Path $ProjectRoot "scripts/test-mcp-tool-profile.ps1"
 $multiplayerFlowScript = Join-Path $ProjectRoot "scripts/test-multiplayer-lobby-flow.ps1"
 $changelogPath = Join-Path $ProjectRoot "CHANGELOG.md"
 $releaseDoc = Join-Path $ProjectRoot "docs/release-readiness.md"
@@ -53,24 +49,6 @@ $requiredDocs = @(
 
 Invoke-Step -Name "Build mod project ($Configuration)" -Action {
     dotnet build $modProject -c $Configuration | Out-Host
-}
-
-Invoke-Step -Name "Compile Python sources" -Action {
-    python -m py_compile $clientPy $serverPy
-}
-
-Invoke-Step -Name "Import MCP server package" -Action {
-    Push-Location $mcpRoot
-    try {
-        uv run python -c "from sts2_mcp.server import create_server; create_server(); print('MCP_IMPORT_OK')" | Out-Host
-    }
-    finally {
-        Pop-Location
-    }
-}
-
-Invoke-Step -Name "Validate MCP tool profiles" -Action {
-    powershell -ExecutionPolicy Bypass -File $mcpToolProfileScript -RepoRoot $ProjectRoot | Out-Host
 }
 
 Invoke-Step -Name "Check release documents" -Action {
@@ -91,6 +69,5 @@ Write-Host "[preflight] Manual validation next:"
 Write-Host "  1. powershell -ExecutionPolicy Bypass -File `"$buildScript`" -Configuration $Configuration"
 Write-Host "  2. powershell -ExecutionPolicy Bypass -File `"$testScript`" -DeepCheck"
 Write-Host "  3. powershell -ExecutionPolicy Bypass -File `"$stateInvariantScript`""
-Write-Host "  4. powershell -ExecutionPolicy Bypass -File `"$mcpToolProfileScript`" -RepoRoot `"$ProjectRoot`""
-Write-Host "  5. powershell -ExecutionPolicy Bypass -File `"$multiplayerFlowScript`""
-Write-Host "  6. Follow the manual checklist in `"$releaseDoc`""
+Write-Host "  4. powershell -ExecutionPolicy Bypass -File `"$multiplayerFlowScript`""
+Write-Host "  5. Follow the manual checklist in `"$releaseDoc`""
