@@ -59,7 +59,7 @@ permissions = [
 [[plugin.ui.guide]]
 id = "quickstart"
 title = "快速开始"
-entry = "doc/README.md"
+entry = "README.md"
 permissions = ["state:read"]
 
 [plugin.sdk]
