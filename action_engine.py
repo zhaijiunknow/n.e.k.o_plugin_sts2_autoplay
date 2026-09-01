@@ -115,7 +115,7 @@ class STS2ActionEngine:
         action_type = str(action.get("type") or raw.get("name") or raw.get("action") or "").strip().lower()
         normalized = dict(default_kwargs)
         normalized.update(kwargs)
-        if action_type in {"choose_event_option", "choose_map_node", "choose_rest_option", "choose_reward_card", "select_deck_card", "claim_reward", "buy_card", "buy_relic", "buy_potion"}:
+        if action_type in {"choose_event_option", "choose_map_node", "choose_rest_option", "choose_reward_card", "select_deck_card", "claim_reward", "buy_card", "buy_relic", "buy_potion", "use_potion", "discard_potion"}:
             if "option_index" not in normalized and "index" in raw:
                 normalized["option_index"] = raw["index"]
         if action_type == "play_card" and "card_index" not in normalized and "card_index" in raw:

@@ -10,10 +10,11 @@
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
-from .state import BattleState, CardInstance, Combatant, PlayerState
-
+from .cards import card as card_by_id
+from .state import BattleState, CardInstance, Combatant, Orb, PlayerState
 
 # ---------------------------------------------------------------------------
 # 数值规则
@@ -99,13 +100,31 @@ def player_receive_damage(battle: BattleState, player: PlayerState, amount: int)
 
 
 def power_turn_start(battle: BattleState, player: PlayerState) -> None:
-    """回合开始 Power：Ritual 力 += 层数；PlatedArmor 格挡 += 层数。"""
+    """回合开始 Power：Ritual 力 += 层数；PlatedArmor 格挡 += 层数；
+    下回合收益（ENERGY/BLOCK/DRAW_NEXT_TURN）兑现并清零。星星(STAR_NEXT_TURN)需 sim 建模星星后补。
+    """
     ritual = player.power("ritual_power")
     if ritual:
         player.add_power("strength_power", ritual)
     plated = player.power("plated_armor_power")
     if plated:
         give_block(player, plated)
+    energy_next = player.power("energy_next_turn_power")
+    if energy_next:
+        player.energy += energy_next
+        player.powers["energy_next_turn_power"] = 0
+    block_next = player.power("block_next_turn_power")
+    if block_next:
+        give_block(player, block_next)
+        player.powers["block_next_turn_power"] = 0
+    draw_next = player.power("draw_cards_next_turn_power")
+    if draw_next:
+        draw_cards(battle, player, draw_next)
+        player.powers["draw_cards_next_turn_power"] = 0
+    star_next = player.power("star_next_turn_power")
+    if star_next:
+        player.stars += star_next
+        player.powers["star_next_turn_power"] = 0
 
 
 def draw_cards(state: BattleState, player: PlayerState, n: int) -> None:
@@ -114,7 +133,10 @@ def draw_cards(state: BattleState, player: PlayerState, n: int) -> None:
             player.draw = list(player.discard)
             player.discard = []
         if player.draw:
-            player.hand.append(CardInstance(card_id=player.draw.pop(0)))
+            cid = player.draw.pop(0)
+            base = card_by_id(cid)
+            # 抽到的牌取静态定义（保留伤害/格挡/球/Power），避免 blank；不改共享缓存对象。
+            player.hand.append(replace(base) if base is not None else CardInstance(card_id=cid))
 
 
 # ---------------------------------------------------------------------------
@@ -208,10 +230,11 @@ def apply_card(
     card: CardInstance,
     target: int | None,
 ) -> None:
-    """结算一张卡：扣能量 -> 逐字段触发 handler -> 进弃牌堆/消耗。"""
-    if card.cost > player.energy:
+    """结算一张卡：扣能量/星星 -> 逐字段触发 handler -> 进弃牌堆/消耗。"""
+    if card.cost > player.energy or card.star_cost > player.stars:
         return
     player.energy -= card.cost
+    player.stars -= card.star_cost
     for field, handler in EFFECT_HANDLERS.items():
         value = getattr(card, field, None)
         if value:
@@ -236,8 +259,6 @@ def apply_card(
 # ---------------------------------------------------------------------------
 # Power 回合行为（回合末 tick 等）
 # ---------------------------------------------------------------------------
-
-from .state import Orb
 
 
 def channel_orb(player: PlayerState, orb_id: str, *, passive: int = 0, evoke: int = 0) -> None:
@@ -306,6 +327,29 @@ def apply_potion(battle: BattleState, player: PlayerState, potion_id: str, targe
         draw_cards(battle, player, max(1, value))
     elif kind == "energy" and value:
         player.energy += value
+    elif kind == "max_hp" and value:
+        player.max_hp += value
+        player.hp = min(player.max_hp, player.hp + value)
+    elif kind == "orb_slots" and value:
+        player.orb_capacity += value
+    elif kind.startswith("orb:"):
+        # ESSENCE_OF_DARKNESS：按槽位数量充能（value<=0 视为每个空槽一个）；channel 会自我限幅到 capacity。
+        orb_id = kind.split(":", 1)[1]
+        for _ in range(value or max(1, player.orb_capacity)):
+            base = ORB_BASE.get(orb_id, (0, 0))
+            channel_orb(player, orb_id, passive=base[0], evoke=base[1])
+    elif kind == "hand_exhaust":
+        # ASHWATER：消耗手上 cost 最高的 up-to-value 张（清硬手牌 / 状态牌）。
+        for card in sorted(player.hand, key=lambda c: -c.cost)[: max(1, value)]:
+            player.hand.remove(card)
+            player.exhausted.append(card.card_id)
+    elif kind == "upgrade_hand":
+        # Forge/Upgrade：手牌数值整体增强（代理"强化"对战斗的直接增益）。
+        for card in player.hand:
+            card.damage += value
+            card.block += value
+    elif kind == "utility":
+        pass  # 对战斗评分无直接影响的药水（填槽/星/免费卡等）：用掉但无状态变化
     else:
         return False  # unknown / 0值：先不推荐用
     if potion_id in player.potions:

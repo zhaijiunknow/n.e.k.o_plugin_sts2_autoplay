@@ -1,0 +1,112 @@
+using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Hooks;
+using CombatSolver.Engine.Common;
+using CombatSolver.Engine.InCombat.Mirrors;
+using CombatSolver.Engine.InCombat.Mirrors.Cards;
+
+namespace CombatSolver.Engine.InCombat.Simulation;
+
+internal sealed partial class CombatPredictionSimulator
+{
+    /// <summary>
+    /// Currently mirrors the prediction-relevant parts of <see cref="CombatManager.EndPlayerTurnPhaseOneInternal()"/>.
+    /// </summary>
+    internal void SimulateEndPlayerTurnAfterOrbPassives()
+    {
+        var playersEndingTurn = CombatManager.Instance.PlayersTakingExtraTurn switch
+        {
+            { Count: > 0 } extraTurnPlayers => extraTurnPlayers,
+            _ => State.CombatState.Players
+        };
+
+        foreach (var player in playersEndingTurn)
+        {
+            HookMirrors.AfterAutoPostPlayPhaseEntered(this, player);
+        }
+
+        HookMirrors.BeforeSideTurnEnd(
+            this,
+            State.CombatState.CurrentSide,
+            [.. playersEndingTurn.Select(static player => player.Creature)]);
+        SynchronizePowerAmountPredictionStates();
+
+        if (CheckWinCondition())
+        {
+            return;
+        }
+
+        foreach (var player in playersEndingTurn)
+        {
+            DoTurnEnd(player);
+        }
+
+        if (CheckWinCondition())
+        {
+            return;
+        }
+
+        // Vanilla next calls Hook.BeforeFlush for each ending player. Its only vanilla listener is
+        // SlumberingEssence, which is not used by the current version of the base game, so the hook is omitted.
+    }
+
+    /// <summary>
+    /// Mirrors the prediction-relevant parts of <see cref="CombatManager.DoTurnEnd"/>.
+    /// </summary>
+    private void DoTurnEnd(Player player)
+    {
+        var playerState = State.GetPlayerCombatState(player);
+        if (IsOverOrEnding)
+        {
+            return;
+        }
+
+        List<PredictedCard>? turnEndCards = null;
+        List<PredictedCard>? etherealCards = null;
+
+        foreach (var card in playerState.Hand.Cards)
+        {
+            if (card.Preview.HasTurnEndInHandEffect)
+            {
+                (turnEndCards ??= []).Add(card);
+            }
+            else if (card.HasKeyword(State, CardKeyword.Ethereal) &&
+                     Hook.ShouldEtherealTrigger(State.CombatState, card.Preview))
+            {
+                (etherealCards ??= []).Add(card);
+            }
+        }
+
+        if (etherealCards != null)
+        {
+            foreach (PredictedCard card in etherealCards)
+                Exhaust(card, causedByEthereal: true);
+        }
+
+        if (turnEndCards != null)
+            DoTurnEndCards(turnEndCards);
+    }
+
+    /// <summary>
+    /// Mirrors the prediction-relevant parts of <see cref="CombatManager.DoTurnEndCards"/>.
+    /// </summary>
+    private void DoTurnEndCards(IEnumerable<PredictedCard> cards)
+    {
+        foreach (var card in cards)
+        {
+            AddToPile(card, PileType.Play);
+            CardOnTurnEndInHandMirrors.Invoke(this, card);
+
+            // Vanilla does not check Hook.ShouldEtherealTrigger here, so we keep the same behavior.
+            if (card.HasKeyword(State, CardKeyword.Ethereal))
+            {
+                Exhaust(card, causedByEthereal: true);
+            }
+            else
+            {
+                AddToPile(card, PileType.Discard);
+            }
+        }
+    }
+}

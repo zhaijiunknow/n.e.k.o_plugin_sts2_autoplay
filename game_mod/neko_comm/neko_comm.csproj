@@ -5,13 +5,18 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <LangVersion>latest</LangVersion>
+    <LangVersion>13.0</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>NekoComm</RootNamespace>
     <AssemblyName>neko_comm</AssemblyName>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <Sts2DataDirFromEnv>$([System.Environment]::GetEnvironmentVariable('STS2_DATA_DIR'))</Sts2DataDirFromEnv>
     <Sts2DataDir Condition="'$(Sts2DataDir)' == '' and '$(Sts2DataDirFromEnv)' != ''">$(Sts2DataDirFromEnv)</Sts2DataDir>
     <Sts2DataDir Condition="'$(Sts2DataDir)' == ''">C:/Program Files (x86)/Steam/steamapps/common/Slay the Spire 2/data_sts2_windows_x86_64</Sts2DataDir>
+    <SteamRoot Condition="'$(SteamRoot)'=='' and '$(OS)'=='Windows_NT' and Exists('D:/Steam')">D:/Steam</SteamRoot>
+    <SteamRoot Condition="'$(SteamRoot)'=='' and '$(OS)'=='Windows_NT'">$(MSBuildProgramFiles32)/Steam</SteamRoot>
+    <RitsuLibDir Condition="'$(RitsuLibDir)'=='' and '$(OS)'=='Windows_NT'">$(SteamRoot)/steamapps/workshop/content/2868840/3747602295/lib/0.111.0</RitsuLibDir>
+    <RitsuLibDir Condition="'$(RitsuLibDir)'==''">$(HOME)/.local/share/Steam/steamapps/workshop/content/2868840/3747602295/lib/0.111.0</RitsuLibDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -27,5 +32,14 @@
       <HintPath>$(Sts2DataDir)/GodotSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="System.IO.Hashing">
+      <HintPath>$(Sts2DataDir)/System.IO.Hashing.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Steamworks.NET">
+      <HintPath>$(Sts2DataDir)/Steamworks.NET.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
+
 </Project>

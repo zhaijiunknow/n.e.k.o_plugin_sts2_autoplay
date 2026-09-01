@@ -15,6 +15,7 @@ class CardInstance:
     card_id: str = ""
     name: str = ""
     cost: int = 0
+    star_cost: int = 0           # 星星费（第二资源，与能量并存）
     card_type: str = ""          # Attack / Skill / Power
     target: str = "Self"         # Self / AnyEnemy / AllEnemies / AnyAlly ...
     damage: int = 0
@@ -58,6 +59,7 @@ class Orb:
 @dataclass
 class PlayerState(Combatant):
     energy: int = 0
+    stars: int = 0               # 星星资源（第二资源）
     max_energy: int = 3
     hand: list[CardInstance] = field(default_factory=list)
     draw: list[str] = field(default_factory=list)       # card_id 队列
@@ -72,7 +74,8 @@ class PlayerState(Combatant):
     def clone(self) -> "PlayerState":
         return PlayerState(
             id=self.id, hp=self.hp, max_hp=self.max_hp, block=self.block,
-            powers=dict(self.powers), energy=self.energy, max_energy=self.max_energy,
+            powers=dict(self.powers), energy=self.energy, stars=self.stars,
+            max_energy=self.max_energy,
             hand=list(self.hand), draw=list(self.draw), discard=list(self.discard),
             exhausted=list(self.exhausted),
             orbs=list(self.orbs), orb_capacity=self.orb_capacity, focus=self.focus,

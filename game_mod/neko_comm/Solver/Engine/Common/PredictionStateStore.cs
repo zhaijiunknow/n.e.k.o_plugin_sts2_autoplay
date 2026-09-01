@@ -1,0 +1,187 @@
+using MegaCrit.Sts2.Core.Models;
+
+namespace CombatSolver.Engine.Common;
+
+internal sealed class PredictionStateStore
+{
+    private readonly Dictionary<(AbstractModel Model, Type StateType), StateEntry> _states;
+    private readonly Dictionary<AbstractModel, AbstractModel> _modelAliases;
+
+    public PredictionStateStore()
+        : this(0)
+    {
+    }
+
+    private PredictionStateStore(int capacity)
+    {
+        _states = new Dictionary<(AbstractModel Model, Type StateType), StateEntry>(capacity);
+        _modelAliases = new Dictionary<AbstractModel, AbstractModel>(capacity);
+    }
+
+    private abstract class StateEntry
+    {
+        public abstract object Read();
+        public abstract object Materialize();
+    }
+
+    private sealed class OwnedStateEntry(object value) : StateEntry
+    {
+        private readonly object _value = value;
+
+        public override object Read() => _value;
+
+        public override object Materialize() => _value;
+    }
+
+    public TState Get<TState>(AbstractModel model)
+        where TState : IPredictionStateForkable, new()
+    {
+        return Get(model, static () => new TState());
+    }
+
+    public TState Get<TState>(AbstractModel model, Func<TState> create)
+        where TState : IPredictionStateForkable
+    {
+        var key = (ResolveModel(model), typeof(TState));
+        if (!_states.TryGetValue(key, out StateEntry? entry))
+        {
+            object state = create() ?? throw new InvalidOperationException("Prediction state factory returned null.");
+            entry = new OwnedStateEntry(state);
+            _states[key] = entry;
+        }
+
+        return (TState)entry.Materialize();
+    }
+
+    public TState GetReadOnly<TState>(AbstractModel model, Func<TState> create)
+        where TState : IPredictionStateForkable
+    {
+        var key = (ResolveModel(model), typeof(TState));
+        if (!_states.TryGetValue(key, out StateEntry? entry))
+        {
+            object state = create() ?? throw new InvalidOperationException("Prediction state factory returned null.");
+            entry = new OwnedStateEntry(state);
+            _states[key] = entry;
+        }
+        return (TState)entry.Read();
+    }
+
+    /// <summary>
+    /// Reads prediction state without inserting an untouched live-state projection into the store.
+    /// Fingerprinting uses this path so observing a state does not make every later fork copy it.
+    /// </summary>
+    public TState Peek<TState>(AbstractModel model, Func<TState> create)
+        where TState : IPredictionStateForkable
+    {
+        if (_states.TryGetValue((ResolveModel(model), typeof(TState)), out StateEntry? entry))
+            return (TState)entry.Read();
+        return create() ?? throw new InvalidOperationException("Prediction state factory returned null.");
+    }
+
+    public bool TryGetReadOnly<TState>(AbstractModel model, out TState? state)
+        where TState : class, IPredictionStateForkable
+    {
+        if (_states.TryGetValue((ResolveModel(model), typeof(TState)), out StateEntry? entry))
+        {
+            state = (TState)entry.Read();
+            return true;
+        }
+        state = null;
+        return false;
+    }
+
+    public IEnumerable<(AbstractModel Model, TState State)> ReadEntries<TState>()
+        where TState : class, IPredictionStateForkable
+    {
+        foreach (((AbstractModel model, Type stateType), StateEntry entry) in _states)
+        {
+            if (stateType == typeof(TState))
+                yield return (model, (TState)entry.Read());
+        }
+    }
+
+    public bool Remove<TState>(AbstractModel model)
+        where TState : class, IPredictionStateForkable
+        => _states.Remove((ResolveModel(model), typeof(TState)));
+
+    public void RemapModel(AbstractModel source, AbstractModel replacement)
+    {
+        AbstractModel resolvedSource = ResolveModel(source);
+        AbstractModel resolvedReplacement = ResolveModel(replacement);
+        if (ReferenceEquals(resolvedSource, resolvedReplacement))
+            return;
+
+        (AbstractModel Model, Type StateType)[] keys = _states.Keys
+            .Where(key => ReferenceEquals(key.Model, resolvedSource))
+            .ToArray();
+        foreach ((AbstractModel _, Type stateType) in keys)
+        {
+            StateEntry entry = _states[(resolvedSource, stateType)];
+            _states.Remove((resolvedSource, stateType));
+            if (!_states.TryAdd((resolvedReplacement, stateType), entry))
+                throw new InvalidOperationException($"Prediction state remap collided for {stateType.FullName}.");
+        }
+
+        foreach (AbstractModel alias in _modelAliases
+                     .Where(pair => ReferenceEquals(pair.Value, resolvedSource))
+                     .Select(pair => pair.Key)
+                     .ToArray())
+        {
+            _modelAliases[alias] = resolvedReplacement;
+        }
+        _modelAliases[source] = resolvedReplacement;
+        _modelAliases[resolvedSource] = resolvedReplacement;
+    }
+
+    internal PredictionStateStore Fork(PredictionForkContext context)
+    {
+        AssertForkable();
+        PredictionStateStore fork = new(_states.Count);
+        foreach (((AbstractModel model, Type stateType), StateEntry entry) in _states)
+        {
+            object state = entry.Read();
+            AbstractModel forkedModel = context.RemapOrSelf(model);
+            object forkedState;
+            if (context.TryRemap(state, out object? existing))
+            {
+                forkedState = existing!;
+            }
+            else
+            {
+                if (state is not IPredictionStateForkable forkable)
+                {
+                    throw new InvalidOperationException(
+                        $"Prediction state {state.GetType().FullName} does not implement {nameof(IPredictionStateForkable)}.");
+                }
+                forkedState = forkable.Fork(context);
+                context.Register(state, forkedState);
+            }
+            fork._states.Add((forkedModel, stateType), new OwnedStateEntry(forkedState));
+        }
+        foreach ((AbstractModel source, AbstractModel replacement) in _modelAliases)
+        {
+            AbstractModel forkedSource = context.RemapOrSelf(source);
+            AbstractModel forkedReplacement = context.RemapOrSelf(replacement);
+            if (!ReferenceEquals(forkedSource, forkedReplacement))
+                fork._modelAliases[forkedSource] = forkedReplacement;
+        }
+        return fork;
+    }
+
+    internal void AssertForkable()
+    {
+        foreach (StateEntry entry in _states.Values)
+        {
+            if (entry.Read() is IPredictionForkBoundary boundary)
+                boundary.AssertForkable();
+        }
+    }
+
+    private AbstractModel ResolveModel(AbstractModel model)
+    {
+        AbstractModel current = model;
+        for (int guard = 0; guard < 16 && _modelAliases.TryGetValue(current, out AbstractModel? replacement); guard++)
+            current = replacement;
+        return current;
+    }
+}

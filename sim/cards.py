@@ -26,6 +26,30 @@ def _first(effects: list[Any] | None) -> Any:
     return effects[0] if effects else None
 
 
+# 卡面 powers_applied 用 uppercase 短名（如 VULNERABLE），但 sim 伤害/结算查的是
+# lower + _power 后缀（如 vulnerable_power）。这里统一映射，否则卡施加的易伤/虚弱/力量不生效。
+_POWER_KEYS: dict[str, str] = {
+    "VULNERABLE": "vulnerable_power",
+    "WEAK": "weak_power",
+    "STRENGTH": "strength_power",
+    "DEXTERITY": "dexterity_power",
+    "POISON": "poison_power",
+    "INTANGIBLE": "intangible_power",
+    "BUFFER": "buffer_power",
+    "RITUAL": "ritual_power",
+    "REGEN": "regen_power",
+    "PLATED_ARMOR": "plated_armor_power",
+    "ENERGY_NEXT_TURN": "energy_next_turn_power",
+    "BLOCK_NEXT_TURN": "block_next_turn_power",
+    "DRAW_CARDS_NEXT_TURN": "draw_cards_next_turn_power",
+    "STAR_NEXT_TURN": "star_next_turn_power",
+}
+
+
+def _norm_power_key(pid: str) -> str:
+    return _POWER_KEYS.get(str(pid).upper(), str(pid).lower())
+
+
 def _normalize_powers(powers_applied: Any) -> list[tuple[str, int]]:
     """powers_applied 可能是 list[str] / list[{id,amount}] / [{power_id,amount}]。"""
     out: list[tuple[str, int]] = []
@@ -33,14 +57,14 @@ def _normalize_powers(powers_applied: Any) -> list[tuple[str, int]]:
         return out
     for item in powers_applied:
         if isinstance(item, str):
-            out.append((item, 1))
+            out.append((_norm_power_key(item), 1))
         elif isinstance(item, dict):
             pid = (item.get("id") or item.get("power_id") or item.get("power") or "").upper()
             amt = int(item.get("amount") or item.get("stacks") or item.get("power") or 1)
             if pid:
-                out.append((pid, amt))
+                out.append((_norm_power_key(pid), amt))
         elif isinstance(item, list) and len(item) >= 2:
-            out.append((str(item[0]).upper(), int(item[1])))
+            out.append((_norm_power_key(str(item[0])), int(item[1])))
     return out
 
 
@@ -53,21 +77,40 @@ _ORB_CARDS: dict[str, list[tuple[str, str, int]]] = {
 }
 
 
+def _next_turn_energy(entry: dict[str, Any]) -> int:
+    """若卡的"能量"是下回合才给（如 CHARGE_BATTERY），返回能量数；否则 0。
+
+    游戏本身把这种延迟能量建模范成 ENERGY_NEXT_TURN_POWER，所以这里检测到就转成 power。
+    """
+    desc = str(entry.get("description") or "").lower()
+    if "next" in desc and "energy" in desc and entry.get("energy_gain"):
+        return int(entry["energy_gain"])
+    return 0
+
+
 def card_from_json(entry: dict[str, Any]) -> CardInstance:
     cid = str(entry.get("id") or "")
+    energy = int(entry.get("energy_gain") or 0)
+    powers = _normalize_powers(entry.get("powers_applied"))
+    delayed = _next_turn_energy(entry)
+    if delayed:
+        # 下回合能量：不当作即时 energy_gain，而是挂到 ENERGY_NEXT_TURN_POWER 上
+        powers = powers + [("ENERGY_NEXT_TURN_POWER", delayed)]
+        energy = 0
     return CardInstance(
         card_id=cid,
         name=str(entry.get("name") or ""),
         cost=int(entry.get("cost") or 0),
+        star_cost=int(entry.get("star_cost") or 0),
         card_type=str(entry.get("type") or ""),
         target=str(entry.get("target") or "Self"),
         damage=int(entry.get("damage") or 0),
         block=int(entry.get("block") or 0),
         hit_count=int(entry.get("hit_count") or 0),
         cards_draw=int(entry.get("cards_draw") or 0),
-        energy_gain=int(entry.get("energy_gain") or 0),
+        energy_gain=energy,
         hp_loss=int(entry.get("hp_loss") or 0),
-        powers_applied=_normalize_powers(entry.get("powers_applied")),
+        powers_applied=powers,
         keywords=list(entry.get("keywords") or []),
         orb_action=list(_ORB_CARDS.get(cid) or []),
     )

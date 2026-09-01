@@ -182,6 +182,15 @@ macOS / Linux：
 - `docs/`：补充文档
 - `skills/`：配套 Skill
 
+## 第三方致谢
+
+本 Mod 的战斗求解器核心 **Vendoring 并深度适配**了以下第三方项目，特此致谢：
+
+- **[Combat Solver](https://github.com/Torch1230/CombatSolver)**（作者：**Torch / Torch1230**）—— 战斗路线求解器。其搜索/模拟核心被本 Mod 内嵌并修改（去 RitsuLib、反射化、移除 publicize 依赖），用于 `GET /solver/plan` 的战斗决策建议。已获作者授权使用。
+- **[Random Foreseer](https://github.com/hotwords123/StS2.RandomForeseer)**（作者：**hotwords123**）—— [创意工坊页面](https://steamcommunity.com/sharedfiles/filedetails/?id=3747531952)。Combat Solver 的战斗模拟引擎核（战斗状态、牌堆、RNG、Fork、历史、Mirror）部分来自其实现，并在获得 hotwords123 书面许可后进行改造。本 Mod 仅 Vendoring 引擎源码，**不加载/分发 Random Foreseer 程序集作为运行时依赖**。
+
+> 第三方来源代码遵循**原作者许可边界**：Combat Solver 仓库无统一许可证；Random Foreseer 来源代码以 Combat Solver 的 `THIRD_PARTY_NOTICES.md` 为准。上述来源不受本仓库 AGPL-3.0-only 自动覆盖。
+
 ## License
 
 This project is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).

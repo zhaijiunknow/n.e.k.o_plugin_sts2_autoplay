@@ -20,6 +20,7 @@ public static class ModEntry
         GameThread.Initialize();
         GameEventService.Instance.Start();
         HttpServer.Instance.Start();
+        CombatSolver.CombatSolverRuntime.Install();
         Log.Info($"{LogPrefix} Ready");
     }
 

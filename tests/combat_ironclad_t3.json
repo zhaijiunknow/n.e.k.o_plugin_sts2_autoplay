@@ -1,0 +1,76 @@
+{
+  "state_version": 10, "run_id": "WFC2G62D1QD8", "screen": "COMBAT",
+  "session": {"mode": "singleplayer", "phase": "run", "control_scope": "local_player"},
+  "in_combat": true, "turn": 3,
+  "available_actions": ["end_turn", "play_card", "save_and_quit"],
+  "combat": {
+    "player": {
+      "current_hp": 63, "max_hp": 80, "block": 0, "energy": 3, "stars": 0, "focus": 0,
+      "powers": [{"power_id": "SHRINK_POWER", "amount": -1, "is_debuff": true}],
+      "base_orb_slots": 0, "orb_capacity": 0, "empty_orb_slots": 0, "orbs": [],
+      "cards_played_this_turn": 0, "attacks_played_this_turn": 0, "skills_played_this_turn": 0
+    },
+    "players": [
+      {"player_id": "1", "slot_index": 0, "is_local": true, "is_connected": true,
+       "character_id": "IRONCLAD", "character_name": "铁甲战士",
+       "current_hp": 63, "max_hp": 80, "block": 0, "energy": 3, "stars": 0, "focus": 0, "is_alive": true}
+    ],
+    "hand": [
+      {"index": 0, "card_id": "DEFEND_IRONCLAD", "energy_cost": 1, "target_type": "Self",
+       "valid_target_indices": [], "dynamic_values": [{"name": "Block", "current_value": 5, "base_value": 5}], "playable": true},
+      {"index": 1, "card_id": "DEFEND_IRONCLAD", "energy_cost": 1, "target_type": "Self",
+       "valid_target_indices": [], "dynamic_values": [{"name": "Block", "current_value": 5, "base_value": 5}], "playable": true},
+      {"index": 2, "card_id": "DEFEND_IRONCLAD", "energy_cost": 1, "target_type": "Self",
+       "valid_target_indices": [], "dynamic_values": [{"name": "Block", "current_value": 5, "base_value": 5}], "playable": true},
+      {"index": 3, "card_id": "STRIKE_IRONCLAD", "energy_cost": 1, "target_type": "AnyEnemy",
+       "valid_target_indices": [0], "dynamic_values": [{"name": "Damage", "current_value": 4, "base_value": 6}], "playable": true},
+      {"index": 4, "card_id": "VOID", "energy_cost": -1, "target_type": "None",
+       "valid_target_indices": [], "dynamic_values": [], "playable": false}
+    ],
+    "enemies": [
+      {"index": 0, "enemy_id": "SHRINKER_BEETLE", "current_hp": 19, "max_hp": 42, "block": 0,
+       "is_alive": true, "is_hittable": true, "intent": "STOMP_MOVE", "move_id": "STOMP_MOVE",
+       "powers": [{"power_id": "VULNERABLE_POWER", "amount": 1, "is_debuff": true}],
+       "intents": [{"intent_type": "Attack", "total_damage": 14, "damage": 14, "hits": 1}]}
+    ],
+    "end_turn_will_kill_player": false, "lethal_risks": []
+  },
+  "run": {
+    "character_id": "IRONCLAD", "max_energy": 3, "base_orb_slots": 0, "floor": 2,
+    "current_hp": 63, "max_hp": 80,
+    "potions": [
+      {"index": 0, "potion_id": null, "occupied": false, "can_use": false, "can_discard": false},
+      {"index": 1, "potion_id": null, "occupied": false, "can_use": false, "can_discard": false}
+    ],
+    "relics": [
+      {"index": 0, "relic_id": "BURNING_BLOOD", "is_melted": false},
+      {"index": 1, "relic_id": "KALEIDOSCOPE", "is_melted": false}
+    ],
+    "deck": [
+      {"index": 0, "card_id": "STRIKE_IRONCLAD", "energy_cost": 1, "dynamic_values": [{"name": "Damage", "current_value": 6, "base_value": 6}]},
+      {"index": 1, "card_id": "STRIKE_IRONCLAD", "energy_cost": 1, "dynamic_values": [{"name": "Damage", "current_value": 6, "base_value": 6}]},
+      {"index": 2, "card_id": "STRIKE_IRONCLAD", "energy_cost": 1, "dynamic_values": [{"name": "Damage", "current_value": 6, "base_value": 6}]},
+      {"index": 3, "card_id": "STRIKE_IRONCLAD", "energy_cost": 1, "dynamic_values": [{"name": "Damage", "current_value": 6, "base_value": 6}]},
+      {"index": 4, "card_id": "STRIKE_IRONCLAD", "energy_cost": 1, "dynamic_values": [{"name": "Damage", "current_value": 6, "base_value": 6}]},
+      {"index": 5, "card_id": "DEFEND_IRONCLAD", "energy_cost": 1, "dynamic_values": [{"name": "Block", "current_value": 5, "base_value": 5}]},
+      {"index": 6, "card_id": "DEFEND_IRONCLAD", "energy_cost": 1, "dynamic_values": [{"name": "Block", "current_value": 5, "base_value": 5}]},
+      {"index": 7, "card_id": "DEFEND_IRONCLAD", "energy_cost": 1, "dynamic_values": [{"name": "Block", "current_value": 5, "base_value": 5}]},
+      {"index": 8, "card_id": "DEFEND_IRONCLAD", "energy_cost": 1, "dynamic_values": [{"name": "Block", "current_value": 5, "base_value": 5}]},
+      {"index": 9, "card_id": "BASH", "energy_cost": 2, "dynamic_values": [{"name": "Damage", "current_value": 8, "base_value": 8}, {"name": "VulnerablePower", "current_value": 2, "base_value": 2}]},
+      {"index": 10, "card_id": "ASCENDERS_BANE", "energy_cost": -1, "dynamic_values": []},
+      {"index": 11, "card_id": "TURBO", "energy_cost": 0, "dynamic_values": [{"name": "Energy", "current_value": 2, "base_value": 2}]},
+      {"index": 12, "card_id": "CHARGE_BATTERY", "energy_cost": 1, "dynamic_values": [{"name": "Block", "current_value": 7, "base_value": 7}, {"name": "Energy", "current_value": 1, "base_value": 1}]}
+    ]
+  },
+  "agent_view": {
+    "combat": {
+      "draw_cards": [
+        {"card_id": "TURBO"}, {"card_id": "CHARGE_BATTERY"}, {"card_id": "DEFEND_IRONCLAD"},
+        {"card_id": "STRIKE_IRONCLAD"}, {"card_id": "STRIKE_IRONCLAD"}, {"card_id": "STRIKE_IRONCLAD"},
+        {"card_id": "BASH"}, {"card_id": "STRIKE_IRONCLAD"}
+      ],
+      "discard_cards": [],
+      "exhaust_cards": [{"card_id": "ASCENDERS_BANE"}]
+    }
+  }
+}

@@ -5,6 +5,7 @@ using System.Threading;
 using MegaCrit.Sts2.Core.Debug;
 using MegaCrit.Sts2.Core.Logging;
 using NekoComm.Game;
+using NekoComm.Game.Sim;
 namespace NekoComm.Server;
 
 internal static class Router
@@ -28,6 +29,20 @@ internal static class Router
         try
         {
             Log.Info($"{LogPrefix} {requestId} {request.HttpMethod} {request.Url?.AbsolutePath}");
+
+            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
+                (request.Url?.AbsolutePath == "/capture/on" || request.Url?.AbsolutePath == "/capture/off"))
+            {
+                SimCapture.Enabled = request.Url?.AbsolutePath == "/capture/on";
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = new { capture = SimCapture.Enabled, dir = SimCapture.CaptureDirectory }
+                });
+                statusCode = 200;
+                return;
+            }
 
             if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath == "/health")
@@ -89,6 +104,44 @@ internal static class Router
                     ok = true,
                     request_id = requestId,
                     data = payload
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/solver/plan")
+            {
+                // Use the ASYNC InvokeAsync overload: the vendored Capture runs on the game thread,
+                // while the search is offloaded to a Task.Run worker so the game thread is not blocked.
+                var plan = await GameThread.InvokeAsync(() => GameSolverService.BuildSolverPlanAsync());
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = plan
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/solver/test")
+            {
+                // Debug route: run Capture + Solve and return the plan alongside solver/engine state so
+                // the operator can confirm the vendored brain is live and the isolation patches held.
+                var plan = await GameThread.InvokeAsync(() => GameSolverService.BuildSolverPlanAsync());
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = new
+                    {
+                        solver_enabled = GameSolverService.SolverEnabled,
+                        isolation_guaranteed = CombatSolver.CombatSolverRuntime.IsolationGuaranteed,
+                        engine = "combatsolver",
+                        plan,
+                    }
                 });
                 statusCode = 200;
                 return;

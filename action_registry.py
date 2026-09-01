@@ -46,7 +46,7 @@ class STS2ActionRegistry:
 
     def _category_for(self, action_type: str) -> str:
         normalized = str(action_type or "").strip().lower()
-        if normalized == "play_card":
+        if normalized in {"play_card", "use_potion", "discard_potion"}:
             return "combat"
         if normalized == "end_turn":
             return "combat_end"

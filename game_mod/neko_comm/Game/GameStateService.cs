@@ -3154,7 +3154,7 @@ internal static class GameStateService
         }).ToArray();
     }
 
-    private static CardModel[] ReadCombatPileCards(object? playerCombatState, params string[] memberNames)
+    internal static CardModel[] ReadCombatPileCards(object? playerCombatState, params string[] memberNames)
     {
         if (playerCombatState == null)
         {
@@ -3174,7 +3174,7 @@ internal static class GameStateService
         return Array.Empty<CardModel>();
     }
 
-    private static CardModel[] ExtractCards(object? value)
+    internal static CardModel[] ExtractCards(object? value)
     {
         return ExtractCards(value, new HashSet<object>(ReferenceEqualityComparer.Instance));
     }
@@ -3226,7 +3226,7 @@ internal static class GameStateService
         return Array.Empty<CardModel>();
     }
 
-    private static object? TryGetMemberValue(object instance, string memberName)
+    internal static object? TryGetMemberValue(object instance, string memberName)
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 

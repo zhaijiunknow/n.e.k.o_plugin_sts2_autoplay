@@ -13,23 +13,31 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .simulator import end_turn, new_turn, play_hand_index, use_potion
 from .state import BattleState, PlayerState
-from .simulator import play_hand_index, end_turn, new_turn, use_potion
 
 
 def _usable_potion(pid: str) -> bool:
-    """战斗内可用+有数值效果(kind 已知且 value>0)的药水才进搜索。"""
+    """战斗内可用 + 有可评估效果的药水才进搜索。
+
+    纯数值类(block/heal/attack/draw/energy/max_hp/orb_slots)需 value>0；
+    buff:<P> 需 >0 层；orb:<TYPE> 允许 value==0（按槽位充能）。
+    unknown / utility（对战斗无直接影响）不进搜索。
+    """
     from .potion_data import POTION_TABLE
     e = POTION_TABLE.get(pid)
     if not e:
         return False
     if e.get("usage") != "CombatOnly":
         return False
-    if not e.get("value"):
+    kind = str(e.get("kind", "")).strip()
+    if not kind or kind.startswith("unknown") or kind == "utility":
         return False
-    if str(e.get("kind", "")).startswith("unknown") or not e.get("kind"):
-        return False
-    return True
+    if kind.startswith("buff:"):
+        return bool(e.get("value"))
+    if kind in {"block", "heal", "attack", "draw", "energy", "max_hp", "orb_slots"}:
+        return bool(e.get("value"))
+    return True  # orb:TYPE 等状态类：value 0 也可（按槽位）
 
 
 @dataclass
@@ -61,14 +69,21 @@ def _score(state: BattleState) -> float:
     return enemy_damage * ENEMY_HP_VALUE - hp_lost * HP_VALUE + player.block * 0.5
 
 
+def _potion_target_kind(pid: str) -> str:
+    """药水的目标类型（AnyEnemy/AllEnemies/...），决定 use_potion 是否要 target_index。"""
+    from .potion_data import POTION_TABLE
+    return str(POTION_TABLE.get(pid, {}).get("target") or "")
+
+
 def _playable_moves(state: BattleState, player: PlayerState) -> list[tuple[int, int | None]]:
-    """当前可打出的牌：(手牌下标, 目标下标)。只支持我们已建模范畴（伤害/格挡）的牌。"""
+    """当前可打出的牌：(手牌下标, 目标下标)。支持我们已建模范畴：伤害/格挡/增益/球/抽/能量。"""
     moves: list[tuple[int, int | None]] = []
     for i, card in enumerate(player.hand):
-        if card.cost > player.energy or card.cost < 0:
+        if card.cost > player.energy or card.cost < 0 or card.star_cost > player.stars:
             continue
-        if not (card.damage or card.block):
-            continue  # v1 不推荐无即时数值的卡（球/增益等）
+        if not (card.damage or card.block or card.powers_applied or card.orb_action
+                or card.cards_draw or card.energy_gain):
+            continue  # 无任何已建模效果的牌（纯状态牌等）不推荐
         tgt = (card.target or "").lower()
         if tgt in ("anyenemy", "allenemies"):
             for cur in range(len(state.enemies)):
@@ -89,7 +104,6 @@ def search(
     max_turn_actions: int = 6,
 ) -> SearchNode:
     """从当前（玩家回合中）局面开始，向前推 horizon 个玩家回合，返回最优线。"""
-    player = state.players[0]
     # 每回合起点 = (状态, 线, 分)。第一回合从当前状态开始（能量/手牌已就位）。
     turn_nodes: list[SearchNode] = [SearchNode(state.clone(), [], _score(state.clone()))]
 
@@ -101,7 +115,9 @@ def search(
             for _ in range(max_turn_actions):
                 nextm: list[SearchNode] = []
                 for m in mid:
-                    for idx, tgt in _playable_moves(m.state, player):
+                    # 用克隆局的玩家取可打牌，保证 idx 和 play_hand_index 打在同一个手牌上
+                    # （否则跨回合克隆手牌变化后 idx 错位，会把诅咒/状态牌当可打牌误出）。
+                    for idx, tgt in _playable_moves(m.state, m.state.players[0]):
                         c = m.state.clone()
                         hand = c.players[0].hand
                         card_id = hand[idx].card_id if idx < len(hand) else ""
@@ -137,20 +153,42 @@ def search(
     return best
 
 
+def _fmt_line(line: list[tuple[Any, ...]]) -> list[tuple[str, Any]]:
+    """把 line 每一步压成 (kind, id)；END 这类无承载的步，id 给 None。"""
+    return [(s[0], s[1] if len(s) > 1 else None) for s in line]
+
+
 def first_recommendation(best: SearchNode, live_state: BattleState) -> dict[str, Any] | None:
-    """从最优线里取第一步，映射为当前手牌下标（供外层执行 play_card）。"""
-    for step in best.line:
-        if step[0] == "PLAY":
-            card_id = step[1]
-            target = step[2]
-            # 在 live 手牌里找该 card_id 的下标
-            hand = live_state.players[0].hand
-            idx = next((i for i, c in enumerate(hand) if c.card_id == card_id), None)
-            if idx is None:
-                return {"action": "end_turn", "reason": "recommended_card_not_in_hand"}
-            return {"action": "play_card", "card_index": idx, "target_index": target,
-                    "card_id": card_id, "line": [(s[0], s[1] if len(s) > 1 else s[0]) for s in best.line],
-                    "score": round(best.score, 3)}
+    """从最优线里取第一步：play_card（映射手牌下标）或 use_potion（回 potion_id）。
+
+    药水只回 potion_id，真正的 option_index（raw.run.potions[] 下标，含空槽）由外层解析，
+    因为 sim 的 player.potions 是压缩过的（只留占用槽）。
+    """
+    if not best.line:
+        return {"action": "end_turn", "reason": "recommended_moves_exhausted"}
+    step = best.line[0]
+    if step[0] == "PLAY":
+        card_id = step[1]
+        target = step[2]
+        # 在 live 手牌里找该 card_id 的下标
+        hand = live_state.players[0].hand
+        idx = next((i for i, c in enumerate(hand) if c.card_id == card_id), None)
+        if idx is None:
+            return {"action": "end_turn", "reason": "recommended_card_not_in_hand"}
+        return {"action": "play_card", "card_index": idx, "target_index": target,
+                "card_id": card_id, "line": _fmt_line(best.line),
+                "score": round(best.score, 3)}
+    if step[0] == "POTION":
+        potion_id = step[1]
+        rec = {"action": "use_potion", "potion_id": potion_id,
+               "line": _fmt_line(best.line),
+               "score": round(best.score, 3)}
+        if _potion_target_kind(potion_id) == "AnyEnemy":
+            target_index = next((int(e.id) for e in live_state.enemies if e.alive), -1)
+            if target_index < 0:
+                return {"action": "end_turn", "reason": "potion_target_unavailable"}
+            rec["target_index"] = target_index
+        return rec
     return {"action": "end_turn", "reason": "recommended_moves_exhausted"}
 
 

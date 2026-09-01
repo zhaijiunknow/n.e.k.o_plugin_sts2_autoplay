@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .combat_decision import sim_recommend
 from .planner_interface import PlannedOperation
 
 
@@ -115,6 +116,32 @@ class STS2HeuristicPlanner:
                 return PlannedOperation(action_type=action["type"], kwargs={}, confidence=0.8, source="heuristic", reason="chest_default")
 
         if state_name == "combat":
+            # 优先用 sim 跨回合 beam 搜索推荐（已验证模拟器），heuristic 兜底。
+            sim_rec = sim_recommend(snapshot)
+            if sim_rec and sim_rec.get("card_index") is not None:
+                kw = {"card_index": sim_rec["card_index"]}
+                if sim_rec.get("target_index") is not None:
+                    kw["target_index"] = sim_rec["target_index"]
+                self._debug("[sts2_combat_plan] sim_search recommended=%s", sim_rec.get("card_id"))
+                return PlannedOperation(
+                    action_type="play_card",
+                    kwargs=kw,
+                    confidence=0.9,
+                    source="sim_search",
+                    reason=str(sim_rec.get("reason") or "sim_combat_search"),
+                )
+            if sim_rec and sim_rec.get("action") == "use_potion" and sim_rec.get("option_index") is not None:
+                kw = {"option_index": sim_rec["option_index"]}
+                if sim_rec.get("target_index") is not None:
+                    kw["target_index"] = sim_rec["target_index"]
+                self._debug("[sts2_combat_plan] sim_search recommended potion=%s", sim_rec.get("option_index"))
+                return PlannedOperation(
+                    action_type="use_potion",
+                    kwargs=kw,
+                    confidence=0.9,
+                    source="sim_search",
+                    reason=str(sim_rec.get("reason") or "sim_potion"),
+                )
             self._debug(
                 "[sts2_combat_plan] incoming=%s block=%s energy=%s guidance=%s hand=%s",
                 self._incoming_attack_total(snapshot),
@@ -840,6 +867,8 @@ class STS2HeuristicPlanner:
                 score += 20
 
         score += self._base_reward_score(text, energy_gain)
+        # 数值打分：用 dynamic_values 的实际量级（伤害×连击/格挡/抽牌/能量/易伤），按费用与自损扣减。
+        score += self._reward_value_score(card)
 
         branches = deck_policy.get("branches") if isinstance(deck_policy.get("branches"), list) else []
         matched_branch = self._matched_reward_branch(branches, archetype_tags, text)
@@ -896,6 +925,35 @@ class STS2HeuristicPlanner:
         if energy_gain > 0 or any(token in text for token in ["获得能量", "gain energy", "恢复能量", "refund energy"]):
             score += 16 + (energy_gain * 4)
         return score
+
+    def _reward_value_score(self, card: dict[str, Any]) -> float:
+        """基于卡牌 dynamic_values 的实际量级打分（补充关键词打分的盲区：不区分 4 伤和 9 伤）。
+
+        伤害×连击、格挡、抽牌、能量、易伤/虚弱均按量加分；自损(HpLoss)与费用扣分。
+        """
+        dmg = self._reward_dynamic_value(card, "Damage")
+        blk = self._reward_dynamic_value(card, "Block")
+        draw = self._reward_dynamic_value(card, "Cards")
+        energy = self._reward_dynamic_value(card, "Energy")
+        vuln = self._reward_dynamic_value(card, "VulnerablePower")
+        weak = self._reward_dynamic_value(card, "WeakPower")
+        hp_loss = self._reward_dynamic_value(card, "HpLoss")
+        # 多段攻击：Repeat 动态值（如 3伤×3）优先，其次 hit_count。
+        repeat = self._reward_dynamic_value(card, "Repeat")
+        hits = max(1, repeat or self._safe_int(card.get("hit_count")) or 1)
+        cost = self._safe_int(card.get("energy_cost")) or 0
+        star_cost = self._safe_int(card.get("star_cost")) or 0
+        return (
+            dmg * hits * 1.0
+            + blk * 0.8
+            + draw * 6.0
+            + energy * 8.0
+            + vuln * 3.0
+            + weak * 2.0
+            - hp_loss * 2.5
+            - cost * 2.0
+            - star_cost * 1.0
+        )
 
     def _reward_dynamic_value(self, card: dict[str, Any], field_name: str) -> int:
         for item in card.get("dynamic_values") if isinstance(card.get("dynamic_values"), list) else []:

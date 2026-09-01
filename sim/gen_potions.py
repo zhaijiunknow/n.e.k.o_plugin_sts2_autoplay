@@ -23,6 +23,35 @@ _COMMAND_KIND = [
     re.compile(r"GainEnergy\(|EnergyVar"),
 ]
 
+# 反编译源码里这些药水的效果无法被上面的命令/Var 推断（多为交互式或资源类），手动给出 kind 与 value。
+# kind 语义见 sim/effects.apply_potion；utility = 对战斗评分无直接影响（进不了 search）。
+# value 依据 data/eng/potions.json 的描述数字（如 "Gain 5 Max HP" -> value=5）。
+_MANUAL_KINDS: dict[str, tuple[str, int]] = {
+    "ASHWATER": ("hand_exhaust", 1),
+    "ATTACK_POTION": ("draw", 1),
+    "BLESSING_OF_THE_FORGE": ("upgrade_hand", 2),
+    "COLORLESS_POTION": ("draw", 1),
+    "COSMIC_CONCOCTION": ("draw", 3),
+    "CUNNING_POTION": ("draw", 3),
+    "DEPRECATED_POTION": ("utility", 0),
+    "DISTILLED_CHAOS": ("draw", 3),
+    "DROPLET_OF_PRECOGNITION": ("draw", 1),
+    "ENTROPIC_BREW": ("utility", 0),
+    "ESSENCE_OF_DARKNESS": ("orb:DARK", 0),
+    "FRUIT_JUICE": ("max_hp", 5),
+    "GAMBLERS_BREW": ("draw", 3),
+    "KINGS_COURAGE": ("upgrade_hand", 2),
+    "LIQUID_MEMORIES": ("draw", 1),
+    "OROBIC_ACID": ("draw", 3),
+    "POTION_OF_CAPACITY": ("orb_slots", 2),
+    "POT_OF_GHOULS": ("draw", 2),
+    "POWER_POTION": ("draw", 1),
+    "SKILL_POTION": ("draw", 1),
+    "SOLDIERS_STEW": ("upgrade_hand", 1),
+    "STAR_POTION": ("utility", 0),
+    "TOUCH_OF_INSANITY": ("utility", 0),
+}
+
 def snake(name: str) -> str:
     return re.sub(r"_+", "_", re.sub(r"(?<!^)(?=[A-Z])", "_", name)).upper().strip("_")
 
@@ -76,6 +105,9 @@ def main() -> int:
         with open(os.path.join(POTIONS_DIR, fn), encoding="utf-8") as f:
             d = parse(f.read())
         if d:
+            ov = _MANUAL_KINDS.get(d["id"])
+            if ov is not None:
+                d["kind"], d["value"] = ov
             rows.append(d)
     print(f"parsed {len(rows)} potions")
     lines = ['"""自动生成：全部药水的效果表（由 sim/gen_potions.py 生成，勿手改）。"""',

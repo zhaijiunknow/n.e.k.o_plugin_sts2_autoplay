@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 from .cards import card as get_card
-from .effects import (apply_card, apply_potion, apply_relic_hook,
-                      draw_cards, tick_turn_end, process_orbs_turn_end,
-                      player_receive_damage, power_turn_start)
+from .effects import (
+    apply_card,
+    apply_potion,
+    apply_relic_hook,
+    draw_cards,
+    player_receive_damage,
+    power_turn_start,
+    process_orbs_turn_end,
+    tick_turn_end,
+)
 from .monster_ai import predict_next, table
 from .state import BattleState, CardInstance, EnemyState, PlayerState
 
@@ -56,7 +63,8 @@ def play_hand_index(
     if hand_index < 0 or hand_index >= len(player.hand):
         return False
     card = player.hand[hand_index]
-    if card.cost > player.energy:
+    # 负费用（诅咒/不可打出）、超能量、超星星的牌都不能打。
+    if card.cost < 0 or card.cost > player.energy or card.star_cost > player.stars:
         return False
     apply_card(state, player, card, target)
     player.hand.pop(hand_index)

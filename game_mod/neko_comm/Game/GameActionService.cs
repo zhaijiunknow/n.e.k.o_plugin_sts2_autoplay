@@ -2,6 +2,7 @@ using Godot;
 using System.Reflection;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using NekoComm.Game.Sim;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
@@ -221,6 +222,7 @@ internal static class GameActionService
         }
 
         var roundNumber = playerCombatState.RoundNumber;
+        SimCapture.Begin("end_turn", combatState, me, new { player_index = request.player_index });
         endTurnButton!.ForceClick();
 
         // Co-op ending a player's turn does NOT necessarily advance the round — it hands the
@@ -228,6 +230,7 @@ internal static class GameActionService
         var stable = isCoop
             ? await WaitForPlayerActionPhaseEndAsync(me, roundNumber, TimeSpan.FromSeconds(5))
             : await WaitForEndTurnTransitionAsync(roundNumber, TimeSpan.FromSeconds(5));
+        SimCapture.End(combatState, me);
 
         return new ActionResponsePayload
         {
@@ -417,6 +420,14 @@ internal static class GameActionService
 
         var target = ResolveCardTarget(request, combatState, card);
 
+        // Capture (when enabled): snapshot the pre-action state so a later replay can diff.
+        SimCapture.Begin("play_card", combatState, me, new
+        {
+            card_index = request.card_index,
+            card_id = card.Id.Entry,
+            target_index = request.target_index,
+        });
+
         if (!card.TryManualPlay(target))
         {
             throw new ApiException(409, "invalid_action", "Card cannot be played in the current state.", new
@@ -437,6 +448,9 @@ internal static class GameActionService
         else if (cardType == "Skill") SkillsPlayedThisTurn++;
 
         var stable = await WaitForPlayCardTransitionAsync(card, TimeSpan.FromSeconds(5));
+
+        // Capture: after the action settles, snapshot post-state and write the event.
+        SimCapture.End(combatState, me);
 
         return new ActionResponsePayload
         {
