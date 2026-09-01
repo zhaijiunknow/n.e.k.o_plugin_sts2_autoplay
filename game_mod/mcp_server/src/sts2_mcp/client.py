@@ -83,6 +83,22 @@ class Sts2Client:
         payload = self._request("GET", "/actions/available")
         return list(payload.get("actions", []))
 
+    def get_combat_plan(self) -> dict[str, Any]:
+        """Read the combat solver's recommended line of play for the current combat.
+
+        Calls GET /solver/plan. When not in combat or the solver cannot run, the payload is
+        `{"in_combat": false, "reason": "..."}`, so callers must check `in_combat` first.
+        """
+        return self._request("GET", "/solver/plan")
+
+    def get_coop_state(self) -> dict[str, Any]:
+        """Read the co-op combat view from GET /coop/state.
+
+        Returns every combat player (each with its own action-phase flag and hand) plus the shared
+        enemies, so an agent can observe and drive the partner player (slot 1).
+        """
+        return self._request("GET", "/coop/state")
+
     def get_game_data_collection(self, collection: str) -> Any:
         return self._request("GET", f"/data/{collection}", expect_object_data=False)
 

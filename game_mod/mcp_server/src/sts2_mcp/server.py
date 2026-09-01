@@ -551,6 +551,18 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
         """List currently executable actions with `requires_index` and `requires_target` hints."""
         return sts2.get_available_actions()
 
+    @mcp.tool
+    def get_combat_plan() -> dict[str, Any]:
+        """Get the combat solver's recommended line of play.
+
+        The mod runs a CombatSolver search over the live combat and returns the recommended next
+        action, the projected action `line`, and coverage/risk diagnostics from `/solver/plan`.
+
+        Returns `{"in_combat": false, "reason": "..."}` when not in combat or the solver cannot
+        run, so always check `in_combat` before acting on `action` / `line`.
+        """
+        return sts2.get_combat_plan()
+
     if profile in {"full", "layered"}:
         @mcp.tool
         def get_planner_context(planner_note: str | None = None) -> dict[str, Any]:
@@ -580,6 +592,15 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                 planner_note=planner_note,
                 include_knowledge=include_knowledge,
             )
+
+        @mcp.tool
+        def get_coop_state() -> dict[str, Any]:
+            """Read the co-op combat view from `/coop/state`.
+
+            Returns every combat player (each with its own action-phase flag and hand) plus the
+            shared enemies, so an agent can observe and drive the partner player (slot 1).
+            """
+            return sts2.get_coop_state()
 
         @mcp.tool
         def create_combat_handoff(

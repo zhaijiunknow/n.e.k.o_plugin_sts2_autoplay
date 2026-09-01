@@ -8,13 +8,14 @@
 
 - `guided`
   - 默认 profile
-  - 只暴露 `health_check`、`get_game_state`、`get_raw_game_state`、`get_available_actions`、`act`、`get_game_data_item`、`get_game_data_items`、`get_relevant_game_data`、`wait_for_event`、`wait_until_actionable`
+  - 只暴露 `health_check`、`get_game_state`、`get_raw_game_state`、`get_available_actions`、`get_combat_plan`、`act`、`get_game_data_item`、`get_game_data_items`、`get_relevant_game_data`、`wait_for_event`、`wait_until_actionable`
 - `layered`
   - 面向主 / 副 Agent 分层编排
   - 在 guided 基础上额外暴露：
     - `get_planner_context`
     - `create_planner_handoff`
     - `get_combat_context`
+    - `get_coop_state`
     - `create_combat_handoff`
     - `complete_combat_handoff`
     - `append_combat_knowledge`
@@ -32,6 +33,7 @@
 - `get_game_state`
 - `get_raw_game_state`
 - `get_available_actions`
+- `get_combat_plan`
 - `act`
 - `get_game_data_item`
 - `get_game_data_items`
@@ -41,6 +43,7 @@
 - `get_planner_context`（layered / full）
 - `create_planner_handoff`（layered / full）
 - `get_combat_context`（layered / full）
+- `get_coop_state`（layered / full）
 - `create_combat_handoff`（layered / full）
 - `complete_combat_handoff`（layered / full）
 - `append_combat_knowledge`（layered / full）
