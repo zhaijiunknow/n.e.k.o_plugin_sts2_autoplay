@@ -12,7 +12,7 @@ from .action_engine import STS2ActionEngine
 from .action_registry import STS2ActionRegistry
 from .candidate_generator import STS2CandidateGenerator
 from .catgirl_bridge import STS2CatgirlBridge
-from .catgirl_llm import CatgirlCommentGenerator
+from .catgirl_llm import CatgirlCommentGenerator, EventAdviceGenerator
 from .companion_evaluator import STS2CompanionEvaluator
 from .danmu_bridge import STS2DanmuBridge
 from .danmu_events import DanmuEventTracker
@@ -72,6 +72,10 @@ class STS2AutoplayService:
         self._catgirl_llm_inflight = False
         self._last_catgirl_llm_at = 0.0
         self._catgirl_llm_interval = 10.0
+        # 事件房 LLM 建议（与 heuristic 融合），默认开
+        self._event_advice = EventAdviceGenerator(self.logger)
+        self._event_llm_enabled = True
+        self._event_llm_weight = 0.5
         self._client: STS2TransportClient | None = None
         self._cfg: dict[str, Any] = {}
         self._state = STS2RuntimeState()
@@ -152,6 +156,12 @@ class STS2AutoplayService:
             self._catgirl_llm_interval = max(2.0, float(self._cfg.get("catgirl_llm_min_interval_seconds", 10.0) or 10.0))
         except (TypeError, ValueError):
             self._catgirl_llm_interval = 10.0
+        # 事件房 LLM 建议：开关 + 融合权重（0=纯 heuristic，1=纯 LLM）
+        self._event_llm_enabled = bool(self._cfg.get("event_llm_enabled", True))
+        try:
+            self._event_llm_weight = max(0.0, min(1.0, float(self._cfg.get("event_llm_weight", 0.5) or 0.5)))
+        except (TypeError, ValueError):
+            self._event_llm_weight = 0.5
         base_url = self._resolve_base_url()
         self._state.base_url = base_url
         self._apply_control_mode("program")
@@ -207,6 +217,8 @@ class STS2AutoplayService:
             self._client = None
         if self._catgirl_llm is not None:
             await self._catgirl_llm.shutdown()
+        if self._event_advice is not None:
+            await self._event_advice.shutdown()
         self._state.transport_state = "disconnected"
         self._state.autoplay_state = "idle"
         self._emit_status()

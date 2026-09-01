@@ -40,6 +40,9 @@ danmu_scrolling_delay_scale = 0.2
 danmu_ambient_enabled = true
 catgirl_llm_enabled = true
 catgirl_llm_min_interval_seconds = 10
+# 事件房决策：LLM 给每个选项打分，与 heuristic 融合后再选（0=纯 heuristic，1=纯 LLM）
+event_llm_enabled = true
+event_llm_weight = 0.5
 qt_overlay_window = "Slay the Spire"
 
 [plugin]

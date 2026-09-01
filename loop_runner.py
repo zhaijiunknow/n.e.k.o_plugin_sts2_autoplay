@@ -26,6 +26,10 @@ class STS2LoopRunner:
         # recomputed on every tick while the combat position is unchanged. See _combat_plan_signature.
         self._solver_plan_sig: Any = None
         self._solver_plan_cached: dict[str, Any] | None = None
+        # Cache the event-room LLM advice against the event-state signature (see _event_plan_signature)
+        # so the LLM is not re-consulted every tick while the event options are unchanged.
+        self._event_llm_sig: Any = None
+        self._event_llm_cached: dict[int, float] | None = None
 
     async def tick(self) -> dict[str, Any]:
         client = self._service._require_client()
@@ -84,6 +88,50 @@ class STS2LoopRunner:
             # Not in a combat decision phase: drop the cache so re-entering combat refetches.
             self._solver_plan_sig = None
             self._solver_plan_cached = None
+        # Event-room LLM advice (per-option scores) for heuristic fusion. plan() is sync and the LLM
+        # is async, so fetch here (async tick) and inject into the contexts it reads. Cache by
+        # event-state signature so the LLM is not re-consulted while the event options are unchanged.
+        event_llm_scores = None
+        event_llm_weight = float(getattr(self._service, "_event_llm_weight", 0.5) or 0.5)
+        in_event_decision = (
+            bool(getattr(self._service, "_event_llm_enabled", True))
+            and classification.get("state_name") == "event"
+            and mode_info.get("allows_planner")
+        )
+        if in_event_decision:
+            esig = _event_plan_signature(summary_context)
+            if esig == self._event_llm_sig:
+                event_llm_scores = self._event_llm_cached
+            else:
+                try:
+                    payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
+                    event_options = payload.get("event_options") if isinstance(payload.get("event_options"), list) else []
+                    player = snapshot_summary.get("player") if isinstance(snapshot_summary.get("player"), dict) else {}
+                    run_context = {
+                        "character_name": player.get("character_name"),
+                        "current_hp": player.get("current_hp") if player.get("current_hp") is not None else payload.get("current_hp"),
+                        "max_hp": player.get("max_hp") if player.get("max_hp") is not None else payload.get("max_hp"),
+                        "gold": payload.get("gold"),
+                        "deck": payload.get("deck"),
+                        "relics": payload.get("relics"),
+                    }
+                    fetched = await self._service._event_advice.score_event_options(
+                        options=event_options,
+                        run_context=run_context,
+                        strategy_context=strategy_context,
+                    )
+                except Exception:
+                    fetched = None
+                if fetched:
+                    event_llm_scores = fetched
+                    self._event_llm_sig = esig
+                    self._event_llm_cached = fetched
+                else:
+                    event_llm_scores = None
+        else:
+            # Not in an event decision phase: drop the cache so re-entering an event refetches.
+            self._event_llm_sig = None
+            self._event_llm_cached = None
         candidate_actions = self._service._candidate_generator.generate(
             {
                 "snapshot": {**snapshot, "action_registry": action_registry},
@@ -91,6 +139,8 @@ class STS2LoopRunner:
                 "summary_context": summary_context,
                 "strategy_context": strategy_context,
                 "solver_plan": solver_plan,
+                "event_llm_scores": event_llm_scores,
+                "event_llm_weight": event_llm_weight,
             },
             mode="program",
         )
@@ -147,6 +197,8 @@ class STS2LoopRunner:
             "strategy_context": strategy_context,
             "mode": mode_info,
             "solver_plan": solver_plan,
+            "event_llm_scores": event_llm_scores,
+            "event_llm_weight": event_llm_weight,
         }
         planned_operation = self._service._planner.plan(planning_context) if mode_info.get("allows_planner") else None
         planned_operation_dict = planned_operation.as_dict() if planned_operation is not None else None
@@ -345,6 +397,26 @@ class STS2LoopRunner:
         self._autoplay_task = None
         self._poll_task = None
         self._stop_owner_loop()
+
+
+def _event_plan_signature(summary_context: dict[str, Any]) -> str:
+    """Stable fingerprint of the event-room state an LLM advice call depends on.
+
+    Reuse the cached event_llm_scores while the event options + player resources are unchanged, so a
+    repeated tick does not re-consult the LLM for the same event position.
+    """
+    payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
+    frozen = json.dumps(
+        {
+            "event_options": payload.get("event_options"),
+            "current_hp": payload.get("current_hp"),
+            "max_hp": payload.get("max_hp"),
+            "gold": payload.get("gold"),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(frozen.encode("utf-8")).hexdigest()
 
 
 def _combat_plan_signature(snapshot: dict[str, Any]) -> str:

@@ -1,3 +1,7 @@
 [plugin_runtime]
 enabled = true
 auto_start = false
+
+# 事件房决策：LLM 给选项打分，与 heuristic 融合后再选。
+# event_llm_enabled = true
+# event_llm_weight = 0.5  # 0=纯 heuristic, 1=纯 LLM

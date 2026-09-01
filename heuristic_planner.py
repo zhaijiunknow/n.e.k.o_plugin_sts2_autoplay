@@ -45,15 +45,22 @@ class STS2HeuristicPlanner:
         if state_name == "event":
             action = self._find_action(available_actions, "choose_event_option")
             if action is not None:
-                preferred_option = self._preferred_event_option(summary_context, preferences)
+                event_llm_scores = context.get("event_llm_scores")
+                preferred_option = self._preferred_event_option(
+                    summary_context,
+                    preferences,
+                    event_llm_scores=event_llm_scores,
+                    event_llm_weight=context.get("event_llm_weight", 0.5),
+                )
                 self._debug(
                     "[sts2_event_plan] options=%s chosen=%s payload=%s",
                     summary_context.get("payload", {}).get("event_options") if isinstance(summary_context.get("payload"), dict) else [],
                     preferred_option,
                     summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {},
                 )
+                source = "heuristic+llm" if isinstance(event_llm_scores, dict) and event_llm_scores else "heuristic"
                 kwargs = {"option_index": preferred_option if preferred_option is not None else 0}
-                return PlannedOperation(action_type=action["type"], kwargs=kwargs, confidence=0.8, source="heuristic", reason="event_preference_or_default")
+                return PlannedOperation(action_type=action["type"], kwargs=kwargs, confidence=0.8, source=source, reason="event_preference_or_default")
 
         if state_name == "map":
             action = self._find_action(available_actions, "choose_map_node")
@@ -278,7 +285,14 @@ class STS2HeuristicPlanner:
             return index
         return None
 
-    def _preferred_event_option(self, summary_context: dict[str, Any], preferences: dict[str, Any]) -> int | None:
+    def _preferred_event_option(
+        self,
+        summary_context: dict[str, Any],
+        preferences: dict[str, Any],
+        *,
+        event_llm_scores: dict[int, float] | None = None,
+        event_llm_weight: float = 0.5,
+    ) -> int | None:
         payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
         event_options = payload.get("event_options") if isinstance(payload.get("event_options"), list) else []
         current_hp = self._safe_int(payload.get("current_hp")) or 0
@@ -286,27 +300,71 @@ class STS2HeuristicPlanner:
         gold = self._safe_int(payload.get("gold")) or 0
         hp_ratio = (current_hp / max_hp) if max_hp > 0 else 0.0
         guidance_override = self._guidance_override_from_payload(summary_context)
-        best_candidate: tuple[int, int] | None = None
+
+        # 1) Hard override: the human pinned a specific option via natural-language override. It wins
+        #    regardless of the LLM suggestion (explicit intent is not diluted by fusion).
+        pinned = self._preferred_option_index(preferences)
+        if pinned is not None:
+            return pinned
+
+        # 2) Score each option: heuristic base (normalized to 0-100 within the option set), fused with
+        #    the LLM's per-option advice (weighted), then the guidance constraint is applied on top so
+        #    the human's intent stays a hard signal even when the LLM disagrees.
+        w = max(0.0, min(1.0, float(event_llm_weight if event_llm_weight is not None else 0.5)))
+        llm = event_llm_scores if isinstance(event_llm_scores, dict) else {}
+        hei_scores: dict[int, int] = {}
         for index, option in enumerate(event_options):
             if not isinstance(option, dict):
                 continue
-            score = self._score_event_option(option, hp_ratio, gold)
-            if guidance_override.get("prefer_defense") and any(token in self._event_option_text(option) for token in ["lose hp", "失去生命", "掉血"]):
-                score -= 20
-            if guidance_override.get("prefer_attack") and any(token in self._event_option_text(option) for token in ["relic", "遗物", "gold", "金币", "card", "卡牌"]):
-                score += 10
             option_index = self._safe_int(option.get("index"))
             if option_index is None:
                 option_index = index
-            candidate = (-score, option_index)
-            if best_candidate is None or candidate < best_candidate:
-                best_candidate = candidate
-        if best_candidate is not None and best_candidate[0] < 0:
+            hei_scores[option_index] = self._score_event_option(option, hp_ratio, gold)
+        hei_norm = self._normalize_percentile(hei_scores)
+
+        best_candidate: tuple[float, int | None] | None = None
+        for index, option in enumerate(event_options):
+            if not isinstance(option, dict):
+                continue
+            option_index = self._safe_int(option.get("index"))
+            if option_index is None:
+                option_index = index
+            hei = hei_norm.get(option_index, 50.0)
+            llm_score = llm.get(option_index)
+            final = (w * float(llm_score) + (1.0 - w) * hei) if llm_score is not None else hei
+            text = self._event_option_text(option)
+            if guidance_override.get("prefer_defense") and self._option_loses_hp(text):
+                final -= 15.0
+            if guidance_override.get("prefer_attack") and any(tok in text for tok in ["relic", "遗物", "gold", "金币", "card", "卡牌"]):
+                final += 10.0
+            if best_candidate is None or final > best_candidate[0]:
+                best_candidate = (final, option_index)
+        if best_candidate is not None and best_candidate[1] is not None:
             return best_candidate[1]
-        record = preferences.get("record") if isinstance(preferences.get("record"), dict) else {}
-        value = record.get("value") if isinstance(record.get("value"), dict) else {}
-        preferred = value.get("preferred_option_index")
-        return self._safe_int(preferred)
+        return None
+
+    @staticmethod
+    def _normalize_percentile(scores: dict[int, int]) -> dict[int, float]:
+        """把一组整数分 min-max 归一化到 0-100（单值/全等分 → 50），供与 LLM 0-100 分融合。"""
+        if not scores:
+            return {}
+        values = [float(v) for v in scores.values()]
+        lo, hi = min(values), max(values)
+        if hi <= lo:
+            return {k: 50.0 for k in scores}
+        return {k: 100.0 * (float(v) - lo) / (hi - lo) for k, v in scores.items()}
+
+    @staticmethod
+    def _option_loses_hp(text: str) -> bool:
+        """事件选项是否掉血（健壮匹配，容忍 "lose 7 HP"/"Lose HP"/中文表述）。"""
+        t = str(text or "").lower()
+        return (
+            "失去生命" in t
+            or "掉血" in t
+            or "lose hp" in t
+            or "lose health" in t
+            or re.search(r"lose\s+\d+\s*(hp|health)", t) is not None
+        )
 
     def _preferred_option_index(self, preferences: dict[str, Any]) -> int | None:
         record = preferences.get("record") if isinstance(preferences.get("record"), dict) else None
