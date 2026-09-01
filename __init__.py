@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-import subprocess
-import sys
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from plugin.sdk.plugin import Err, NekoPluginBase, Ok, SdkError, lifecycle, llm_tool, neko_plugin, plugin_entry, tr
 
 from .dispatcher import STS2Dispatcher
-from .qt_overlay_manager import QtOverlayManager
 from .service import STS2AutoplayService
 
 JsonObject = dict[str, Any]
@@ -31,11 +27,6 @@ class STS2AutoplayPlugin(NekoPluginBase):
         self.file_logger = self.enable_file_logging(log_level="INFO")
         self.logger = self.file_logger
         self._cfg: JsonObject = {}
-        self._overlay = QtOverlayManager(
-            self.logger,
-            plugin_id=self.plugin_id,
-            plugin_dir=self.config_dir,
-        )
         self._dispatcher = STS2Dispatcher(self)
         self._service = STS2AutoplayService(
             self.logger,
@@ -50,15 +41,7 @@ class STS2AutoplayPlugin(NekoPluginBase):
     async def startup(self, **_: Any):
         cfg = _as_mapping(await self.config.dump(timeout=5.0))
         self._cfg = _as_mapping(cfg.get("sts2"))
-        # 浮层参数：窗口贴合 / 自定义尺寸 / 速度 / 字号 / 高度百分比（start 时生效）
-        self._overlay.configure(
-            window=str(self._cfg.get("qt_overlay_window", "") or ""),
-            rect=str(self._cfg.get("qt_overlay_rect", "") or ""),
-            speed=float(self._cfg.get("danmu_speed", 0) or 0),
-            font_size=int(self._cfg.get("danmu_font_size", 0) or 0),
-            height_percent=int(self._cfg.get("danmu_height_percent", 30) or 30),
-        )
-        # 注册插件静态 UI（弹幕浮层页），服务地址：/plugin/sts2_autoplay/ui/
+        # 注册插件静态 UI（sts2 面板），服务地址：/plugin/sts2_autoplay/ui/
         registered = self.register_static_ui("static")
         if not registered:
             self.logger.warning("[sts2_static_ui] static UI 注册失败：插件 static/ 目录缺失")
@@ -68,52 +51,7 @@ class STS2AutoplayPlugin(NekoPluginBase):
     @lifecycle(id="shutdown")
     async def shutdown(self, **_: Any):
         await self._service.shutdown()
-        try:
-            self._overlay.stop()
-        except Exception:
-            pass
-        self._cleanup_overlay_processes()
         return Ok({"status": "shutdown"})
-
-    def _cleanup_overlay_processes(self) -> None:
-        """关闭插件时终止本插件启动的 Qt 弹幕浮层子进程（qt_overlay.py）。
-
-        匹配：命令行含 ``--url`` 指向本插件 SSE 的 ``qt_overlay.py``（按路径结尾匹配，
-        避免误杀含该字符串的调用者）。
-        """
-        try:
-            import shlex
-
-            import psutil
-        except Exception:
-            return
-        plugin_marker = f"{self.plugin_id}/ui-api/events"
-        killed = 0
-        for proc in psutil.process_iter(["name", "cmdline"]):
-            try:
-                cmd = " ".join(proc.info.get("cmdline") or [])
-            except Exception:
-                continue
-            if plugin_marker not in cmd:
-                continue
-            try:
-                tokens = shlex.split(cmd)
-            except Exception:
-                tokens = []
-            if not any(token.endswith("qt_overlay.py") for token in tokens):
-                continue
-            try:
-                self.logger.info("[sts2_autoplay] 关闭插件，终止弹幕浮层进程 pid=%s", proc.pid)
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except Exception:
-                    proc.kill()
-                killed += 1
-            except Exception:
-                pass
-        if killed:
-            self.logger.info("[sts2_autoplay] 已终止 %s 个弹幕浮层进程", killed)
 
     @llm_tool(
         name="sts2_get_status",
@@ -360,65 +298,4 @@ class STS2AutoplayPlugin(NekoPluginBase):
     )
     async def sts2_execute_planned_operation(self, **_: Any):
         return await self._run_entry(self._service.neko.execute_planned_operation, finish=True)
-
-    @plugin_entry(
-        id="sts2_overlay_status",
-        name=tr("entries.sts2_overlay_status.name", default="看看弹幕浮层开着没"),
-        description=tr("entries.sts2_overlay_status.description", default="查询 Qt 透明弹幕浮层是否在运行。"),
-        llm_result_fields=["summary"],
-        input_schema={"type": "object", "properties": {}},
-        metadata={"agent_auto": False},
-    )
-    async def sts2_overlay_status(self, **_: Any):
-        # overlay 方法是同步的（返回 dict），直接 Ok 包装，不走 _run_entry 的 await
-        return Ok(self._overlay.status())
-
-    @plugin_entry(
-        id="sts2_overlay_start",
-        name=tr("entries.sts2_overlay_start.name", default="打开弹幕浮层"),
-        description=tr("entries.sts2_overlay_start.description", default="启动 Qt 透明弹幕浮层，叠在游戏窗口上滚动显示弹幕。"),
-        llm_result_fields=["summary"],
-        input_schema={"type": "object", "properties": {}},
-        metadata={"agent_auto": False},
-    )
-    async def sts2_overlay_start(self, **_: Any):
-        return Ok(self._overlay.start())
-
-    @plugin_entry(
-        id="sts2_overlay_stop",
-        name=tr("entries.sts2_overlay_stop.name", default="关掉弹幕浮层"),
-        description=tr("entries.sts2_overlay_stop.description", default="停止 Qt 透明弹幕浮层进程。"),
-        llm_result_fields=["summary"],
-        input_schema={"type": "object", "properties": {}},
-        metadata={"agent_auto": False},
-    )
-    async def sts2_overlay_stop(self, **_: Any):
-        return Ok(self._overlay.stop())
-
-    @plugin_entry(
-        id="sts2_install_pyqt6",
-        name=tr("entries.sts2_install_pyqt6.name", default="安装 PyQt6"),
-        description=tr("entries.sts2_install_pyqt6.description", default="一键安装弹幕浮层所需的 PyQt6 库（联网，可能耗时）。"),
-        llm_result_fields=["summary"],
-        input_schema={"type": "object", "properties": {}},
-        metadata={"agent_auto": False},
-    )
-    async def sts2_install_pyqt6(self, **_: Any):
-        script = self.config_dir / "install_pyqt6.py"
-        if not script.is_file():
-            return Ok({"ok": False, "error": "install_pyqt6.py 不存在"})
-        try:
-            # 安装可能耗时，放线程池避免阻塞插件事件循环
-            result = await asyncio.to_thread(
-                subprocess.run,
-                [sys.executable, str(script)],
-                capture_output=True,
-                timeout=600,
-            )
-            tail = (result.stderr or result.stdout or b"").decode("utf-8", "replace")[-300:]
-            if result.returncode == 0:
-                return Ok({"ok": True, "installed": True, "summary": "PyQt6 已就绪"})
-            return Ok({"ok": False, "error": tail})
-        except Exception as exc:
-            return Ok({"ok": False, "error": str(exc)})
 

@@ -67,7 +67,7 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
     entries = collect_entries()
     entry_ids = {entry_id for entry_id, _ in entries}
 
-    assert len(entries) == 17
+    assert len(entries) == 13
     assert entry_ids == {
         "sts2_health_check",
         "sts2_read_state",
@@ -82,8 +82,4 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
         "sts2_get_planned_operation",
         "sts2_execute_planned_operation",
         "sts2_apply_user_override",
-        "sts2_overlay_status",
-        "sts2_overlay_start",
-        "sts2_overlay_stop",
-        "sts2_install_pyqt6",
     }

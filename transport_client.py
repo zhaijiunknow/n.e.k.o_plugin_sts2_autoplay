@@ -38,6 +38,17 @@ class STS2TransportClient:
     async def execute_action(self, action: str, **kwargs: Any) -> Dict[str, Any]:
         return await self._request("POST", "/action", json=self._build_action_payload(action, **kwargs))
 
+    async def push_danmaku(self, text: str, *, style: str = "catgirl", placement: str = "scrolling", avatar: str | None = None) -> Dict[str, Any]:
+        """Push a catgirl danmaku line to the in-game overlay (POST /danmaku).
+
+        `avatar` is an optional base64 image (with or without a data:...;base64, prefix) rendered next to
+        the catgirl text in-game.
+        """
+        payload: Dict[str, Any] = {"text": text, "style": style, "placement": placement}
+        if avatar:
+            payload["avatar"] = avatar
+        return await self._request("POST", "/danmaku", json=payload)
+
     def _build_action_payload(self, action_name: str, **kwargs: Any) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"action": action_name}
         for key, value in kwargs.items():

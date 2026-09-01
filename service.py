@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections import deque
 from hashlib import sha1
 from random import random
 from time import time
@@ -14,10 +13,6 @@ from .candidate_generator import STS2CandidateGenerator
 from .catgirl_bridge import STS2CatgirlBridge
 from .catgirl_llm import CatgirlCommentGenerator, EventAdviceGenerator
 from .companion_evaluator import STS2CompanionEvaluator
-from .danmu_bridge import STS2DanmuBridge
-from .danmu_events import DanmuEventTracker
-from .danmu_spire import _load_rules, _truncated_normal, burst_profile, match_events, pick_rule_burst
-from .danmu_text import build_viewer_danmu, pick_ambient_bucket
 from .heuristic_planner import STS2HeuristicPlanner
 from .instructions import normalize_guidance_instruction
 from .loop_runner import STS2LoopRunner
@@ -36,42 +31,25 @@ from .transport_client import STS2TransportClient
 STATUS_PUSH_MIN_INTERVAL = 2.0
 STATUS_PUSH_HEARTBEAT = 5.0
 
-# 弹幕：每次触发事件的发射条数按正态分布抽样（中值 10，不做密度/最大值门控）
-_DANMU_EMIT_MEAN = 10
-_DANMU_EMIT_DEVIATION = 3
-_DANMU_EMIT_MIN = 1
-_DANMU_EMIT_MAX = 20
 
 
 class STS2AutoplayService:
-    def __init__(self, logger: Any, status_reporter: Callable[[dict[str, Any]], None], frontend_notifier: Callable[..., Any] | None = None, *, sdk_bus: Any = None, sdk_ctx: Any = None, i18n: Any = None, danmu_bridge: Any = None) -> None:
+    def __init__(self, logger: Any, status_reporter: Callable[[dict[str, Any]], None], frontend_notifier: Callable[..., Any] | None = None, *, sdk_bus: Any = None, sdk_ctx: Any = None, i18n: Any = None) -> None:
         self.logger = logger
         self._report_status = status_reporter
         self._frontend_notifier = frontend_notifier
         self._sdk_bus = sdk_bus
         self._sdk_ctx = sdk_ctx
         self._i18n = i18n
-        self._danmu_bridge = danmu_bridge if danmu_bridge is not None else STS2DanmuBridge(self.logger)
-        self._last_danmu_payload: dict[str, Any] | None = None
-        self._danmu_seen: deque[str] = deque(maxlen=6)
-        # 快照 diff 事件流：每次 refresh 出事件 → 规则弹幕（独立于 should_sync 闸门）
-        self._danmu_tracker = DanmuEventTracker(self.logger)
-        self._danmu_density = 100  # 词条密度（50-200%），configure 可覆盖
-        self._danmu_burst_target = 10  # 发射目标条数（区域容量×填满比例×2），configure 覆盖
-        self._scrolling_delay_scale = 0.5  # 横向弹幕延迟缩放（顶部弹幕不缩放），configure 覆盖
-        self._danmu_ambient_enabled = True  # 场景氛围弹幕（战斗/奖励/商店等进入时填充），configure 覆盖
-        # 「当前游戏信息状态」面板：触发计数 + 状态推送节流状态
-        self._trigger_counts: dict[str, int] = {}
-        self._last_run_id: str = ""
-        self._last_status_sig: str = ""
-        self._last_status_push_at: float = 0.0
-        self._trigger_names: list[str] = list(_load_rules().keys())
         # 猫娘 LLM 点评生成（catgirl 弹幕真内容来源），节流状态
         self._catgirl_llm = CatgirlCommentGenerator(self.logger)
         self._catgirl_llm_enabled = True
         self._catgirl_llm_inflight = False
         self._last_catgirl_llm_at = 0.0
         self._catgirl_llm_interval = 10.0
+        # 猫娘头像(base64)缓存:从 N.E.K.O 主 server card-drop 拉一次,TTL 300s
+        self._avatar_b64: str | None = None
+        self._avatar_at: float = 0.0
         # 事件房 LLM 建议（与 heuristic 融合），默认开
         self._event_advice = EventAdviceGenerator(self.logger)
         self._event_llm_enabled = True
@@ -110,46 +88,6 @@ class STS2AutoplayService:
         except Exception:
             pass
         self._cfg = dict(cfg)
-        if self._danmu_bridge is not None:
-            self._danmu_bridge.enabled = bool(self._cfg.get("danmu_overlay_enabled", True))
-            self._danmu_bridge.dedup_enabled = bool(self._cfg.get("danmu_dedup_enabled", False))
-            top_mode = str(self._cfg.get("danmu_top_mode", "standard") or "standard").strip().lower()
-            if top_mode in ("none", "standard", "all"):
-                self._danmu_bridge.top_mode = top_mode
-        if self._danmu_tracker is not None and "danmu_multiplayer_enabled" in self._cfg:
-            # 配置指定多人模式（否则 tracker 从快照自动检测）
-            self._danmu_tracker.set_multiplayer(bool(self._cfg.get("danmu_multiplayer_enabled", False)))
-        # 词条密度（50-200%，对齐 mod），默认 100%
-        try:
-            self._danmu_density = max(50, min(200, int(self._cfg.get("danmu_density", 100) or 100)))
-        except (TypeError, ValueError):
-            self._danmu_density = 100
-        # 弹幕密度 = 区域容量 × 填满比例 × 2（延迟补偿）
-        # 容量 = 轨道数（区域高度/行高）× 每轨条数（窗口宽/平均弹幕宽）
-        try:
-            win_h = max(200, int(self._cfg.get("danmu_window_height", 1080) or 1080))
-            win_w = max(200, int(self._cfg.get("danmu_window_width", 1920) or 1920))
-            zone_pct = max(1, min(100, int(self._cfg.get("danmu_height_percent", 30) or 30)))
-            font_size = max(1, int(self._cfg.get("danmu_font_size", 20) or 20))
-            fill = max(0.05, min(1.0, float(self._cfg.get("danmu_zone_fill", 0.5) or 0.5)))
-        except (TypeError, ValueError):
-            win_h, win_w, zone_pct, font_size, fill = 1080, 1920, 30, 20, 0.5
-        zone_h = max(0.0, win_h * (zone_pct / 100.0) - 130)
-        line_h = max(30.0, float(font_size) * 1.6)
-        lanes = max(1, min(20, int(zone_h / line_h)))
-        avg_w = max(80.0, float(font_size) * 15.0)
-        per_lane = max(1, int(win_w / avg_w))
-        capacity = lanes * per_lane
-        # 发射目标 = 容量 × 填满比例 × 2（弹幕延迟导致同刻在屏约一半，需双倍发射）
-        self._danmu_burst_target = max(1, int(capacity * fill * 2))
-        # 横向弹幕延迟缩放（0-1，越小横向出现越快；顶部弹幕不受影响）
-        try:
-            # 横向弹幕延迟缩放（0-3）：<1 更快更密，>1 更慢更稀；顶部弹幕不缩放
-            self._scrolling_delay_scale = max(0.0, min(3.0, float(self._cfg.get("danmu_scrolling_delay_scale", 1.0) or 1.0)))
-        except (TypeError, ValueError):
-            self._scrolling_delay_scale = 0.5
-        # 场景氛围弹幕开关
-        self._danmu_ambient_enabled = bool(self._cfg.get("danmu_ambient_enabled", True))
         # 猫娘 LLM 点评：开关 + 最小生成间隔（节流）
         self._catgirl_llm_enabled = bool(self._cfg.get("catgirl_llm_enabled", True))
         try:
@@ -252,8 +190,6 @@ class STS2AutoplayService:
         self._state.touch_success()
         self._remember_snapshot_metadata()
         self._update_run_intent()
-        # 快照 diff 事件流弹幕：每次 tick 都跑，不受 trigger_sync / should_sync 闸门限制
-        self._emit_danmu_events()
         if trigger_sync:
             self._deliver_catgirl_sync(self._state.snapshot)
         self._emit_status()
@@ -994,198 +930,6 @@ class STS2AutoplayService:
         self._state.last_decision_reason = str(agent_operation.get("reason") or self._state.last_decision_reason)
         self._state.last_decision_generation = int(agent_operation.get("decision_epoch") or self._state.last_decision_generation)
 
-    def _emit_danmu_events(self) -> None:
-        """快照 diff 事件流：feed → 规则匹配 → 按强度分批推送弹幕。
-
-        事件流独立于 chat 点评节奏（should_sync），每次快照都跑。
-        发射机制对齐 mod：按规则强度抽 2-12 条（保证 1 条角色弹幕）、
-        按强度置顶概率（narration 才置顶）、延迟分布分批推出。
-        """
-        if self._danmu_bridge is None or not self._danmu_bridge.enabled:
-            return
-        try:
-            events = self._danmu_tracker.feed(self._state.raw_state, self._state.snapshot)
-            if events:
-                # 氛围弹幕：场景进入（战斗/奖励/商店/火堆/事件）时填充当前屏幕词条
-                if self._danmu_ambient_enabled:
-                    self._emit_ambient(events)
-                hits = match_events(events, self._danmu_tracker)
-                # 触发计数：run 生命周期清零 + 逐 hit 累加（供「当前游戏信息状态」面板）
-                self._update_trigger_counts(events, hits)
-                for hit in hits:
-                    try:
-                        # 弹幕数量：正态分布抽样（中值 10），不做密度/最大值门控；顶部概率仍按强度。
-                        # 不做延迟：全部立即推，前端按轨道互相避让（pickLane 全满丢弃）。
-                        _, top_prob = burst_profile(hit.trigger, self._danmu_density)
-                        emit_count = int(round(_truncated_normal(_DANMU_EMIT_MEAN, _DANMU_EMIT_DEVIATION, _DANMU_EMIT_MIN, _DANMU_EMIT_MAX)))
-                        emit_count = max(_DANMU_EMIT_MIN, emit_count)
-                        burst = pick_rule_burst(hit.trigger, hit.context, variant=hit.variant, count=emit_count)
-                    except Exception:
-                        burst = []
-                        top_prob = 0.0
-                    for phrase in burst:
-                        placement = self._danmu_placement(phrase["style"], top_prob)
-                        self._danmu_bridge.push_text(
-                            phrase["text"],
-                            style=phrase["style"],
-                            placement=placement,
-                        )
-                # 事件订阅生成：弹幕事件触发 → 猫娘 LLM 也生成一条点评（仅受启用/可用/节流限制）
-                self._maybe_emit_catgirl_llm_event()
-            scene_changed = any(getattr(e, "type", "") == "scene_changed" for e in events)
-            # 状态推送：场景切换时强制立即推（消除切换延迟），否则按节流/心跳
-            self._maybe_push_game_status(force=scene_changed)
-        except Exception as exc:  # 事件流失败不阻断主链路
-            try:
-                self.logger.debug("[sts2_danmu] 事件流弹幕失败: %s", exc)
-            except Exception:
-                pass
-
-    def _update_trigger_counts(self, events: list[Any], hits: list[Any]) -> None:
-        """触发计数：run 生命周期清零 + 逐 hit 累加（供「当前游戏信息状态」面板）。
-
-        清零信号：run_started / run_ended 事件，或 raw_state 的 run_id 变化。
-        （tracker 在 run_id 直接切换时不发 run_started，见 danmu_events._diff，
-        因此这里同时用 run_id 变化兜底。）
-        """
-        etypes = [getattr(e, "type", "") for e in events]
-        run_id = self._current_run_id(self._state.raw_state)
-        if run_id != self._last_run_id or any(t in ("run_started", "run_ended") for t in etypes):
-            self._trigger_counts = {}
-        self._last_run_id = run_id
-        for hit in hits:
-            name = str(getattr(hit, "trigger", "") or "")
-            if name:
-                self._trigger_counts[name] = self._trigger_counts.get(name, 0) + 1
-
-    @staticmethod
-    def _current_run_id(raw_state: dict[str, Any]) -> str:
-        """从 raw_state 提取 run_id（镜像 danmu_events._extract 的取法）。"""
-        if not isinstance(raw_state, dict):
-            return ""
-        run = raw_state.get("run") if isinstance(raw_state.get("run"), dict) else {}
-        return str(raw_state.get("run_id") or run.get("run_id") or "")
-
-    def _build_game_status_data(self) -> dict[str, Any]:
-        """组「当前游戏信息状态」载荷（game 信息 + 57 个条件名 + 触发计数）。"""
-        snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
-        classification = snapshot.get("classification") if isinstance(snapshot.get("classification"), dict) else {}
-        strategy_context = snapshot.get("strategy_context") if isinstance(snapshot.get("strategy_context"), dict) else {}
-        situation_summary = snapshot.get("situation_summary") if isinstance(snapshot.get("situation_summary"), dict) else {}
-        payload = situation_summary.get("payload") if isinstance(situation_summary.get("payload"), dict) else {}
-        player = payload.get("player") if isinstance(payload.get("player"), dict) else {}
-        # 金币真实来源在原始快照 run.gold（situation_summary.payload.player 只有 hp/block，没有 gold）
-        raw_state = self._state.raw_state if isinstance(self._state.raw_state, dict) else {}
-        run_raw = raw_state.get("run") if isinstance(raw_state.get("run"), dict) else {}
-        gold = run_raw.get("gold") if run_raw.get("gold") is not None else raw_state.get("gold")
-        mode = snapshot.get("mode") if isinstance(snapshot.get("mode"), dict) else self._mode_controller.describe(self._state.control_mode)
-        game = {
-            "screen": str(snapshot.get("screen") or "unknown"),
-            "screen_class": str(classification.get("screen_class") or "unknown"),
-            "floor": snapshot.get("floor", 0),
-            "act": snapshot.get("act", 0),
-            "in_combat": bool(snapshot.get("in_combat", False)),
-            "hp": player.get("current_hp"),
-            "max_hp": player.get("max_hp"),
-            "gold": gold,
-            "turn": snapshot.get("turn") if snapshot.get("turn") is not None else payload.get("turn"),
-            "summary_kind": str(situation_summary.get("kind") or ""),
-            "strategy_name": str(strategy_context.get("strategy_name") or ""),
-            "autoplay_state": str(self._state.autoplay_state),
-            "transport_state": str(self._state.transport_state),
-            "mode": dict(mode),
-            "standby": bool(self._state.standby),
-            "last_error": str(self._state.last_error or ""),
-            "step_count": int(self._state.step_count),
-        }
-        # 弹幕条件判定的全部参数（_extract 特征 + tracker 内部计数），供监控面板调试
-        try:
-            params = self._danmu_tracker.features(self._state.raw_state, self._state.snapshot)
-        except Exception:
-            params = {}
-        return {
-            "game": game,
-            "params": params,
-            "trigger_names": list(self._trigger_names),
-            "triggers": dict(self._trigger_counts),
-        }
-
-    def _status_signature(self, data: dict[str, Any]) -> str:
-        """状态变化签名：参与展示的字段 + 触发计数 + 判定参数标量计数。用于节流判断。"""
-        g = data.get("game", {})
-        keys = (
-            "screen", "screen_class", "floor", "act", "in_combat", "hp", "max_hp",
-            "gold", "turn", "summary_kind", "strategy_name", "autoplay_state",
-            "transport_state", "standby", "last_error",
-        )
-        parts = [str(g.get(k, "")) for k in keys]
-        counts = ",".join(f"{k}={v}" for k, v in sorted((data.get("triggers") or {}).items()))
-        # 判定参数中的标量计数变化也触发刷新（大 dict 如 deck_counts 交给心跳覆盖）
-        params = data.get("params", {})
-        param_keys = (
-            "combat_turn_plays", "shop_enter_gold", "no_damage_streak", "upgrade_streak",
-            "potion_used_in_combat", "combat_turn", "combat_is_first_turn",
-            "combat_damage_count", "idle_ticks", "elite_combat", "big_deck_triggered",
-            "multiplayer",
-        )
-        param_parts = [f"{k}={params.get(k)}" for k in param_keys]
-        return "|".join(parts + [counts] + param_parts)
-
-    def _maybe_push_game_status(self, *, force: bool = False) -> None:
-        """节流推送一次 game_status 事件到 SSE（供「当前游戏信息状态」面板）。
-
-        推送条件：状态签名变化 **或** 心跳到期（5s）；并且距上次推送 ≥ 最小间隔（2s）。
-        force=True（如场景切换）时跳过最小间隔立即推，消除切换延迟。
-        """
-        if self._danmu_bridge is None or not self._danmu_bridge.enabled:
-            return
-        data = self._build_game_status_data()
-        sig = self._status_signature(data)
-        now = time()
-        changed = sig != self._last_status_sig
-        heartbeat_due = (now - self._last_status_push_at) >= STATUS_PUSH_HEARTBEAT
-        min_ok = (now - self._last_status_push_at) >= STATUS_PUSH_MIN_INTERVAL
-        if not changed and not heartbeat_due and not force:
-            return
-        if not min_ok and not force:
-            return  # 变了但刚推过：不更新 sig，下一 tick 仍视为 changed → 2s 后补推
-        self._last_status_sig = sig
-        self._last_status_push_at = now
-        self._danmu_bridge.push_status(data=data)
-
-    @staticmethod
-    def _danmu_placement(style: str, top_prob: float) -> str:
-        """按强度顶部概率决定 placement（对齐 mod：只 narration 置顶）。"""
-        if style == "catgirl":
-            return "scrolling"
-        if top_prob > 0 and random() < top_prob:
-            return "top"
-        return "scrolling"
-
-    # 场景进入事件 → 氛围分桶（词库对应场景，抽中性词条）
-    _AMBIENT_BUCKET = {
-        "combat_started": "combat",
-        "reward_opened": "reward",
-        "shop_opened": "shop",
-        "rest_opened": "rest",
-        "event_opened": "event",
-    }
-
-    def _emit_ambient(self, events: list[Any]) -> None:
-        """场景进入时推一条当前屏幕的中性氛围弹幕（词库分桶，避开特定场面词条）。"""
-        if self._danmu_bridge is None or not self._danmu_bridge.enabled:
-            return
-        for ev in events:
-            bucket = self._AMBIENT_BUCKET.get(getattr(ev, "type", ""))
-            if not bucket:
-                continue
-            try:
-                text = pick_ambient_bucket(bucket)
-            except Exception:
-                text = None
-            if text:
-                self._danmu_bridge.push_text(text, style="narration")
-
     def _maybe_emit_catgirl_llm(self, snapshot: dict[str, Any], companion_evaluation: dict[str, Any], payload: dict[str, Any]) -> None:
         """catgirl 轨道：猫娘 LLM 生成点评（优先）或启发式 primary_message 兜底。
 
@@ -1217,35 +961,52 @@ class STS2AutoplayService:
         self.logger.info("[sts2_catgirl_llm] fallback enabled=%s llm_ok=%s kind=%s", enabled, llm_ok, kind)
         self._push_catgirl_fallback(companion_evaluation, payload)
 
-    def _maybe_emit_catgirl_llm_event(self) -> None:
-        """事件订阅生成：弹幕事件触发时猫娘 LLM 生成一条点评。
+    @staticmethod
+    def _main_server_port() -> int:
+        """解析 N.E.K.O 主 server 端口（环境变量优先，默认 48911）。"""
+        for key in ("NEKO_MAIN_SERVER_PORT", "MAIN_SERVER_PORT"):
+            raw = os.environ.get(key)
+            if raw:
+                try:
+                    port = int(raw)
+                    if 0 < port <= 65535:
+                        return port
+                except ValueError:
+                    pass
+        return 48911
 
-        不受 should_comment 去重门控，仅受启用/可用/inflight/节流限制；
-        快照有局面摘要才生成（避免无上下文乱说）。
-        """
-        if not self._catgirl_llm_enabled or self._catgirl_llm is None or not self._catgirl_llm.available:
-            return
+    async def _catgirl_avatar_base64(self) -> str | None:
+        """取猫娘头像 base64（N.E.K.O 主 server card-drop），TTL 300s 缓存；失败返回上次缓存或 None。"""
         now = time()
-        if self._catgirl_llm_inflight or (now - self._last_catgirl_llm_at) < self._catgirl_llm_interval:
-            return
-        snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
-        situation = snapshot.get("situation_summary") if isinstance(snapshot.get("situation_summary"), dict) else {}
-        summary_text = str(situation.get("text") or "").strip()
-        if not summary_text:
-            return
-        self.logger.info("[sts2_catgirl_llm] event schedule kind=%s", situation.get("kind"))
-        self._catgirl_llm_inflight = True
+        if self._avatar_b64 is not None and now - self._avatar_at < 300:
+            return self._avatar_b64
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._catgirl_llm_inflight = False
+            import httpx
+
+            url = f"http://127.0.0.1:{self._main_server_port()}/api/card-drop/active-character?include_avatar=true"
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(url)
+            payload = resp.json()
+            data = payload.get("data") if isinstance(payload, dict) else {}
+            avatar = data.get("avatar") if isinstance(data, dict) else None
+            if avatar:
+                self._avatar_b64 = str(avatar)
+                self._avatar_at = now
+        except Exception:
+            return self._avatar_b64
+        return self._avatar_b64
+
+    async def _push_catgirl(self, text: str) -> None:
+        """推一条猫娘点评到游戏内弹幕（mod /danmaku），带可选头像。"""
+        client = self._client
+        if client is None or not text:
             return
-        payload: dict[str, Any] = {
-            "message": summary_text,
-            "summary_kind": str(situation.get("kind") or ""),
-            "screen": snapshot.get("screen"),
-        }
-        loop.create_task(self._catgirl_llm_async(snapshot, payload))
+        avatar = await self._catgirl_avatar_base64()
+        try:
+            await client.push_danmaku(text, style="catgirl", avatar=avatar)
+            self.logger.info("[sts2_catgirl_llm] pushed catgirl danmu to mod")
+        except Exception as exc:
+            self.logger.info("[sts2_catgirl_llm] push failed: %s", exc)
 
     async def _catgirl_llm_async(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> None:
         """异步生成猫娘点评并推 catgirl 弹幕；失败静默（兜底留给下一次）。"""
@@ -1263,11 +1024,8 @@ class STS2AutoplayService:
                 self.logger.info("[sts2_catgirl_llm] result=%s", text)
             else:
                 self.logger.info("[sts2_catgirl_llm] result=None (LLM 失败/空) kind=%s", kind)
-            if text and self._danmu_bridge is not None and self._danmu_bridge.enabled:
-                self._danmu_bridge.push_text(text, style="catgirl")
-                self.logger.info("[sts2_catgirl_llm] pushed catgirl danmu")
-            elif text:
-                self.logger.info("[sts2_catgirl_llm] bridge disabled, not pushed")
+            if text:
+                await self._push_catgirl(text)
         except Exception as exc:
             self.logger.info("[sts2_catgirl_llm] exception %s kind=%s", exc, kind)
         finally:
@@ -1275,14 +1033,20 @@ class STS2AutoplayService:
             self._last_catgirl_llm_at = time()
 
     def _push_catgirl_fallback(self, companion_evaluation: dict[str, Any], payload: dict[str, Any]) -> None:
-        """兜底：推启发式 primary_message（原 catgirl 轨道文本来源）。"""
-        if self._danmu_bridge is None or not self._danmu_bridge.enabled:
+        """兜底：推启发式 primary_message 到游戏内弹幕（原 catgirl 轨道文本来源）。"""
+        client = self._client
+        if client is None:
             return
         catgirl_text = str(
             companion_evaluation.get("primary_message") or payload.get("message") or ""
         ).strip()
         if catgirl_text:
-            self._danmu_bridge.push_text(catgirl_text, style="catgirl")
+            try:
+                task = asyncio.get_running_loop().create_task(self._push_catgirl(catgirl_text))
+                # Fire-and-forget: retrieve any exception so asyncio doesn't warn about an unretrieved task error.
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            except Exception:
+                self.logger.info("[sts2_catgirl_llm] fallback push failed")
 
     def _deliver_catgirl_sync(self, snapshot: dict[str, Any]) -> None:
         catgirl_sync = snapshot.get("catgirl_sync") if isinstance(snapshot.get("catgirl_sync"), dict) else {}
@@ -1333,27 +1097,9 @@ class STS2AutoplayService:
             except Exception:
                 pass
             return
-        # W-DANMU-001：陪玩点评推入弹幕 SSE 流（web / Qt 浮层）。
-        # 放在 should_sync 闸门之后、should_comment 之前：弹幕不受 chat 点评节奏限制，
-        # 每次可同步事件都推。双轨：
-        #   1) catgirl 角色弹幕：猫娘说的点评（primary_message，带头像）
-        #   2) narration 旁白弹幕：观众视角社区词条（见 danmu_text.py）
-        if self._danmu_bridge is not None and self._danmu_bridge.enabled:
-            # catgirl 轨道：猫娘 LLM 生成点评（优先）或启发式 primary_message 兜底
-            self._maybe_emit_catgirl_llm(snapshot, companion_evaluation, payload)
-            signature = self._danmu_screen_signature(payload)
-            seen_before = bool(
-                signature
-                and signature in self._danmu_seen
-                and (not self._danmu_seen or self._danmu_seen[-1] != signature)
-            )
-            danmu_payload = self._enrich_danmu_payload(payload)
-            viewer = build_viewer_danmu(danmu_payload, self._last_danmu_payload, seen_before=seen_before)
-            if viewer:
-                self._danmu_bridge.push_text(viewer["text"], style=viewer["style"])
-            self._last_danmu_payload = dict(payload)
-            if signature:
-                self._danmu_seen.append(signature)
+        # catgirl 点评 → 游戏内弹幕（mod /danmaku）。节流/开关在 _maybe_emit_catgirl_llm 内部；
+        # 不再有社区旁白（narration）轨道与外部 overlay 显示。
+        self._maybe_emit_catgirl_llm(snapshot, companion_evaluation, payload)
         if companion_evaluation:
             if str(companion_evaluation.get("trigger") or "") == "combat_turn":
                 try:
@@ -1534,31 +1280,6 @@ class STS2AutoplayService:
         if len(normalized) <= limit:
             return normalized
         return normalized[: limit - 3].rstrip() + "..."
-
-    def _danmu_screen_signature(self, payload: dict[str, Any]) -> str:
-        """弹幕屏幕签名：战斗=screen+敌人名，其它=screen+summary_kind。用于重遇检测。"""
-        if not isinstance(payload, dict):
-            return ""
-        screen = str(payload.get("screen") or "unknown")
-        kind = str(payload.get("summary_kind") or "")
-        enemies = payload.get("enemies") if isinstance(payload.get("enemies"), list) else []
-        if screen.upper() in ("COMBAT", "BATTLE") or kind == "combat":
-            names = ",".join(sorted(str(e.get("name") or "") for e in enemies if isinstance(e, dict)))
-            return f"combat:{names}"
-        return f"{screen}:{kind}"
-
-    def _enrich_danmu_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """给弹幕生成器补充原始屏幕数据（奖励选牌/商店货品），供规则检测。"""
-        enriched = dict(payload)
-        screen = str(payload.get("screen") or "").upper()
-        raw = self._state.raw_state if isinstance(self._state.raw_state, dict) else {}
-        if screen in ("REWARD", "REWARDS", "SELECTION") and isinstance(raw.get("reward"), dict):
-            enriched["_offers"] = dict(raw["reward"])
-        elif screen in ("REWARD", "REWARDS", "SELECTION") and isinstance(raw.get("selection"), dict):
-            enriched["_offers"] = dict(raw["selection"])
-        if screen in ("SHOP", "STORE") and isinstance(raw.get("shop"), dict):
-            enriched["_shop"] = dict(raw["shop"])
-        return enriched
 
     def _push_companion_message(self) -> None:
         if not bool(self._cfg.get("companion_mode_enabled", False)):

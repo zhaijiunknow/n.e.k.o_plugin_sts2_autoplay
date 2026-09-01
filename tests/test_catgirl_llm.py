@@ -102,39 +102,44 @@ def test_build_messages_prompt() -> None:
 
 # ---- service 集成 ----
 
-class FakeDanmuBridge:
-    enabled = True
-
+class FakeClient:
     def __init__(self) -> None:
         self.pushed: list[tuple[str, str]] = []
 
-    def push_text(self, text, *, style="narration", placement=None, delay_seconds=0.0) -> bool:
+    async def push_danmaku(self, text, *, style="catgirl", placement="scrolling", avatar=None) -> dict:
         self.pushed.append((text, style))
-        return True
+        return {"status": "ok"}
 
 
 @pytest.mark.unit
 def test_maybe_emit_catgirl_llm_disabled_falls_back() -> None:
-    bridge = FakeDanmuBridge()
-    service = STS2AutoplayService(DummyLogger(), lambda p: None, lambda **k: None, danmu_bridge=bridge)
+    client = FakeClient()
+    service = STS2AutoplayService(DummyLogger(), lambda p: None, lambda **k: None)
+    service._client = client
     service._catgirl_llm_enabled = False
-    service._maybe_emit_catgirl_llm(
-        {},
-        {"should_comment": True, "primary_message": "建议先防御。"},
-        {"message": "建议先防御。"},
-    )
-    assert bridge.pushed == [("建议先防御。", "catgirl")]
+
+    async def go() -> None:
+        service._maybe_emit_catgirl_llm(
+            {},
+            {"should_comment": True, "primary_message": "建议先防御。"},
+            {"message": "建议先防御。"},
+        )
+        await asyncio.sleep(0.2)  # let the fire-and-forget push task run (it awaits a localhost avatar fetch)
+
+    asyncio.run(go())
+    assert client.pushed == [("建议先防御。", "catgirl")]
 
 
 @pytest.mark.unit
 def test_catgirl_llm_async_pushes_generated_text(monkeypatch) -> None:
 
-    bridge = FakeDanmuBridge()
-    service = STS2AutoplayService(DummyLogger(), lambda p: None, lambda **k: None, danmu_bridge=bridge)
+    client = FakeClient()
+    service = STS2AutoplayService(DummyLogger(), lambda p: None, lambda **k: None)
+    service._client = client
 
     async def fake_generate(*, summary_text, summary_kind, payload):
         return "喵呜，我盯上这个精英了"
 
     service._catgirl_llm.generate = fake_generate  # type: ignore[method-assign]
     asyncio.run(service._catgirl_llm_async({}, {"message": "局面描述", "summary_kind": "combat"}))
-    assert bridge.pushed == [("喵呜，我盯上这个精英了", "catgirl")]
+    assert client.pushed == [("喵呜，我盯上这个精英了", "catgirl")]

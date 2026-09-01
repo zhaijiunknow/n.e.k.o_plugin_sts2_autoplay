@@ -28,29 +28,18 @@ neko_auto_resume_after_low_hp = true
 neko_desperate_enabled = true
 neko_desperate_hp_threshold = 0.2
 neko_maximize_enabled = true
-danmu_overlay_enabled = true
-danmu_top_mode = "standard"
-danmu_multiplayer_enabled = false
-danmu_density = 100
-danmu_dedup_enabled = false
-danmu_zone_fill = 0.5
-danmu_window_height = 1080
-danmu_window_width = 1920
-danmu_scrolling_delay_scale = 0.2
-danmu_ambient_enabled = true
 catgirl_llm_enabled = true
 catgirl_llm_min_interval_seconds = 10
 # 事件房决策：LLM 给每个选项打分，与 heuristic 融合后再选（0=纯 heuristic，1=纯 LLM）
 event_llm_enabled = true
 event_llm_weight = 0.5
-qt_overlay_window = "Slay the Spire"
 
 [plugin]
 id = "sts2_autoplay"
 name = "尖塔2陪玩"
-description = "陪伴你在杀戮尖塔2（Slay the Spire 2）中游玩：弹幕陪玩浮层、自动出牌、局势点评与猫娘 LLM 实时解说。"
-short_description = "Slay the Spire 2 companion: danmaku overlay, autoplay, and live AI commentary."
-keywords = ["slay the spire", "杀戮尖塔", "陪玩", "弹幕", "autoplay", "companion", "sts2", "肉鸽", "卡牌"]
+description = "陪伴你在杀戮尖塔2（Slay the Spire 2）中游玩：自动出牌、局势点评与猫娘 LLM 实时解说（游戏内弹幕）。"
+short_description = "Slay the Spire 2 companion: autoplay, situation commentary, and live AI catgirl danmaku in-game."
+keywords = ["slay the spire", "杀戮尖塔", "陪玩", "autoplay", "companion", "sts2", "肉鸽", "卡牌"]
 version = "0.1.1"
 entry = "plugin.plugins.sts2_autoplay:STS2AutoplayPlugin"
 
