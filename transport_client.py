@@ -27,6 +27,14 @@ class STS2TransportClient:
     async def get_available_actions(self) -> Dict[str, Any]:
         return await self._request("GET", "/actions/available")
 
+    async def get_combat_plan(self) -> Dict[str, Any]:
+        """Read the mod's authoritative combat solver plan (GET /solver/plan).
+
+        Returns the SolverPlanPayload (in_combat/action/card_index/card_id/target_index/line),
+        or {"in_combat": false, "reason": "..."} when not in combat.
+        """
+        return await self._request("GET", "/solver/plan")
+
     async def execute_action(self, action: str, **kwargs: Any) -> Dict[str, Any]:
         return await self._request("POST", "/action", json=self._build_action_payload(action, **kwargs))
 

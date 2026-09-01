@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .combat_decision import sim_recommend
 from .planner_interface import PlannedOperation
 
 
@@ -116,32 +115,45 @@ class STS2HeuristicPlanner:
                 return PlannedOperation(action_type=action["type"], kwargs={}, confidence=0.8, source="heuristic", reason="chest_default")
 
         if state_name == "combat":
-            # 优先用 sim 跨回合 beam 搜索推荐（已验证模拟器），heuristic 兜底。
-            sim_rec = sim_recommend(snapshot)
-            if sim_rec and sim_rec.get("card_index") is not None:
-                kw = {"card_index": sim_rec["card_index"]}
-                if sim_rec.get("target_index") is not None:
-                    kw["target_index"] = sim_rec["target_index"]
-                self._debug("[sts2_combat_plan] sim_search recommended=%s", sim_rec.get("card_id"))
-                return PlannedOperation(
-                    action_type="play_card",
-                    kwargs=kw,
-                    confidence=0.9,
-                    source="sim_search",
-                    reason=str(sim_rec.get("reason") or "sim_combat_search"),
-                )
-            if sim_rec and sim_rec.get("action") == "use_potion" and sim_rec.get("option_index") is not None:
-                kw = {"option_index": sim_rec["option_index"]}
-                if sim_rec.get("target_index") is not None:
-                    kw["target_index"] = sim_rec["target_index"]
-                self._debug("[sts2_combat_plan] sim_search recommended potion=%s", sim_rec.get("option_index"))
-                return PlannedOperation(
-                    action_type="use_potion",
-                    kwargs=kw,
-                    confidence=0.9,
-                    source="sim_search",
-                    reason=str(sim_rec.get("reason") or "sim_potion"),
-                )
+            # 战斗推荐：优先取 mod 内 vendored CombatSolver（/solver/plan），heuristic 兜底。
+            # loop_runner.tick 已在战斗时取好 /solver/plan 塞进 context["solver_plan"]。
+            solver_plan = context.get("solver_plan") if isinstance(context.get("solver_plan"), dict) else None
+            if solver_plan and solver_plan.get("in_combat"):
+                solver_action = solver_plan.get("action")
+                if solver_action == "play_card" and solver_plan.get("card_index") is not None:
+                    kw = {"card_index": solver_plan["card_index"]}
+                    if solver_plan.get("target_index") is not None:
+                        kw["target_index"] = solver_plan["target_index"]
+                    self._debug("[sts2_combat_plan] mod_solver recommended=%s", solver_plan.get("card_id"))
+                    return PlannedOperation(
+                        action_type="play_card",
+                        kwargs=kw,
+                        confidence=0.9,
+                        source="mod_solver",
+                        reason=str(solver_plan.get("reason") or "mod_combat_search") or "mod_combat_search",
+                    )
+                if solver_action == "use_potion":
+                    potion_index = self._solver_potion_option_index(snapshot, solver_plan.get("card_id"))
+                    if potion_index is not None:
+                        kw = {"option_index": potion_index}
+                        if solver_plan.get("target_index") is not None:
+                            kw["target_index"] = solver_plan["target_index"]
+                        self._debug("[sts2_combat_plan] mod_solver recommended potion=%s", potion_index)
+                        return PlannedOperation(
+                            action_type="use_potion",
+                            kwargs=kw,
+                            confidence=0.9,
+                            source="mod_solver",
+                            reason=str(solver_plan.get("reason") or "mod_solver_potion") or "mod_solver_potion",
+                        )
+                if solver_action == "end_turn":
+                    return PlannedOperation(
+                        action_type="end_turn",
+                        kwargs={},
+                        confidence=0.9,
+                        source="mod_solver",
+                        reason="mod_solver_end_turn",
+                    )
             self._debug(
                 "[sts2_combat_plan] incoming=%s block=%s energy=%s guidance=%s hand=%s",
                 self._incoming_attack_total(snapshot),
@@ -194,6 +206,27 @@ class STS2HeuristicPlanner:
             candidate = str(action.get("type") or raw.get("name") or raw.get("action") or "").strip().lower()
             if candidate == target:
                 return action
+        return None
+
+    def _solver_potion_option_index(self, snapshot: dict[str, Any], potion_id: str | None) -> int | None:
+        """用 potion_id 回查 snapshot.raw_state.run.potions[] 的真实下标（含空槽），且要求 can_use。
+
+        mod /solver/plan 的 use_potion 给的是 potion_id；插件的 use_potion 动作要 option_index，
+        所以必须回查完整 potions 列表（不能用压缩后的占用槽下标）。
+        """
+        if not potion_id:
+            return None
+        raw = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
+        run = raw.get("run") if isinstance(raw.get("run"), dict) else {}
+        for p in run.get("potions") or []:
+            if not isinstance(p, dict):
+                continue
+            if str(p.get("potion_id") or "") != potion_id:
+                continue
+            if not p.get("can_use"):
+                return None
+            if isinstance(p.get("index"), int):
+                return p["index"]
         return None
 
     def _selected_character_index(self, summary_context: dict[str, Any]) -> int | None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import threading
 from concurrent.futures import Future
 from time import time
@@ -20,6 +22,10 @@ class STS2LoopRunner:
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._owner_thread: threading.Thread | None = None
         self._owner_thread_ready = threading.Event()
+        # Cache the mod /solver/plan against the combat-state signature so the mod's search is not
+        # recomputed on every tick while the combat position is unchanged. See _combat_plan_signature.
+        self._solver_plan_sig: Any = None
+        self._solver_plan_cached: dict[str, Any] | None = None
 
     async def tick(self) -> dict[str, Any]:
         client = self._service._require_client()
@@ -51,12 +57,40 @@ class STS2LoopRunner:
             strategy_context,
         )
         mode_info = self._service._mode_controller.describe(self._service._state.control_mode)
+        # Combat recommendation source: the mod's authoritative /solver/plan (vendored CombatSolver).
+        # plan() is sync, so fetch here (async tick) and inject into the contexts it reads. A stale
+        # search or no-in-combat payload falls back to the heuristic combat path inside the planner.
+        # Cache by combat-state signature: the mod re-runs the CombatSolver search on EVERY /solver/plan
+        # call, so reuse the plan while the combat state (hand/energy/enemies/potions) is unchanged.
+        solver_plan = None
+        in_combat_decision = classification.get("state_name") == "combat" and mode_info.get("allows_planner")
+        if in_combat_decision:
+            sig = _combat_plan_signature(snapshot)
+            if sig == self._solver_plan_sig:
+                solver_plan = self._solver_plan_cached
+            else:
+                try:
+                    fetched = await client.get_combat_plan()
+                except Exception:
+                    fetched = None
+                if fetched and fetched.get("in_combat"):
+                    # Only cache an actionable plan; otherwise leave it empty so the next tick retries.
+                    solver_plan = fetched
+                    self._solver_plan_sig = sig
+                    self._solver_plan_cached = fetched
+                else:
+                    solver_plan = None
+        else:
+            # Not in a combat decision phase: drop the cache so re-entering combat refetches.
+            self._solver_plan_sig = None
+            self._solver_plan_cached = None
         candidate_actions = self._service._candidate_generator.generate(
             {
                 "snapshot": {**snapshot, "action_registry": action_registry},
                 "classification": classification,
                 "summary_context": summary_context,
                 "strategy_context": strategy_context,
+                "solver_plan": solver_plan,
             },
             mode="program",
         )
@@ -112,6 +146,7 @@ class STS2LoopRunner:
             "summary_context": summary_context,
             "strategy_context": strategy_context,
             "mode": mode_info,
+            "solver_plan": solver_plan,
         }
         planned_operation = self._service._planner.plan(planning_context) if mode_info.get("allows_planner") else None
         planned_operation_dict = planned_operation.as_dict() if planned_operation is not None else None
@@ -310,6 +345,21 @@ class STS2LoopRunner:
         self._autoplay_task = None
         self._poll_task = None
         self._stop_owner_loop()
+
+
+def _combat_plan_signature(snapshot: dict[str, Any]) -> str:
+    """Stable fingerprint of the combat-relevant state the solver's plan depends on.
+
+    GET /solver/plan re-runs the CombatSolver search every call; the plugin reuses the cached plan
+    while this signature is unchanged, so the mod does not recompute the same position repeatedly.
+    Only combat + potions feed the solver's plan, so non-combat metadata changes do not invalidate it.
+    """
+    raw = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
+    combat = raw.get("combat") if isinstance(raw.get("combat"), dict) else {}
+    run = raw.get("run") if isinstance(raw.get("run"), dict) else {}
+    payload = {"combat": combat, "potions": run.get("potions")}
+    frozen = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(frozen.encode("utf-8")).hexdigest()
 
 
 __all__ = ["STS2LoopRunner"]
