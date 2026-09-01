@@ -206,6 +206,22 @@ internal static class Router
                 return;
             }
 
+            if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/danmaku")
+            {
+                // In-game catgirl danmaku: render the pushed text as a scrolling overlay on the game thread.
+                var danmaku = await JsonHelper.DeserializeAsync<DanmakuRequest>(request.InputStream, cancellationToken);
+                var status = await DanmakuService.PushAsync(danmaku?.text ?? "", danmaku?.style, danmaku?.placement, danmaku?.avatar);
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = new { status }
+                });
+                statusCode = 200;
+                return;
+            }
+
             statusCode = 404;
             await WriteErrorAsync(response, statusCode, "not_found", "Route not found.", requestId);
         }
