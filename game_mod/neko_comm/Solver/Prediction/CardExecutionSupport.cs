@@ -17,24 +17,23 @@ internal static class CardExecutionSupport
         string? nestedChoiceSourceId = null)
     {
         int historyStart = simulator.History.Entries.Count;
-        CardPlayPowerSuppression suppression = combat.SuppressHistorySensitiveCardModifiers(card);
         using IDisposable scope = combat.BeginCardExecutionScope(processedEnemyDeaths);
-        try
-        {
-            if (payResources)
-                simulator.PaidAutoPlay(card, target, nestedChoiceSourceId);
-            else
-                simulator.AutoPlay(card, target, nestedChoiceSourceId: nestedChoiceSourceId);
-        }
-        finally
-        {
-            combat.RestoreHistorySensitiveCardModifiers(suppression);
-        }
+        if (payResources)
+            simulator.PaidAutoPlay(card, target, nestedChoiceSourceId);
+        else
+            simulator.AutoPlay(card, target, nestedChoiceSourceId: nestedChoiceSourceId);
 
-        CombatPredictionCardPlayStartedEntry? started = simulator.History.Entries
-            .Skip(historyStart)
-            .OfType<CombatPredictionCardPlayStartedEntry>()
-            .FirstOrDefault(entry => ReferenceEquals(entry.CardPlay.Card, card.Preview));
+        CombatPredictionCardPlayStartedEntry? started = null;
+        foreach (CombatPredictionHistoryEntry entry in simulator.History.EntriesFrom(historyStart))
+        {
+            if (entry is not CombatPredictionCardPlayStartedEntry candidate
+                || !ReferenceEquals(candidate.CardPlay.Card, card.Preview))
+            {
+                continue;
+            }
+            started = candidate;
+            break;
+        }
         if (started == null)
             return false;
         return nestedChoiceSourceId == null || !simulator.HasPendingChoice;

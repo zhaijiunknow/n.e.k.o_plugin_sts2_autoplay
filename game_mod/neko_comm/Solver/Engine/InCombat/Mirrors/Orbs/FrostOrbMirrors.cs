@@ -10,7 +10,7 @@ internal static class FrostOrbMirrors
     // Mirrors FrostOrb.BeforeTurnEndOrbTrigger by forwarding through OrbModel.TriggerPassive.
     public static void BeforeTurnEndOrbTrigger(FrostOrb orb, OrbMirrorContext context)
     {
-        context.Simulator.TriggerOrbPassive(orb, target: null);
+        context.Simulator.TriggerOrbPassive(orb, target: null, context.ProcessedEnemyDeaths);
     }
 
     // Mirrors FrostOrb.Passive without VFX/SFX or waits.

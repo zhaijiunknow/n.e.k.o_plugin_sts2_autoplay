@@ -24,25 +24,12 @@ namespace NekoComm.Game
             var (exact, inferred, unsupported, ignored) = ClassifyCoverage(sim);
             var warnings = BuildWarnings(sim);
 
-            var action = first is null ? "none"
-                : first.Value.Kind == SimActionKind.PlayCard ? "play_card"
-                : first.Value.Kind == SimActionKind.EndTurn ? "end_turn" : "none";
-
-            string? firstCardId = null;
-            if (first is { Kind: SimActionKind.PlayCard } f && f.CardIndex >= 0 && f.CardIndex < sim.Hand.Count)
-                firstCardId = sim.Hand[f.CardIndex].Id;
-
             return new SolverPlanPayload
             {
                 in_combat = true,
                 turn = sim.Turn,
                 score = result.WinProb,
-                action = action,
-                card_index = first is { Kind: SimActionKind.PlayCard } ff ? ff.CardIndex : null,
-                card_id = firstCardId,
-                target_index = first?.TargetIndex,
-                reason = result.Line.Count == 0 ? "no_playable_actions" : null,
-                line = steps.ToArray(),
+                line = steps,
                 horizon = horizon,
                 max_turn_actions = maxTurnActions,
                 draw_model = "sim",
@@ -62,12 +49,15 @@ namespace NekoComm.Game
         // Merely removing the played card is wrong for cards that mutate the hand (e.g. SECOND_WIND
         // exhausts other cards, which would otherwise still look playable). PlayCard applies the full
         // effect, so card_id always refers to the card actually at that index when the action was taken.
-        // After the first EndTurn the next draw is unknown, so subsequent ids are null (honest).
-        private static List<SolverLineStep> BuildSteps(SimState sim, IReadOnlyList<SimAction> line)
+        // After the first EndTurn the next draw is unknown, so subsequent ids are null (honest). Steps are
+        // grouped per turn, each bucket ending with the turn's "end_turn" step.
+        private static SolverTurnStep[] BuildSteps(SimState sim, IReadOnlyList<SimAction> line)
         {
-            var steps = new List<SolverLineStep>();
+            var turns = new List<SolverTurnStep>();
+            var currentSteps = new List<SolverLineStep>();
             var run = sim.Clone();
             var resolved = true;
+            int turn = sim.Turn;
             foreach (var a in line)
             {
                 string? id = null;
@@ -83,7 +73,7 @@ namespace NekoComm.Game
                     resolved = false;   // next turn's hand is unknown
                     SimResolver.EndPlayerTurn(run);
                 }
-                steps.Add(new SolverLineStep
+                currentSteps.Add(new SolverLineStep
                 {
                     kind = a.Kind == SimActionKind.PlayCard ? "play_card"
                         : a.Kind == SimActionKind.EndTurn ? "end_turn" : "use_potion",
@@ -91,8 +81,16 @@ namespace NekoComm.Game
                     card_id = id,
                     target_index = a.TargetIndex,
                 });
+                if (a.Kind == SimActionKind.EndTurn)
+                {
+                    turns.Add(new SolverTurnStep { turn = turn, steps = currentSteps.ToArray() });
+                    currentSteps = new List<SolverLineStep>();
+                    turn++;
+                }
             }
-            return steps;
+            if (currentSteps.Count > 0)
+                turns.Add(new SolverTurnStep { turn = turn, steps = currentSteps.ToArray() });
+            return turns.ToArray();
         }
 
         // Coarse coverage: exact = field-driven simple card; inferred = behaviour card (summon/DSL)

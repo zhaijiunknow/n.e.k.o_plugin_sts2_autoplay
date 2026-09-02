@@ -57,9 +57,14 @@ internal static class OrbMirrors
 
     public static void InvokeBeforeTurnEndOrbTrigger(
         CombatPredictionSimulator simulator,
-        OrbModel orb)
+        OrbModel orb,
+        ISet<uint> processedEnemyDeaths)
     {
-        BeforeTurnEndOrbTriggerRegistry.Invoke(orb, new() { Simulator = simulator });
+        BeforeTurnEndOrbTriggerRegistry.Invoke(orb, new()
+        {
+            Simulator = simulator,
+            ProcessedEnemyDeaths = processedEnemyDeaths,
+        });
     }
 
     public static decimal ModifyValue(CombatPredictionSimulator simulator, OrbModel orb, decimal baseValue)

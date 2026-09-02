@@ -14,7 +14,7 @@ internal static class EnchantmentLifecycleSupport
 {
     public static void BeforeFlush(CombatPredictionSimulator simulator, Player player)
     {
-        foreach (PredictedCard card in simulator.State.GetPlayerCombatState(player).Hand.Cards)
+        foreach (PredictedCard card in simulator.State.GetPlayerCombatState(player).Hand)
         {
             if (card.Preview.Enchantment is SlumberingEssence)
                 card.MutablePreview.EnergyCost.AddUntilPlayed(-1);

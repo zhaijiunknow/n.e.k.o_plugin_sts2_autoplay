@@ -7,8 +7,15 @@ namespace NekoComm.Server;
 internal sealed class GameEventService
 {
     private const string LogPrefix = "[NekoComm.GameEventService]";
-    private const int DefaultPollIntervalMs = 120;
+    // Poll is now a fallback: real combat transitions are driven by a Harmony postfix on
+    // CombatStateTracker.NotifyCombatStateChanged (-> EvaluateNow), so combat events arrive with ~0
+    // latency. This poll only backs up screen/action window changes the hook misses, so it can be
+    // slower than the old 120ms. STS2_EVENT_POLL_MS (16-5000) still overrides.
+    private const int DefaultPollIntervalMs = 500;
     private const int SubscriberQueueCapacity = 256;
+    // Coalesce on-demand EvaluateNow triggers so a burst of combat-state notifications collapses into
+    // one /state build + broadcast, never re-entering the game thread with heavy work every call.
+    private const int EvaluateMinIntervalMs = 100;
 
     private static readonly Lazy<GameEventService> LazyInstance = new(() => new GameEventService());
 
@@ -19,6 +26,7 @@ internal sealed class GameEventService
     private Task? _loopTask;
     private long _nextSubscriberId;
     private long _nextEventId;
+    private long _lastEvaluateTicks;
     private StateDigest? _lastState;
     private readonly TimeSpan _pollInterval;
 
@@ -95,6 +103,36 @@ internal sealed class GameEventService
 
         cts?.Dispose();
         Log.Info($"{LogPrefix} Stopped");
+    }
+
+    /// <summary>
+    /// On-demand evaluation from a Harmony transition hook. Rebuilds the live state (on the game thread,
+    /// inline when already there), diffs it against the last digest, and broadcasts any changes — exactly
+    /// what the poll loop does, but driven by a real game transition instead of a timer. Coalesced to
+    /// <see cref="EvaluateMinIntervalMs"/> so a burst of combat-state notifications doesn't re-run the
+    /// (relatively heavy) state build on every call.
+    /// </summary>
+    public void EvaluateNow()
+    {
+        var now = Environment.TickCount64;
+        lock (_gate)
+        {
+            if (now - _lastEvaluateTicks < EvaluateMinIntervalMs)
+                return;
+            _lastEvaluateTicks = now;
+        }
+
+        try
+        {
+            // On the game thread this runs inline (GameThread.InvokeAsync posts via the game
+            // SynchronizationContext). GetResult() is the sync entry point for the Harmony postfix.
+            var state = GameThread.InvokeAsync(GameStateService.BuildStatePayload).GetAwaiter().GetResult();
+            ProcessState(state);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"{LogPrefix} EvaluateNow failed: {ex.Message}");
+        }
     }
 
     public GameEventSubscription Subscribe()

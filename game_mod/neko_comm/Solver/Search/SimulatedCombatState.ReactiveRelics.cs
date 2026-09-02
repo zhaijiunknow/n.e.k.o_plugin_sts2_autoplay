@@ -279,7 +279,8 @@ internal sealed partial class SimulatedCombatState
         Player player,
         int historyEntryStart)
     {
-        RecordRelicDamageEntries(simulator.History.Entries.Skip(historyEntryStart));
+        foreach (CombatPredictionHistoryEntry entry in simulator.History.EntriesFrom(historyEntryStart))
+            RecordRelicDamageEntry(entry);
         foreach (EmotionChip relic in RelicsOf(player).OfType<EmotionChip>().Where(static relic => !relic.IsMelted))
         {
             StatefulRelicState state = GetStatefulRelicState(relic);
@@ -287,17 +288,18 @@ internal sealed partial class SimulatedCombatState
         }
     }
 
-    public void RecordRelicDamageEntries(IEnumerable<CombatPredictionHistoryEntry> entries)
+    public void RecordRelicDamageEntry(CombatPredictionHistoryEntry historyEntry)
     {
-        foreach (CombatPredictionDamageReceivedEntry entry in entries.OfType<CombatPredictionDamageReceivedEntry>())
+        if (historyEntry is not CombatPredictionDamageReceivedEntry entry
+            || entry.Result.UnblockedDamage <= 0
+            || entry.Receiver.Player is not { } player)
         {
-            if (entry.Result.UnblockedDamage <= 0 || entry.Receiver.Player is not { } player)
-                continue;
-            foreach (EmotionChip relic in RelicsOf(player).OfType<EmotionChip>().Where(static relic => !relic.IsMelted))
-            {
-                StatefulRelicState state = GetStatefulRelicState(relic);
-                SetStatefulRelicState(relic, state with { Previous = 1 });
-            }
+            return;
+        }
+        foreach (EmotionChip relic in RelicsOf(player).OfType<EmotionChip>().Where(static relic => !relic.IsMelted))
+        {
+            StatefulRelicState state = GetStatefulRelicState(relic);
+            SetStatefulRelicState(relic, state with { Previous = 1 });
         }
     }
 

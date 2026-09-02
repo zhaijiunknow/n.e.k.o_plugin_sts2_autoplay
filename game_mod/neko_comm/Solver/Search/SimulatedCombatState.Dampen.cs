@@ -1,4 +1,5 @@
 using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Simulation;
@@ -55,23 +56,60 @@ internal sealed partial class SimulatedCombatState
             if (_dampenCasters.Any(entry => entry.Target == target))
                 continue;
             SetAmount<DampenPower>(target, 0);
-            RestoreDampenedCards();
+            RestoreDampenedCards(target);
         }
     }
 
-    private void RestoreDampenedCards()
+    private void RestoreDampenedCards(Creature target)
     {
         if (_dampenOriginalUpgrades == null)
             return;
-        foreach ((PredictedCard card, int level) in _dampenOriginalUpgrades)
+        foreach ((PredictedCard card, int level) in _dampenOriginalUpgrades
+                     .Where(entry => entry.Key.Preview.Owner.Creature == target)
+                     .ToArray())
         {
             while (card.Preview.CurrentUpgradeLevel < level)
             {
                 card.MutablePreview.UpgradeInternal();
                 card.MutablePreview.FinalizeUpgradeInternal();
             }
+            _dampenOriginalUpgrades.Remove(card);
         }
-        _dampenOriginalUpgrades.Clear();
+    }
+
+    private void CaptureDampenRootState(
+        CombatPredictionSimulator simulator,
+        DampenPower livePower)
+    {
+        object data = PowerInternalDataField.GetValue(livePower)
+            ?? throw new InvalidOperationException("压制缺少内部状态。");
+        Type dataType = data.GetType();
+        var casters = (HashSet<Creature>)(dataType.GetField("casters")?.GetValue(data)
+            ?? throw new MissingFieldException(dataType.FullName, "casters"));
+        var originalUpgrades = (Dictionary<CardModel, int>)(dataType
+            .GetField("downgradedCardsToOldUpgradeLevels")?.GetValue(data)
+            ?? throw new MissingFieldException(dataType.FullName, "downgradedCardsToOldUpgradeLevels"));
+        IEnumerable<Creature> capturedCasters = casters.Count > 0
+            ? casters
+            : livePower.Applier is { } applier && applier.CurrentHp > 0
+                ? [applier]
+                : throw new InvalidOperationException("压制存在但没有存活的施法者。");
+        foreach (Creature caster in capturedCasters)
+            (_dampenCasters ??= []).Add((livePower.Owner, caster));
+
+        SimPlayerCombatState playerState = simulator.State.GetPlayerCombatState(
+            livePower.Owner.Player
+            ?? throw new InvalidOperationException("压制目标不是玩家。"));
+        HashSet<CardModel> liveCards = livePower.Owner.Player.PlayerCombatState?.AllCards.ToHashSet()
+            ?? throw new InvalidOperationException("压制目标没有实机战斗牌堆。");
+        foreach ((CardModel liveCard, int level) in originalUpgrades)
+        {
+            if (!liveCards.Contains(liveCard))
+                continue;
+            PredictedCard card = playerState.FindCard(liveCard)
+                ?? throw new InvalidOperationException($"压制根状态找不到卡牌 {liveCard.Id.Entry}。");
+            (_dampenOriginalUpgrades ??= []).Add(card, level);
+        }
     }
 
     private void AppendDampenFingerprint(ref StateFingerprintBuilder fingerprint)

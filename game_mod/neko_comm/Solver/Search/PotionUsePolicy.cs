@@ -11,6 +11,9 @@ internal static class PotionUsePolicy
     public static int RequiredHpSaved(int potionCount)
         => potionCount * SolverWeights.PotionMinimumHpSaved;
 
+    public static int ExplicitUseCount(int potionCount, int automaticPotionCount)
+        => potionCount - automaticPotionCount;
+
     public static int AdditionalRequiredUseStrategicHpCost(int strategicHpCost)
         => Math.Max(0, strategicHpCost - SolverWeights.PotionMinimumHpSaved);
 
@@ -44,8 +47,12 @@ internal static class PotionUsePolicy
     public static int HpSaved(int potionFreeHpDeficit, int potionRouteHpDeficit)
         => Math.Max(0, potionFreeHpDeficit - potionRouteHpDeficit);
 
-    public static int SmartRequiredHpSaved(int strategicHpCost)
-        => strategicHpCost;
+    public static int SmartRequiredHpSaved(
+        int strategicHpCost,
+        BossHpRelief bossHpRelief = BossHpRelief.None)
+        => ActEndingBossPolicy.RawHpRequiredForPersistentValue(
+            strategicHpCost,
+            bossHpRelief);
 
     public static int AmbergrisRequiredHpSaved(int maximumHp)
         => (int)Math.Ceiling(maximumHp * AmbergrisMinimumHpSavedFraction);
@@ -75,8 +82,7 @@ internal static class PotionUsePolicy
 
     public static bool IsEligible(
         SolverPotionPolicy policy,
-        int potionCount,
-        int automaticPotionCount,
+        int explicitPotionCount,
         int strategicHpCost,
         bool potionFreeWon,
         int potionFreeHpDeficit,
@@ -85,14 +91,14 @@ internal static class PotionUsePolicy
         int potionRouteHpDeficit)
         => policy switch
         {
-            SolverPotionPolicy.Disabled => potionCount == automaticPotionCount,
-            SolverPotionPolicy.RequireAtLeastOne => potionCount > 0
+            SolverPotionPolicy.Disabled => explicitPotionCount == 0,
+            SolverPotionPolicy.RequireAtLeastOne => explicitPotionCount > 0
                 && (!anyRouteWon || potionRouteWon)
-                && (potionCount == 1
+                && (explicitPotionCount == 1
                     || !potionFreeWon
                     || HpSaved(potionFreeHpDeficit, potionRouteHpDeficit)
                         >= AdditionalRequiredUseStrategicHpCost(strategicHpCost)),
-            SolverPotionPolicy.Smart => potionCount == 0
+            SolverPotionPolicy.Smart => explicitPotionCount == 0
                 || potionRouteWon && !potionFreeWon
                 || HpSaved(potionFreeHpDeficit, potionRouteHpDeficit)
                     >= SmartRequiredHpSaved(strategicHpCost),

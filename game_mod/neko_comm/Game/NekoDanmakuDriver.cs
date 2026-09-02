@@ -135,16 +135,27 @@ namespace NekoComm.Game
             try
             {
                 var plan = await GameSolverService.BuildSolverPlanAsync();
-                if (!plan.in_combat || string.IsNullOrEmpty(plan.action) || plan.action == "none")
+                if (!plan.in_combat)
+                    return null;
+                var firstStep = plan.line is { Length: > 0 } turns && turns[0].steps is { Length: > 0 } steps
+                    ? steps[0]
+                    : null;
+                if (firstStep == null)
                     return null;
                 var b = new StringBuilder();
-                b.Append("建议:").Append(plan.action);
-                if (plan.card_index.HasValue)
-                    b.Append(" 手牌").Append(plan.card_index.Value + 1);
-                if (!string.IsNullOrEmpty(plan.card_id))
-                    b.Append("(").Append(plan.card_id).Append(")");
-                if (plan.target_index.HasValue)
-                    b.Append(" 目标").Append(plan.target_index.Value + 1);
+                var label = firstStep.kind switch
+                {
+                    "end_turn" => "结束回合",
+                    "use_potion" => "用药",
+                    _ => "打牌",
+                };
+                b.Append("建议:").Append(label);
+                if (firstStep.card_index.HasValue)
+                    b.Append(" 手牌").Append(firstStep.card_index.Value + 1);
+                if (!string.IsNullOrEmpty(firstStep.card_id))
+                    b.Append("(").Append(firstStep.card_id).Append(")");
+                if (firstStep.target_index.HasValue)
+                    b.Append(" 目标").Append(firstStep.target_index.Value + 1);
                 if (plan.win_prob.HasValue)
                     b.Append(" 胜率").Append(plan.win_prob.Value.ToString("P0"));
                 return b.ToString();

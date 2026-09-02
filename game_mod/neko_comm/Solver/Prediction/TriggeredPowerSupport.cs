@@ -12,15 +12,17 @@ internal static class TriggeredPowerSupport
         SimulatedCombatState combat,
         int historyEntryStart)
     {
-        IReadOnlyList<CombatPredictionHistoryEntry> entries = simulator.History.Entries;
+        CombatPredictionHistory history = simulator.History;
         int nextEntry = historyEntryStart;
         while (true)
         {
-            int batchEnd = entries.Count;
-            combat.RecordRelicDamageEntries(entries.Skip(nextEntry).Take(batchEnd - nextEntry));
-            for (; nextEntry < batchEnd; nextEntry++)
+            int batchEnd = history.Entries.Count;
+            CombatPredictionHistory.HistoryEntryRange batch = history.EntriesBetween(nextEntry, batchEnd);
+            foreach (CombatPredictionHistoryEntry entry in batch)
+                combat.RecordRelicDamageEntry(entry);
+            for (int batchIndex = 0; batchIndex < batch.Count; batchIndex++, nextEntry++)
             {
-                switch (entries[nextEntry])
+                switch (batch[batchIndex])
                 {
                     case CombatPredictionDamageReceivedEntry damage:
                         CompensateWakeAndBurrow(simulator, combat, damage);
@@ -31,7 +33,7 @@ internal static class TriggeredPowerSupport
                 }
             }
             PowerLifecycleSupport.ResolvePowerAmountChanges(simulator, combat);
-            if (nextEntry >= entries.Count)
+            if (nextEntry >= history.Entries.Count)
                 return;
         }
     }

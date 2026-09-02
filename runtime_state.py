@@ -19,6 +19,8 @@ class STS2RuntimeState:
     pause_reason: str = ""
     step_count: int = 0
     consecutive_errors: int = 0
+    # Incremented each time the scene-change event stream (GET /events/stream) drops/reconnects.
+    sse_reconnect_count: int = 0
     last_poll_at: float = 0.0
     last_action_at: float = 0.0
     last_sync_at: float = 0.0

@@ -1,5 +1,6 @@
 using System.Text;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Extensions;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
@@ -15,7 +16,8 @@ internal sealed record CardChoiceSpec(
     int MaxCount,
     IReadOnlyList<PredictedCard> Options,
     IReadOnlyList<PredictedCard> SourceCards,
-    double ReplacementValue);
+    double ReplacementValue,
+    string ContextId = "");
 
 internal static partial class CardChoiceSupport
 {
@@ -46,10 +48,9 @@ internal static partial class CardChoiceSupport
 
         CombatPredictionCardGenerationOptionsEntry? generated = simulator.History
             .OfType<CombatPredictionCardGenerationOptionsEntry>()
-            .LastOrDefault(entry => entry.Trace?.Source == playedCard.Original);
+            .LastOrDefault(entry => playedCard.References(entry.Trace?.Source));
         if (generated != null)
         {
-            List<PredictedCard> options = generated.Options.Select(option => option.Clone()).ToList();
             int minCount = card is Abundance ? 1 : 0;
             return RangeSpec(
                 owner,
@@ -57,13 +58,12 @@ internal static partial class CardChoiceSupport
                 PileType.None,
                 minCount,
                 1,
-                options);
+                generated.Options);
         }
 
         return card switch
         {
-            SeekerStrike => Spec(owner, PlanChoiceEffect.MoveToHand, PileType.Draw, 1,
-                FilterSeekerOptions(simulator, playedCard, owner.DrawPile.Cards)),
+            SeekerStrike => BuildSeekerSpec(simulator, playedCard, owner),
             TrueGrit when card.IsUpgraded => Spec(owner, PlanChoiceEffect.Exhaust, PileType.Hand, 1, owner.Hand.Cards),
             Hologram => Spec(owner, PlanChoiceEffect.MoveToHand, PileType.Discard, 1, discardBeforeResolution),
             Graveblast => Spec(owner, PlanChoiceEffect.MoveToHand, PileType.Discard, 1, discardBeforeResolution),
@@ -140,7 +140,8 @@ internal static partial class CardChoiceSupport
         return new PlanCardChoice(
             spec.Effect,
             spec.SourcePile,
-            ToTokens(selection, spec.Options, spec.SourceCards, static card => card.Id.Entry));
+            ToTokens(selection, spec.Options, spec.SourceCards, static card => card.Id.Entry),
+            ContextId: spec.ContextId);
     }
 
     public static PlanCardChoice BuildVakuuChoice(CardChoiceSpec spec)
@@ -150,7 +151,8 @@ internal static partial class CardChoiceSupport
         return new PlanCardChoice(
             spec.Effect,
             spec.SourcePile,
-            ToTokens(selected, spec.Options, spec.SourceCards, static card => card.Id.Entry));
+            ToTokens(selected, spec.Options, spec.SourceCards, static card => card.Id.Entry),
+            ContextId: spec.ContextId);
     }
 
     public static bool RequiresAutomaticNestedChoice(
@@ -197,6 +199,10 @@ internal static partial class CardChoiceSupport
             int skipBranch = minTake == 0 ? 1 : 0;
             branchLimit = Math.Max(branchLimit, spec.Options.Count + skipBranch);
         }
+        bool diversifyHandDiscard = spec.SourcePile == PileType.Hand
+            && spec.Effect is PlanChoiceEffect.Discard or PlanChoiceEffect.DiscardAndDraw
+            && minTake == maxTake
+            && maxTake > 1;
         List<PredictedCard> ordered = (spec.Effect is PlanChoiceEffect.Discard
                 or PlanChoiceEffect.DiscardAndDraw
                 or PlanChoiceEffect.Exhaust
@@ -210,26 +216,82 @@ internal static partial class CardChoiceSupport
         for (int take = minTake; take <= maxTake; take++)
         {
             List<IReadOnlyList<PredictedCard>> sameSize = [];
-            BuildCombinations(ordered, take, 0, [], sameSize, branchLimit);
+            int combinationLimit = diversifyHandDiscard
+                ? Math.Max(branchLimit, Math.Min(256, checked(branchLimit * 8)))
+                : branchLimit;
+            BuildCombinations(ordered, take, 0, [], sameSize, combinationLimit);
             if (sameSize.Count > 0)
                 cardinalityRepresentatives.Add(sameSize[0]);
             selections.AddRange(sameSize);
         }
 
         int effectiveBranchLimit = Math.Max(branchLimit, cardinalityRepresentatives.Count);
-        List<IReadOnlyList<PredictedCard>> retained = cardinalityRepresentatives.ToList();
-        retained.AddRange(selections
-            .OrderByDescending(selection => ChoicePriority(spec, selection))
-            .Where(selection => !retained.Contains(selection))
-            .Take(effectiveBranchLimit - retained.Count));
+        List<IReadOnlyList<PredictedCard>> retained = diversifyHandDiscard
+            ? BuildHandDiscardRepresentatives(spec, selections, effectiveBranchLimit)
+            : cardinalityRepresentatives.ToList();
+        if (!diversifyHandDiscard)
+        {
+            retained.AddRange(selections
+                .OrderByDescending(selection => ChoicePriority(spec, selection))
+                .Where(selection => !retained.Contains(selection))
+                .Take(effectiveBranchLimit - retained.Count));
+        }
 
         return retained
             .OrderByDescending(selection => ChoicePriority(spec, selection))
             .Select(selection => new PlanCardChoice(
                 spec.Effect,
                 spec.SourcePile,
-                ToTokens(selection, spec.Options, spec.SourceCards, displayNames.Card)))
+                ToTokens(selection, spec.Options, spec.SourceCards, displayNames.Card),
+                ContextId: spec.ContextId))
             .ToList();
+    }
+
+    private static List<IReadOnlyList<PredictedCard>> BuildHandDiscardRepresentatives(
+        CardChoiceSpec spec,
+        IReadOnlyList<IReadOnlyList<PredictedCard>> selections,
+        int limit)
+    {
+        List<IReadOnlyList<PredictedCard>> ranked = selections
+            .OrderByDescending(selection => ChoicePriority(spec, selection))
+            .ToList();
+        List<IReadOnlyList<PredictedCard>> retained = [];
+
+        void Add(IReadOnlyList<PredictedCard>? selection)
+        {
+            if (selection != null && retained.Count < limit && !retained.Contains(selection))
+                retained.Add(selection);
+        }
+
+        Add(ranked.FirstOrDefault());
+        Add(ranked
+            .OrderByDescending(selection => selection.Count(card => card.Preview.IsSlyThisTurn))
+            .ThenByDescending(selection => ChoicePriority(spec, selection))
+            .FirstOrDefault());
+        Add(ranked
+            .OrderByDescending(selection => selection.Count(card =>
+                card.Preview.Type is CardType.Status or CardType.Curse
+                || card.Preview.GetKeywordsWithSources(KeywordSources.Local)
+                    .Contains(CardKeyword.Unplayable)))
+            .ThenByDescending(selection => ChoicePriority(spec, selection))
+            .FirstOrDefault());
+        Add(ranked
+            .OrderByDescending(selection => selection.Count(card => card.Preview.ShouldRetainThisTurn))
+            .ThenByDescending(selection => ChoicePriority(spec, selection))
+            .FirstOrDefault());
+        Add(ranked
+            .OrderByDescending(selection => selection.Sum(card => CardValue(card.Preview)))
+            .ThenByDescending(selection => ChoicePriority(spec, selection))
+            .FirstOrDefault());
+
+        foreach (PredictedCard option in spec.Options.DistinctBy(ChoiceCardKey))
+        {
+            string optionKey = ChoiceCardKey(option);
+            Add(ranked.FirstOrDefault(selection => selection.Any(card => ChoiceCardKey(card) == optionKey)));
+        }
+        foreach (IReadOnlyList<PredictedCard> selection in ranked)
+            Add(selection);
+        return retained;
     }
 
     public static PlanCardChoice BuildRequestedChoice(
@@ -265,7 +327,8 @@ internal static partial class CardChoiceSupport
         return new PlanCardChoice(
             spec.Effect,
             spec.SourcePile,
-            ToTokens(selected, spec.Options, spec.SourceCards, static card => card.Id.Entry));
+            ToTokens(selected, spec.Options, spec.SourceCards, static card => card.Id.Entry),
+            ContextId: spec.ContextId);
     }
 
     public static IReadOnlyList<PredictedCard> ResolveStandaloneChoice(
@@ -283,14 +346,20 @@ internal static partial class CardChoiceSupport
             PredictedCard card = options.Where(candidate => MatchesToken(candidate, token))
                 .Skip(token.OptionOccurrence)
                 .FirstOrDefault()
-                ?? throw new InvalidOperationException(
+                ?? throw new InvalidPlannedChoiceBranchException(
                     $"回合开始选牌时找不到 {token.CardId}+{token.UpgradeLevel}#{token.OptionOccurrence}。");
             if (!source.Cards.Contains(card))
-                throw new InvalidOperationException($"回合开始选中的 {token.CardId} 已不在 {sourcePile} 中。");
+            {
+                throw new InvalidPlannedChoiceBranchException(
+                    $"回合开始选中的 {token.CardId} 已不在 {sourcePile} 中。");
+            }
             selected.Add(card);
         }
         if (selected.Count != expectedCount)
-            throw new InvalidOperationException($"回合开始计划选择 {selected.Count} 张牌，但当前要求 {expectedCount} 张。");
+        {
+            throw new InvalidPlannedChoiceBranchException(
+                $"回合开始计划选择 {selected.Count} 张牌，但当前要求 {expectedCount} 张。");
+        }
         return selected;
     }
 
@@ -323,31 +392,32 @@ internal static partial class CardChoiceSupport
         return new CardChoiceSpec(effect, source, minCount, maxCount, list, sourceCards, replacementValue);
     }
 
-    private static IReadOnlyList<PredictedCard> FilterSeekerOptions(
+    private static CardChoiceSpec? BuildSeekerSpec(
         CombatPredictionSimulator simulator,
         PredictedCard playedCard,
-        IReadOnlyList<PredictedCard> drawPile)
+        SimPlayerCombatState owner)
     {
-        CombatPredictionCardsSelectedEntry? entry = simulator.History
-            .OfType<CombatPredictionCardsSelectedEntry>()
-            .LastOrDefault(item => item.Trace?.Source == playedCard.Original);
-        if (entry == null)
-            return [];
-
-        List<(string Id, int Upgrade)> allowed = entry.Cards
-            .Select(item => (item.Id, item.UpgradeLevel))
+        List<PredictedCard> options = owner.DrawPile.Cards
+            .ToList()
+            .StableShuffle(simulator.Rng.CombatCardSelection)
+            .Take(playedCard.Preview.DynamicVars.Cards.IntValue)
             .ToList();
-        List<PredictedCard> result = [];
-        foreach (PredictedCard card in drawPile)
-        {
-            int index = allowed.FindIndex(item => item.Id == card.Preview.Id.Entry
-                && item.Upgrade == card.Preview.CurrentUpgradeLevel);
-            if (index < 0)
-                continue;
-            result.Add(card);
-            allowed.RemoveAt(index);
-        }
-        return result;
+        if (options.Count == 0)
+            return null;
+        simulator.History.CardsSelected(options);
+        simulator.History.RecordRisk(PredictionRiskReason.UnresolvedPlayerChoice);
+        string contextId = $"seeker:{simulator.Rng.CombatCardSelection.Counter()}:" +
+            string.Join(',', options.Select(card =>
+                $"{card.Preview.Id.Entry}+{card.Preview.CurrentUpgradeLevel}"));
+        return new CardChoiceSpec(
+            PlanChoiceEffect.MoveToHand,
+            PileType.Draw,
+            1,
+            1,
+            options,
+            owner.DrawPile.Cards,
+            ReplacementValue: 0d,
+            contextId);
     }
 
     private static void BuildCombinations(
@@ -423,9 +493,20 @@ internal static partial class CardChoiceSupport
         return spec.Effect switch
         {
             PlanChoiceEffect.Transform => cards.Count * spec.ReplacementValue - value,
-            PlanChoiceEffect.Discard or PlanChoiceEffect.Exhaust or PlanChoiceEffect.DiscardAndDraw => -value,
+            PlanChoiceEffect.Discard or PlanChoiceEffect.DiscardAndDraw =>
+                cards.Sum(DiscardTriggerValue) - value,
+            PlanChoiceEffect.Exhaust => -value,
             _ => value,
         };
+    }
+
+    private static double DiscardTriggerValue(PredictedCard card)
+    {
+        if (!card.Preview.IsSlyThisTurn)
+            return 0d;
+        return CardValue(card.Preview) * 2d
+            + DynamicVarBaseValue(card.Preview.DynamicVars, "Energy") * 12d
+            + DynamicVarBaseValue(card.Preview.DynamicVars, "Stars") * 12d;
     }
 
     private static double RemovalPriority(PlanChoiceEffect effect, PredictedCard card)

@@ -25,5 +25,10 @@ _bmad-output/
 .serena/
 node_modules/
 
+# Local Godot editor binary (moved into the project for headless pck builds; 160MB, not a source asset)
+Godot_v4.5.1-stable_win64.exe/
+Godot_v4.5.1-stable_win64_console.exe
+Godot*/
+
 SimTests/bin/
 SimTests/obj/

@@ -4,11 +4,27 @@ using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.Relics;
+using CombatSolver.Engine.Common;
 
 namespace CombatSolver;
 
 internal sealed partial class SimulatedCombatState
 {
+    private sealed class CardPowerApplicationScope(
+        SimulatedCombatState owner,
+        CardModel card) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            owner.CompleteCardPowerApplication(card);
+        }
+    }
+
     private static readonly FieldInfo RuinedHelmetUsedField =
         typeof(RuinedHelmet).GetField("_usedThisCombat", BindingFlags.Instance | BindingFlags.NonPublic)
         ?? throw new MissingFieldException(typeof(RuinedHelmet).FullName, "_usedThisCombat");
@@ -27,6 +43,12 @@ internal sealed partial class SimulatedCombatState
     public void BeginCardPowerApplication(CardModel card)
     {
         (_powerCardSources ??= []).Add(card);
+    }
+
+    IDisposable ICombatPredictionCardExecutionSink.BeginCardPowerApplication(PredictedCard card)
+    {
+        BeginCardPowerApplication(card.Preview);
+        return new CardPowerApplicationScope(this, card.Preview);
     }
 
     public void CompleteCardPowerApplication(CardModel card)

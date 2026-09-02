@@ -14,6 +14,12 @@ internal sealed record SearchPolicySnapshot(
     int? DeepBudgetOverrideMilliseconds,
     bool IncludeTurnSetup,
     SolverTheftPolicy? TheftPolicy,
+    BossHpStrategy ActTransitionBossHpStrategy,
+    BossHpStrategy FinalBossHpStrategy,
     SearchDiagnosticsSink Diagnostics,
     SearchFramePressureSignal FramePressureSignal,
-    SearchMemoryPressureSignal MemoryPressureSignal);
+    SearchMemoryPressureSignal MemoryPressureSignal)
+{
+    public SearchRequestWorkTotals? RequestWorkTotals { get; init; }
+    public SearchInteractionState? Interaction { get; init; }
+}

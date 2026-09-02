@@ -6,6 +6,17 @@ from typing import Any
 from .planner_interface import PlannedOperation
 
 
+def _first_line_step(solver_plan: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the plan's first executable move (line[0].steps[0]) when /solver/plan is turn-grouped."""
+    line = solver_plan.get("line") if isinstance(solver_plan.get("line"), list) else None
+    if not line or not isinstance(line[0], dict):
+        return None
+    steps = line[0].get("steps") if isinstance(line[0].get("steps"), list) else None
+    if not steps or not isinstance(steps[0], dict):
+        return None
+    return steps[0]
+
+
 class STS2HeuristicPlanner:
     def __init__(self, logger: Any | None = None) -> None:
         self._logger = logger
@@ -124,34 +135,40 @@ class STS2HeuristicPlanner:
         if state_name == "combat":
             # 战斗推荐：优先取 mod 内 vendored CombatSolver（/solver/plan），heuristic 兜底。
             # loop_runner.tick 已在战斗时取好 /solver/plan 塞进 context["solver_plan"]。
+            # 决策只用「首步」line[0].steps[0]（当前回合、带位置索引）。/solver/plan 不再有顶层 action/
+            # card_index/card_id/target_index/reason——line 是唯一来源。
             solver_plan = context.get("solver_plan") if isinstance(context.get("solver_plan"), dict) else None
             if solver_plan and solver_plan.get("in_combat"):
-                solver_action = solver_plan.get("action")
-                if solver_action == "play_card" and solver_plan.get("card_index") is not None:
-                    kw = {"card_index": solver_plan["card_index"]}
-                    if solver_plan.get("target_index") is not None:
-                        kw["target_index"] = solver_plan["target_index"]
-                    self._debug("[sts2_combat_plan] mod_solver recommended=%s", solver_plan.get("card_id"))
+                first_step = _first_line_step(solver_plan)
+                solver_action = first_step.get("kind") if isinstance(first_step, dict) else None
+                solver_card_index = first_step.get("card_index") if isinstance(first_step, dict) else None
+                solver_card_id = first_step.get("card_id") if isinstance(first_step, dict) else None
+                solver_target = first_step.get("target_index") if isinstance(first_step, dict) else None
+                if solver_action == "play_card" and solver_card_index is not None:
+                    kw = {"card_index": solver_card_index}
+                    if solver_target is not None:
+                        kw["target_index"] = solver_target
+                    self._debug("[sts2_combat_plan] mod_solver recommended=%s", solver_card_id)
                     return PlannedOperation(
                         action_type="play_card",
                         kwargs=kw,
                         confidence=0.9,
                         source="mod_solver",
-                        reason=str(solver_plan.get("reason") or "mod_combat_search") or "mod_combat_search",
+                        reason="mod_combat_search",
                     )
                 if solver_action == "use_potion":
-                    potion_index = self._solver_potion_option_index(snapshot, solver_plan.get("card_id"))
+                    potion_index = self._solver_potion_option_index(snapshot, solver_card_id)
                     if potion_index is not None:
                         kw = {"option_index": potion_index}
-                        if solver_plan.get("target_index") is not None:
-                            kw["target_index"] = solver_plan["target_index"]
+                        if solver_target is not None:
+                            kw["target_index"] = solver_target
                         self._debug("[sts2_combat_plan] mod_solver recommended potion=%s", potion_index)
                         return PlannedOperation(
                             action_type="use_potion",
                             kwargs=kw,
                             confidence=0.9,
                             source="mod_solver",
-                            reason=str(solver_plan.get("reason") or "mod_solver_potion") or "mod_solver_potion",
+                            reason="mod_solver_potion",
                         )
                 if solver_action == "end_turn":
                     return PlannedOperation(

@@ -53,7 +53,7 @@ internal static class CombatSolverFacade
         {
             var potionFree = await RunSolveAsync(root, names, damage, potionFreePolicy, cancellationToken);
             if (tolerance.IsWithinTolerance(potionFree.Snapshot.CumulativePlayerHpLost))
-                return MapResult(potionFree, me, options);   // acceptable damage -> no potions
+                return MapResult(potionFree, me, options, root);   // acceptable damage -> no potions
 
             var smartPolicy = BuildPolicy(options, SolverPotionPolicy.Smart);
             int potionSlots = me.Potions.Count();
@@ -68,7 +68,7 @@ internal static class CombatSolverFacade
                         potionFreePolicyBaseline: null, maximumPotionUses: n).Solve());
 
                 if (tolerance.IsWithinTolerance(bounded.Snapshot.CumulativePlayerHpLost))
-                    return MapResult(bounded, me, options);   // fewest potions that hit tolerance
+                    return MapResult(bounded, me, options, root);   // fewest potions that hit tolerance
                 if (bounded.BestNode.Score > best.BestNode.Score)
                     best = bounded;                            // keep the best we found so far
             }
@@ -80,7 +80,7 @@ internal static class CombatSolverFacade
             return Failed("solver_failed", $"CombatSolver 搜索失败: {ex.Message}{inner}\n{ex.StackTrace}");
         }
 
-        return MapResult(result, me, options);
+        return MapResult(result, me, options, root);
     }
 
     private static async Task<SolverResult> RunSolveAsync(
@@ -127,22 +127,27 @@ internal static class CombatSolverFacade
             DeepBudgetOverrideMilliseconds: options.DeepBudgetMilliseconds,
             IncludeTurnSetup: false,
             TheftPolicy: null,
+            ActTransitionBossHpStrategy: BossHpStrategy.ProgressionFirst,
+            FinalBossHpStrategy: BossHpStrategy.ProgressionFirst,
             Diagnostics: diagnostics,
             FramePressureSignal: frame,
             MemoryPressureSignal: memory);
     }
 
-    private static SolverPlanPayload MapResult(SolverResult result, Player me, SolverFacadeOptions options)
+    private static SolverPlanPayload MapResult(SolverResult result, Player me, SolverFacadeOptions options, CombatRootSnapshot root)
     {
         var first = result.BestNode.Actions.FirstOrDefault();
-        string action = first is null ? "none"
-            : first.Kind == PlanActionKind.PlayCard ? "play_card"
-            : first.Kind == PlanActionKind.UsePotion ? "use_potion"
-            : "end_turn";
-
-        (int? cardIndex, string? cardId, int? targetIndex) = MapFirstAction(first, me);
-        SolverLineStep[] line = result.BestNode.Actions
-            .Select(a => MapStep(a, me))
+        // Group the forecasted line into per-turn buckets; each turn's steps end with an "end_turn"
+        // boundary (the engine emits EndTurn as the last action of a turn). Only the current turn's
+        // card_index is filled (later turns' hand positions are unknown — card_id only). The next move is
+        // line[0].steps[0]; there is no duplicated top-level action/card_index/card_id/target_index.
+        SolverTurnStep[] line = result.BestNode.Actions
+            .GroupBy(a => a.Turn)
+            .Select(g => new SolverTurnStep
+            {
+                turn = g.Key,
+                steps = g.Select(a => MapStep(a, me)).ToArray()
+            })
             .ToArray();
 
         (int exact, int inferred, int unsupported, int ignored) = ClassifyCoverage(result);
@@ -153,11 +158,7 @@ internal static class CombatSolverFacade
             in_combat = true,
             turn = result.Snapshot.Turn,
             score = result.BestNode.Score,
-            action = action,
-            card_index = cardIndex,
-            card_id = cardId,
-            target_index = targetIndex,
-            reason = result.BestNode.Actions.Count == 0 ? "no_playable_actions" : null,
+            state_fingerprint = StateFingerprint(root),
             line = line,
             beam_width = SolverSearchProfile.Short.BeamWidth,
             horizon = result.SearchedTurns,
@@ -183,27 +184,14 @@ internal static class CombatSolverFacade
         };
     }
 
-    private static (int? cardIndex, string? cardId, int? targetIndex) MapFirstAction(PlanAction? first, Player me)
-    {
-        if (first is null)
-            return (null, null, null);
-        if (first.Kind == PlanActionKind.UsePotion)
-            return (null, first.PotionId, first.TargetIndex >= 0 ? first.TargetIndex : null);
-        if (first.Kind != PlanActionKind.PlayCard)
-            return (null, first.CardId, null);
-        int cardIndex = -1;
-        var hand = me.PlayerCombatState?.Hand.Cards;
-        if (hand != null)
-        {
-            for (var i = 0; i < hand.Count; i++)
-                if (string.Equals(hand[i].Id.Entry, first.CardId, StringComparison.Ordinal))
-                {
-                    cardIndex = i;
-                    break;
-                }
-        }
-        return (cardIndex >= 0 ? cardIndex : null, first.CardId, first.TargetIndex >= 0 ? first.TargetIndex : null);
-    }
+    private static string StateFingerprint(CombatRootSnapshot root) =>
+        // Deterministic short hash of the captured combat state, so a consumer can tell at a glance
+        // whether an action changed the position (different fingerprint => recompute). Uses the capture's
+        // canonical ContinuationStamp state text.
+        System.Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(root.ContinuationStamp.StateText)))
+            [..16];
 
     private static SolverLineStep MapStep(PlanAction a, Player me)
     {
@@ -276,7 +264,6 @@ internal static class CombatSolverFacade
     private static SolverPlanPayload Failed(string reason, string message) => new()
     {
         in_combat = false,
-        reason = reason,
         warnings = new[] { message },
     };
 }

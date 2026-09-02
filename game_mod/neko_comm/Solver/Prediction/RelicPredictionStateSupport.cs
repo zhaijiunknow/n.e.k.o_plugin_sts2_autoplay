@@ -230,7 +230,7 @@ internal static class RelicPredictionStateSupport
         {
             case BeatingRemnant value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new BeatingRemnantPredictionState(value))
+                    .Peek(value, static relic => new BeatingRemnantPredictionState(relic))
                     .DamageReceivedThisTurn);
                 break;
             case BrilliantScarf value:
@@ -238,17 +238,17 @@ internal static class RelicPredictionStateSupport
                 break;
             case BurningSticks value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new BurningSticksPredictionState(value))
+                    .Peek(value, static relic => new BurningSticksPredictionState(relic))
                     .WasUsedThisCombat);
                 break;
             case CentennialPuzzle value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new CentennialPuzzlePredictionState(value))
+                    .Peek(value, static relic => new CentennialPuzzlePredictionState(relic))
                     .UsedThisCombat);
                 break;
             case DemonTongue value:
                 fingerprint.Add(simulator.StateStore
-                    .GetReadOnly((AbstractModel)value, () => new DemonTonguePredictionState(value))
+                    .GetReadOnly(value, static relic => new DemonTonguePredictionState(relic))
                     .TriggeredThisTurn);
                 break;
             case IronClub value:
@@ -268,12 +268,12 @@ internal static class RelicPredictionStateSupport
                 break;
             case LizardTail value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new LizardTailPredictionState(value))
+                    .Peek(value, static relic => new LizardTailPredictionState(relic))
                     .WasUsed);
                 break;
             case Metronome value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new MetronomePredictionState(value))
+                    .Peek(value, static relic => new MetronomePredictionState(relic))
                     .OrbsChanneled);
                 break;
             case MusicBox value:
@@ -301,7 +301,7 @@ internal static class RelicPredictionStateSupport
             case PaelsLegion value:
                 {
                     PaelsLegionPredictionState state = simulator.StateStore
-                        .Peek((AbstractModel)value, () => new PaelsLegionPredictionState(value));
+                        .Peek(value, static relic => new PaelsLegionPredictionState(relic));
                     fingerprint.Add(state.Cooldown);
                     fingerprint.Add(state.TriggeredBlockLastTurn);
                     fingerprint.Add(state.AffectedCardPlay != null);
@@ -309,18 +309,18 @@ internal static class RelicPredictionStateSupport
                 }
             case PenNib value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new PenNibPredictionState(value))
+                    .Peek(value, static relic => new PenNibPredictionState(relic))
                     .AttacksPlayed);
                 break;
             case Permafrost value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new FlagPredictionState(GameRef.Get<bool>(value, "_activatedThisCombat")))
+                    .Peek(value, static relic => new FlagPredictionState(GameRef.Get<bool>(relic, "_activatedThisCombat")))
                     .Value);
                 break;
             case RainbowRing value:
                 {
                     RainbowRingPredictionState state = simulator.StateStore
-                        .Peek((AbstractModel)value, () => new RainbowRingPredictionState(value));
+                        .Peek(value, static relic => new RainbowRingPredictionState(relic));
                     fingerprint.Add(state.AttacksPlayedThisTurn);
                     fingerprint.Add(state.SkillsPlayedThisTurn);
                     fingerprint.Add(state.PowersPlayedThisTurn);
@@ -329,7 +329,7 @@ internal static class RelicPredictionStateSupport
                 }
             case Regalite value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new RegalitePredictionState(value))
+                    .Peek(value, static relic => new RegalitePredictionState(relic))
                     .UsedThisTurn);
                 break;
             case Shuriken value:
@@ -337,7 +337,7 @@ internal static class RelicPredictionStateSupport
                 break;
             case ThrowingAxe value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new ThrowingAxePredictionState(value))
+                    .Peek(value, static relic => new ThrowingAxePredictionState(relic))
                     .UsedThisCombat);
                 break;
             case TuningFork value:
@@ -345,7 +345,7 @@ internal static class RelicPredictionStateSupport
                 break;
             case Vambrace value:
                 fingerprint.Add(simulator.StateStore
-                    .Peek((AbstractModel)value, () => new VambracePredictionState(value))
+                    .Peek(value, static relic => new VambracePredictionState(relic))
                     .BlockGainedThisCombat);
                 break;
             case VelvetChoker value:

@@ -15,6 +15,8 @@ internal sealed class SimCardPile
 
     public IReadOnlyList<PredictedCard> Cards => _cards;
 
+    public List<PredictedCard>.Enumerator GetEnumerator() => _cards.GetEnumerator();
+
     public bool IsEmpty => _cards.Count == 0;
 
     public PredictedCard? TopCard => IsEmpty ? null : _cards[0];

@@ -39,6 +39,10 @@ namespace NekoComm.Game
         private const int DecisionMaxTokens = 220;
         private const double DecisionTemperature = 0.5;
         private const double LlmWaitCooldownSeconds = 8;
+        // After this many consecutive solver-unusable ticks inside a combat, degrade to the first playable
+        // card instead of waiting — a genuinely broken solver must not stall the catgirl forever, but a
+        // transient "not my Play phase yet" refusal should just wait for the right window.
+        private const int CombatSolverFallbackThreshold = 8;
 
         private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
@@ -49,6 +53,7 @@ namespace NekoComm.Game
         private bool _runEnded;
         private double _lastActionAt;
         private double _cooldownUntil;
+        private int _combatSolverFails;
 
         public void Start()
         {
@@ -330,7 +335,10 @@ namespace NekoComm.Game
         private async Task<ActionRequest?> DecideCombatAsync(GameStatePayload s)
         {
             if (!s.in_combat || s.combat == null)
+            {
+                _combatSolverFails = 0;
                 return null;
+            }
 
             var hand = s.combat.hand;
             if (Has(s, "play_card"))
@@ -345,20 +353,39 @@ namespace NekoComm.Game
                     plan = null;
                 }
 
-                // card_index is a POSITIONAL index into the hand (executor does hand[card_index]); the solver's
-                // card_index is that same positional value within this hand snapshot.
-                if (plan is { in_combat: true, action: "play_card" } && plan.card_index.HasValue)
+                // The next move is line[0].steps[0] (the current turn's first step, which carries the
+                // positional card_index; later turns are card_id-only since the hand isn't drawn yet).
+                SolverLineStep? firstStep = null;
+                if (plan is { in_combat: true, line: { Length: > 0 } turns } && turns[0].steps is { Length: > 0 } turnSteps)
+                    firstStep = turnSteps[0];
+
+                if (firstStep is { kind: "play_card", card_index: int idx }
+                    && idx >= 0 && idx < hand.Length && hand[idx].playable)
                 {
-                    var idx = plan.card_index.Value;
-                    if (idx >= 0 && idx < hand.Length && hand[idx].playable)
-                        return PlayCard(hand[idx], idx, plan.target_index);
+                    _combatSolverFails = 0;
+                    return PlayCard(hand[idx], idx, firstStep.target_index);
                 }
 
                 // A solver end_turn recommendation is honored (do not play a card against it).
-                if (plan is { in_combat: true, action: "end_turn" } && Has(s, "end_turn"))
+                if (firstStep?.kind == "end_turn" && Has(s, "end_turn"))
+                {
+                    _combatSolverFails = 0;
                     return Req("end_turn");
+                }
 
-                // No usable plan (null, or it wants use_potion/unknown): fall back to a playable card.
+                // No usable plan. The 0.27 engine only searches inside the local player's Play phase, so a
+                // live combat refusal is usually "not my turn yet" — wait for the next event rather than
+                // blindly playing the first card. After repeated genuine failures, degrade so a broken solver
+                // stalls the catgirl instead of never acting.
+                if (plan is { in_combat: false })
+                {
+                    _combatSolverFails++;
+                    GD.PrintErr($"{LogPrefix} solver unusable; attempts={_combatSolverFails} warnings={string.Join(" | ", plan.warnings)}");
+                    if (_combatSolverFails < CombatSolverFallbackThreshold)
+                        return null;
+                }
+
+                // Degraded fallback: first playable card.
                 for (var i = 0; i < hand.Length; i++)
                 {
                     if (hand[i].playable && (!hand[i].requires_target || hand[i].valid_target_indices.Length > 0))

@@ -6,6 +6,27 @@ using CombatSolver.Engine.Common;
 
 namespace CombatSolver;
 
+[Flags]
+internal enum StrategicEffectRequirements
+{
+    None = 0,
+    RemainingTurns = 1 << 0,
+    UsefulCardPlays = 1 << 1,
+    AttackPlays = 1 << 2,
+    SkillPlays = 1 << 3,
+    BlockSkillPlays = 1 << 4,
+    PowerPlays = 1 << 5,
+    ExhaustPlays = 1 << 6,
+    ShivPlays = 1 << 7,
+    DebuffApplications = 1 << 8,
+    SkillEnergySpend = 1 << 9,
+    PowerEnergySpend = 1 << 10,
+    AverageCardValue = 1 << 11,
+    BestCardValue = 1 << 12,
+    AverageAttackValue = 1 << 13,
+    StatusDrawTriggers = 1 << 14,
+}
+
 internal readonly record struct StrategicEffectVector(
     int DamagePotential,
     int PreventionPotential,
@@ -68,8 +89,60 @@ internal readonly record struct StrategicEffectContext(
         IReadOnlyList<PredictedCard> liveCards,
         int enemyHp,
         int incomingDamage,
-        int incomingHitCount)
+        int incomingHitCount,
+        StrategicEffectRequirements requirements)
     {
+        if (requirements == StrategicEffectRequirements.None)
+        {
+            return new StrategicEffectContext(
+                Math.Max(0, enemyHp),
+                Math.Max(0, incomingDamage),
+                Math.Max(0, incomingHitCount),
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                0,
+                0);
+        }
+
+        const StrategicEffectRequirements reachablePlayRequirements =
+            StrategicEffectRequirements.UsefulCardPlays
+            | StrategicEffectRequirements.AttackPlays
+            | StrategicEffectRequirements.SkillPlays
+            | StrategicEffectRequirements.BlockSkillPlays
+            | StrategicEffectRequirements.PowerPlays
+            | StrategicEffectRequirements.ExhaustPlays
+            | StrategicEffectRequirements.ShivPlays
+            | StrategicEffectRequirements.DebuffApplications
+            | StrategicEffectRequirements.StatusDrawTriggers;
+        bool needsRemainingTurns = requirements.HasFlag(StrategicEffectRequirements.RemainingTurns)
+            || (requirements & reachablePlayRequirements) != 0;
+        bool needsAllCardValues = requirements.HasFlag(StrategicEffectRequirements.AverageCardValue)
+            || requirements.HasFlag(StrategicEffectRequirements.BestCardValue);
+        bool needsAttackValues = needsRemainingTurns
+            || requirements.HasFlag(StrategicEffectRequirements.AverageAttackValue);
+        bool needsAttackCount = requirements.HasFlag(StrategicEffectRequirements.AttackPlays)
+            || requirements.HasFlag(StrategicEffectRequirements.AverageAttackValue);
+        bool needsSkillCount = requirements.HasFlag(StrategicEffectRequirements.SkillPlays);
+        bool needsBlockSkillCount = requirements.HasFlag(StrategicEffectRequirements.BlockSkillPlays);
+        bool needsPowerCount = requirements.HasFlag(StrategicEffectRequirements.PowerPlays);
+        bool needsExhaustCount = requirements.HasFlag(StrategicEffectRequirements.ExhaustPlays);
+        bool needsShivCount = requirements.HasFlag(StrategicEffectRequirements.ShivPlays);
+        bool needsDebuffCount = requirements.HasFlag(StrategicEffectRequirements.DebuffApplications);
+        bool needsStatusCount = requirements.HasFlag(StrategicEffectRequirements.StatusDrawTriggers);
+        bool needsSkillEnergy = requirements.HasFlag(StrategicEffectRequirements.SkillEnergySpend);
+        bool needsPowerEnergy = requirements.HasFlag(StrategicEffectRequirements.PowerEnergySpend);
+
         int attackCount = 0;
         int skillCount = 0;
         int blockSkillCount = 0;
@@ -86,59 +159,111 @@ internal readonly record struct StrategicEffectContext(
         foreach (PredictedCard predicted in liveCards)
         {
             CardModel card = predicted.Preview;
-            int cardValue = Math.Max(1, (int)Math.Ceiling(CardChoiceSupport.CardValue(card)));
-            totalCardValue += cardValue;
-            bestCardValue = Math.Max(bestCardValue, cardValue);
-            int energyCost = card.EnergyCost.CostsX
-                ? 0
-                : Math.Max(0, card.EnergyCost.GetWithModifiers(CostModifiers.All));
-            switch (card.Type)
+            CardType cardType = card.Type;
+            int cardValue = 0;
+            if (needsAllCardValues || (needsAttackValues && cardType == CardType.Attack))
+            {
+                cardValue = Math.Max(1, (int)Math.Ceiling(CardChoiceSupport.CardValue(card)));
+                if (needsAllCardValues)
+                {
+                    totalCardValue += cardValue;
+                    bestCardValue = Math.Max(bestCardValue, cardValue);
+                }
+                if (needsAttackValues && cardType == CardType.Attack)
+                    totalAttackValue += cardValue;
+            }
+
+            bool hasBlockDynamicVar = false;
+            bool hasDebuffDynamicVar = false;
+            if ((needsBlockSkillCount && cardType == CardType.Skill) || needsDebuffCount)
+            {
+                foreach (KeyValuePair<string, MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar> dynamicVar
+                         in card.DynamicVars)
+                {
+                    string key = dynamicVar.Key;
+                    if (needsBlockSkillCount && !hasBlockDynamicVar && cardType == CardType.Skill)
+                        hasBlockDynamicVar = IsBlockDynamicVar(key);
+                    if (needsDebuffCount && !hasDebuffDynamicVar)
+                        hasDebuffDynamicVar = IsDebuffDynamicVar(key);
+                    if ((!needsDebuffCount || hasDebuffDynamicVar)
+                        && (!needsBlockSkillCount || cardType != CardType.Skill || hasBlockDynamicVar))
+                    {
+                        break;
+                    }
+                }
+            }
+
+            switch (cardType)
             {
                 case CardType.Attack:
-                    attackCount++;
-                    totalAttackValue += cardValue;
+                    if (needsAttackCount)
+                        attackCount++;
                     break;
                 case CardType.Skill:
-                    skillCount++;
-                    skillEnergy += energyCost;
-                    if (card.DynamicVars.Keys.Any(IsBlockDynamicVar))
+                    if (needsSkillCount)
+                        skillCount++;
+                    if (needsSkillEnergy)
+                        skillEnergy += EnergyCost(card);
+                    if (needsBlockSkillCount && hasBlockDynamicVar)
                         blockSkillCount++;
                     break;
                 case CardType.Power:
-                    powerCount++;
-                    powerEnergy += energyCost;
+                    if (needsPowerCount)
+                        powerCount++;
+                    if (needsPowerEnergy)
+                        powerEnergy += EnergyCost(card);
                     break;
                 case CardType.Status:
-                    statusCount++;
+                    if (needsStatusCount)
+                        statusCount++;
                     break;
             }
-            if (card.Keywords.Contains(CardKeyword.Exhaust))
+            if (needsExhaustCount && card.Keywords.Contains(CardKeyword.Exhaust))
                 exhaustCount++;
-            if (card.Tags.Contains(CardTag.Shiv))
+            if (needsShivCount && card.Tags.Contains(CardTag.Shiv))
                 shivCount++;
-            if (card.DynamicVars.Keys.Any(IsDebuffDynamicVar))
+            if (needsDebuffCount && hasDebuffDynamicVar)
                 debuffCount++;
         }
 
         int actualDeckSize = liveCards.Count;
         int deckSize = Math.Max(1, actualDeckSize);
-        int cardsPerTurn = Math.Min(10, Math.Max(1, Math.Min(5, deckSize)));
-        int damagePerCycle = Math.Max(1, totalAttackValue);
-        int estimatedCycles = (int)Math.Ceiling((double)Math.Max(1, enemyHp) / damagePerCycle);
-        int remainingTurns = Math.Clamp(
-            estimatedCycles * Math.Max(1, (int)Math.Ceiling(deckSize / 5d)),
-            1,
-            SolverWeights.SetupValueHorizonTurns);
-        int reachableCards = actualDeckSize == 0
-            ? 0
-            : Math.Min(deckSize * 2, remainingTurns * cardsPerTurn);
-        int attackPlays = ReachablePlays(attackCount, deckSize, reachableCards);
-        int skillPlays = ReachablePlays(skillCount, deckSize, reachableCards);
-        int blockSkillPlays = ReachablePlays(blockSkillCount, deckSize, reachableCards);
-        int powerPlays = Math.Min(powerCount, reachableCards);
-        int exhaustPlays = Math.Min(exhaustCount, reachableCards);
-        int shivPlays = ReachablePlays(shivCount, deckSize, reachableCards);
-        int debuffApplications = ReachablePlays(debuffCount, deckSize, reachableCards);
+        int remainingTurns = 1;
+        int reachableCards = 0;
+        if (needsRemainingTurns)
+        {
+            int cardsPerTurn = Math.Min(10, Math.Max(1, Math.Min(5, deckSize)));
+            int damagePerCycle = Math.Max(1, totalAttackValue);
+            int estimatedCycles = (int)Math.Ceiling((double)Math.Max(1, enemyHp) / damagePerCycle);
+            remainingTurns = Math.Clamp(
+                estimatedCycles * Math.Max(1, (int)Math.Ceiling(deckSize / 5d)),
+                1,
+                SolverWeights.SetupValueHorizonTurns);
+            reachableCards = actualDeckSize == 0
+                ? 0
+                : Math.Min(deckSize * 2, remainingTurns * cardsPerTurn);
+        }
+        int attackPlays = requirements.HasFlag(StrategicEffectRequirements.AttackPlays)
+            ? ReachablePlays(attackCount, deckSize, reachableCards)
+            : 0;
+        int skillPlays = requirements.HasFlag(StrategicEffectRequirements.SkillPlays)
+            ? ReachablePlays(skillCount, deckSize, reachableCards)
+            : 0;
+        int blockSkillPlays = requirements.HasFlag(StrategicEffectRequirements.BlockSkillPlays)
+            ? ReachablePlays(blockSkillCount, deckSize, reachableCards)
+            : 0;
+        int powerPlays = requirements.HasFlag(StrategicEffectRequirements.PowerPlays)
+            ? Math.Min(powerCount, reachableCards)
+            : 0;
+        int exhaustPlays = requirements.HasFlag(StrategicEffectRequirements.ExhaustPlays)
+            ? Math.Min(exhaustCount, reachableCards)
+            : 0;
+        int shivPlays = requirements.HasFlag(StrategicEffectRequirements.ShivPlays)
+            ? ReachablePlays(shivCount, deckSize, reachableCards)
+            : 0;
+        int debuffApplications = requirements.HasFlag(StrategicEffectRequirements.DebuffApplications)
+            ? ReachablePlays(debuffCount, deckSize, reachableCards)
+            : 0;
         return new StrategicEffectContext(
             Math.Max(0, enemyHp),
             Math.Max(0, incomingDamage),
@@ -154,11 +279,24 @@ internal readonly record struct StrategicEffectContext(
             debuffApplications,
             skillEnergy,
             powerEnergy,
-            Math.Max(1, totalCardValue / deckSize),
-            Math.Max(1, bestCardValue),
-            attackCount == 0 ? 0 : Math.Max(1, totalAttackValue / attackCount),
-            Math.Min(remainingTurns, ReachablePlays(statusCount, deckSize, reachableCards)));
+            requirements.HasFlag(StrategicEffectRequirements.AverageCardValue)
+                ? Math.Max(1, totalCardValue / deckSize)
+                : 1,
+            requirements.HasFlag(StrategicEffectRequirements.BestCardValue)
+                ? Math.Max(1, bestCardValue)
+                : 1,
+            requirements.HasFlag(StrategicEffectRequirements.AverageAttackValue) && attackCount > 0
+                ? Math.Max(1, totalAttackValue / attackCount)
+                : 0,
+            requirements.HasFlag(StrategicEffectRequirements.StatusDrawTriggers)
+                ? Math.Min(remainingTurns, ReachablePlays(statusCount, deckSize, reachableCards))
+                : 0);
     }
+
+    private static int EnergyCost(CardModel card)
+        => card.EnergyCost.CostsX
+            ? 0
+            : Math.Max(0, card.EnergyCost.GetWithModifiers(CostModifiers.All));
 
     private static int ReachablePlays(int matchingCards, int deckSize, int reachableCards)
         => matchingCards == 0
@@ -179,6 +317,38 @@ internal readonly record struct StrategicEffectContext(
 
 internal static class StrategicEffectModel
 {
+    public static StrategicEffectRequirements Requirements(PowerModel power)
+        => power switch
+        {
+            AfterimagePower => StrategicEffectRequirements.UsefulCardPlays,
+            BufferPower => StrategicEffectRequirements.RemainingTurns,
+            FeelNoPainPower => StrategicEffectRequirements.ExhaustPlays,
+            EchoFormPower => StrategicEffectRequirements.UsefulCardPlays
+                | StrategicEffectRequirements.BestCardValue,
+            EnvenomPower or StrengthPower => StrategicEffectRequirements.AttackPlays,
+            AccuracyPower => StrategicEffectRequirements.ShivPlays,
+            SleightOfFleshPower => StrategicEffectRequirements.DebuffApplications,
+            LethalityPower or ReaperFormPower => StrategicEffectRequirements.AttackPlays
+                | StrategicEffectRequirements.AverageAttackValue,
+            DexterityPower => StrategicEffectRequirements.BlockSkillPlays,
+            DemonFormPower => StrategicEffectRequirements.AttackPlays
+                | StrategicEffectRequirements.RemainingTurns,
+            CuriousPower => StrategicEffectRequirements.PowerEnergySpend
+                | StrategicEffectRequirements.PowerPlays
+                | StrategicEffectRequirements.AverageCardValue,
+            CorruptionPower => StrategicEffectRequirements.SkillEnergySpend
+                | StrategicEffectRequirements.AverageCardValue,
+            CreativeAiPower => StrategicEffectRequirements.RemainingTurns
+                | StrategicEffectRequirements.AverageCardValue,
+            IterationPower => StrategicEffectRequirements.StatusDrawTriggers
+                | StrategicEffectRequirements.AverageCardValue,
+            MasterPlannerPower => StrategicEffectRequirements.SkillPlays
+                | StrategicEffectRequirements.AverageCardValue,
+            FocusPower or FurnacePower or ThunderPower or LightningRodPower
+                => StrategicEffectRequirements.RemainingTurns,
+            _ => StrategicEffectRequirements.None,
+        };
+
     public static StrategicEffectVector Evaluate(
         PowerModel power,
         StrategicEffectContext context)

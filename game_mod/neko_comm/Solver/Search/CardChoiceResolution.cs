@@ -24,10 +24,9 @@ internal static partial class CardChoiceSupport
         {
             CombatPredictionCardGenerationOptionsEntry entry = simulator.History
                 .OfType<CombatPredictionCardGenerationOptionsEntry>()
-                .LastOrDefault(candidate => candidate.Trace?.Source == playedCard.Original)
+                .LastOrDefault(candidate => playedCard.References(candidate.Trace?.Source))
                 ?? throw new InvalidOperationException($"卡牌 {playedCard.Preview.Id.Entry} 缺少生成选项。");
-            List<PredictedCard> options = entry.Options.Select(option => option.Clone()).ToList();
-            selected = choice.Cards.Select(token => Find(options, token)).ToList();
+            selected = choice.Cards.Select(token => Find(entry.Options, token)).ToList();
         }
         else
         {

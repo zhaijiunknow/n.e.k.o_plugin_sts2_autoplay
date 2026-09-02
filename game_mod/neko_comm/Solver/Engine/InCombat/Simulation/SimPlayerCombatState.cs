@@ -31,16 +31,54 @@ internal sealed class SimPlayerCombatState
     public IReadOnlyList<SimCardPile> AllPiles
         => _allPiles ??= [Hand, DrawPile, DiscardPile, ExhaustPile, PlayPile];
 
-    public IEnumerable<PredictedCard> AllCards
+    public AllCardsEnumerable AllCards => new(this);
+
+    public readonly struct AllCardsEnumerable(SimPlayerCombatState state) : IEnumerable<PredictedCard>
     {
-        get
+        private readonly SimPlayerCombatState _state = state;
+
+        public Enumerator GetEnumerator() => new(_state);
+
+        IEnumerator<PredictedCard> IEnumerable<PredictedCard>.GetEnumerator() => GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    public struct Enumerator : IEnumerator<PredictedCard>
+    {
+        private readonly SimPlayerCombatState _state;
+        private int _pileIndex;
+        private List<PredictedCard>.Enumerator _cards;
+
+        internal Enumerator(SimPlayerCombatState state)
         {
-            foreach (SimCardPile pile in AllPiles)
-            {
-                foreach (PredictedCard card in pile.Cards)
-                    yield return card;
-            }
+            _state = state;
+            _pileIndex = -1;
+            _cards = default;
         }
+
+        public readonly PredictedCard Current => _cards.Current;
+
+        readonly object System.Collections.IEnumerator.Current => Current;
+
+        public bool MoveNext()
+        {
+            if (_pileIndex >= 0 && _cards.MoveNext())
+                return true;
+            while (++_pileIndex < 5)
+            {
+                _cards = _state.GetPileByEnumerationIndex(_pileIndex).GetEnumerator();
+                if (_cards.MoveNext())
+                    return true;
+            }
+            return false;
+        }
+
+        public readonly void Dispose()
+        {
+        }
+
+        void System.Collections.IEnumerator.Reset() => throw new NotSupportedException();
     }
 
     public int Energy { get; private set; }
@@ -70,6 +108,17 @@ internal sealed class SimPlayerCombatState
         }
         return null;
     }
+
+    private SimCardPile GetPileByEnumerationIndex(int index)
+        => index switch
+        {
+            0 => Hand,
+            1 => DrawPile,
+            2 => DiscardPile,
+            3 => ExhaustPile,
+            4 => PlayPile,
+            _ => throw new ArgumentOutOfRangeException(nameof(index), index, "Unknown combat-pile index."),
+        };
 
     public SimCardPile? GetCardPile(PileType type)
     {
@@ -120,11 +169,8 @@ internal sealed class SimPlayerCombatState
     internal void MaterializeRoot()
     {
         _ = OrbQueue;
-        foreach (SimCardPile pile in AllPiles)
-        {
-            foreach (PredictedCard card in pile.Cards)
-                card.MaterializePreview();
-        }
+        foreach (PredictedCard card in AllCards)
+            card.MaterializePreview();
     }
 
     internal SimPlayerCombatState Fork(PredictionForkContext context)

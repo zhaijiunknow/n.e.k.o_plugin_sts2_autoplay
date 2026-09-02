@@ -1,4 +1,5 @@
 using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Entities.Orbs;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 using CombatSolver.Engine.Common;
@@ -11,15 +12,29 @@ internal sealed partial class CombatPredictionSimulator
 {
     private const int MaxSimulatedChanneledOrbs = 1000;
 
+    public void AddOrbSlots(Player player, int amount)
+    {
+        if (amount < 0)
+            throw new ArgumentOutOfRangeException(nameof(amount));
+        SimOrbQueue queue = State.GetPlayerCombatState(player).OrbQueue;
+        int added = Math.Min(OrbQueue.maxCapacity - queue.Capacity, amount);
+        if (added > 0)
+            queue.AddCapacity(added);
+    }
+
     // Mirrors OrbModel.TriggerPassive without VFX/SFX, waits, or real model-stack updates.
-    internal void TriggerOrbPassive(OrbModel orb, Creature? target)
+    internal void TriggerOrbPassive(
+        OrbModel orb,
+        Creature? target,
+        ISet<uint>? processedEnemyDeaths = null)
     {
         var triggerCount = HookMirrors.ModifyOrbPassiveTriggerCount(this, orb, 1, out _);
         // Vanilla calls Hook.AfterModifyingOrbPassiveTriggerCount here, but all listeners are cosmetic.
+        processedEnemyDeaths ??= new HashSet<uint>();
 
         for (var i = 0; i < triggerCount; i++)
         {
-            OrbMirrors.InvokePassive(this, orb, target);
+            OrbPassive(orb, target, processedEnemyDeaths);
         }
     }
 
@@ -128,7 +143,10 @@ internal sealed partial class CombatPredictionSimulator
     }
 
     // Mirrors OrbCmd.Passive without VFX/SFX, choice-context model stack updates, or real orb mutation.
-    public void OrbPassive(OrbModel orb, Creature? target = null)
+    public void OrbPassive(
+        OrbModel orb,
+        Creature? target = null,
+        ISet<uint>? processedEnemyDeaths = null)
     {
         if (IsOverOrEnding)
         {
@@ -136,5 +154,11 @@ internal sealed partial class CombatPredictionSimulator
         }
 
         OrbMirrors.InvokePassive(this, orb, target);
+        if (State.CombatState is ICombatPredictionEnemyDeathSink deathSink)
+        {
+            deathSink.ResolvePendingEnemyDeaths(
+                this,
+                processedEnemyDeaths ?? new HashSet<uint>());
+        }
     }
 }

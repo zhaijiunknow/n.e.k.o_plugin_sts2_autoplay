@@ -279,7 +279,8 @@ internal static class AfterCardPlayedMirrors
         var playerState = context.State.GetPlayerCombatState(relic.Owner);
         var handCards = playerState.Hand.Cards;
         var naturallyCostly = handCards
-            .Where(card => GameRef.Get<int>(card.Preview.EnergyCost, "_base") > 0 || card.Preview.BaseStarCost > 0)
+            .Where(card => card.Preview.EnergyCost.GetWithModifiers(CostModifiers.None) > 0
+                || card.Preview.BaseStarCost > 0)
             .ToList();
         bool CostsResources(PredictedCard card) =>
             card.GetEnergyCostWithModifiers(context.Simulator, playerState) > 0 ||
@@ -718,7 +719,7 @@ internal static class AfterCardPlayedMirrors
         if (context.PreviewCard.Owner.Creature == power.Owner &&
             context.CardPlay is { IsAutoPlay: false, IsLastInSeries: true })
         {
-            context.StateStore.Get(power, () => new VoidFormPredictionState(power)).CardsPlayedThisTurn++;
+            context.StateStore.Get(power, static value => new VoidFormPredictionState(value)).CardsPlayedThisTurn++;
         }
     }
 

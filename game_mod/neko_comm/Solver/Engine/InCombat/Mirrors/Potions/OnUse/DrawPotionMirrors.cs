@@ -50,7 +50,7 @@ internal static class DrawPotionMirrors
 
         context.Simulator.Draw(player, potion.DynamicVars.Cards.BaseValue);
 
-        foreach (var card in hand.Cards)
+        foreach (var card in hand)
         {
             if (card.Preview.EnergyCost.CostsX ||
                 card.Preview.EnergyCost.GetWithModifiers(CostModifiers.None) < 0)

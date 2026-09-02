@@ -49,13 +49,13 @@ internal static class ShouldPlayMirrors
     {
         return context.Card.Preview.Owner.Creature != power.Owner ||
             context.Card.Preview.Affliction is not Bound ||
-            !context.StateStore.Get(power, () => new ChainsOfBindingPredictionState(power)).BoundCardPlayed;
+            !context.StateStore.Get(power, static value => new ChainsOfBindingPredictionState(value)).BoundCardPlayed;
     }
 
     private static bool HandleSlothPower(SlothPower power, ShouldPlayMirrorContext context)
     {
         return context.Card.Preview.Owner.Creature != power.Owner ||
-            context.StateStore.Get(power, () => new CounterPredictionState(GameRef.Get<int>(power, "_cardsPlayedThisTurn"))).Value <
+            context.StateStore.Get(power, static value => new CounterPredictionState(GameRef.Get<int>(value, "_cardsPlayedThisTurn"))).Value <
             power.Amount;
     }
 
@@ -75,7 +75,7 @@ internal static class ShouldPlayMirrors
     private static bool HandleVelvetChoker(VelvetChoker relic, ShouldPlayMirrorContext context)
     {
         return context.Card.Preview.Owner != relic.Owner ||
-            context.StateStore.Get(relic, () => new CounterPredictionState(GameRef.Get<int>(relic, "_cardsPlayedThisTurn"))).Value <
+            context.StateStore.Get(relic, static value => new CounterPredictionState(GameRef.Get<int>(value, "_cardsPlayedThisTurn"))).Value <
             relic.DynamicVars.Cards.IntValue;
     }
 }

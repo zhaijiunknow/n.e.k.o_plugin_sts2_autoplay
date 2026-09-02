@@ -74,7 +74,7 @@ internal static class SolverWeights
     public const int SetupValueHorizonTurns = 16;
     public const int IncrementalVerificationMaxTurns = 32;
     public const int UiTurnRows = SetupValueHorizonTurns;
-    public const int MaximumSearchMaxDegreeOfParallelism = 8;
+    public const int MaximumSearchMaxDegreeOfParallelism = 16;
     public static int DefaultSearchMaxDegreeOfParallelism
         => ResolveDefaultSearchMaxDegreeOfParallelism(Environment.ProcessorCount);
 

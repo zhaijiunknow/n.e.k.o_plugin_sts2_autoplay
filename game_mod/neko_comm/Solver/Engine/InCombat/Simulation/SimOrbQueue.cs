@@ -100,9 +100,10 @@ internal sealed class SimOrbQueue
     /// </summary>
     public void BeforeTurnEnd(CombatPredictionSimulator simulator)
     {
+        HashSet<uint> processedEnemyDeaths = [];
         foreach (var orb in Orbs.ToList())
         {
-            OrbMirrors.InvokeBeforeTurnEndOrbTrigger(simulator, orb);
+            OrbMirrors.InvokeBeforeTurnEndOrbTrigger(simulator, orb, processedEnemyDeaths);
         }
     }
 

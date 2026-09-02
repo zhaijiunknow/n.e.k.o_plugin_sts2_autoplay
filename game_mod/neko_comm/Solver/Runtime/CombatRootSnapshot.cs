@@ -12,6 +12,11 @@ using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver;
 
+internal readonly record struct SearchablePotionSlotSnapshot(
+    int Slot,
+    string PotionId,
+    int StrategicHpCost);
+
 internal sealed class CombatRootSnapshot
 {
     private readonly CombatPredictionSimulator _rootSimulator;
@@ -26,12 +31,16 @@ internal sealed class CombatRootSnapshot
     public int InitialPlayerHp { get; }
     public int InitialPlayerMaxHp { get; }
     public int PotionSlotCount { get; }
+    public IReadOnlyList<SearchablePotionSlotSnapshot> SearchablePotions { get; }
     public int SearchablePotionCount { get; }
+    public int? MinimumSearchablePotionStrategicCost { get; }
+    public int ZeroCostSearchablePotionCount { get; }
     public ulong InitialAliveEnemyMask { get; }
     public CombatSide CurrentSide { get; }
     public PlayerTurnPhase PlayerPhase { get; }
     public RoomType? EncounterRoomType { get; }
-    public bool IsActEndingBoss { get; }
+    public BossHpRelief BossHpRelief { get; }
+    public bool IsActEndingBoss => BossHpRelief != BossHpRelief.None;
     public double CaptureElapsedMilliseconds { get; }
     public int CapturedCardCount { get; }
     public int CapturedPowerCount { get; }
@@ -54,12 +63,12 @@ internal sealed class CombatRootSnapshot
         int initialPlayerHp,
         int initialPlayerMaxHp,
         int potionSlotCount,
-        int searchablePotionCount,
+        IReadOnlyList<SearchablePotionSlotSnapshot> searchablePotions,
         ulong initialAliveEnemyMask,
         CombatSide currentSide,
         PlayerTurnPhase playerPhase,
         RoomType? encounterRoomType,
-        bool isActEndingBoss,
+        BossHpRelief bossHpRelief,
         double captureElapsedMilliseconds,
         int capturedCardCount,
         int capturedPowerCount,
@@ -81,12 +90,18 @@ internal sealed class CombatRootSnapshot
         InitialPlayerHp = initialPlayerHp;
         InitialPlayerMaxHp = initialPlayerMaxHp;
         PotionSlotCount = potionSlotCount;
-        SearchablePotionCount = searchablePotionCount;
+        SearchablePotions = searchablePotions;
+        SearchablePotionCount = searchablePotions.Count;
+        MinimumSearchablePotionStrategicCost = searchablePotions.Count == 0
+            ? null
+            : searchablePotions.Min(potion => potion.StrategicHpCost);
+        ZeroCostSearchablePotionCount = searchablePotions.Count(potion =>
+            potion.StrategicHpCost == 0);
         InitialAliveEnemyMask = initialAliveEnemyMask;
         CurrentSide = currentSide;
         PlayerPhase = playerPhase;
         EncounterRoomType = encounterRoomType;
-        IsActEndingBoss = isActEndingBoss;
+        BossHpRelief = bossHpRelief;
         CaptureElapsedMilliseconds = captureElapsedMilliseconds;
         CapturedCardCount = capturedCardCount;
         CapturedPowerCount = capturedPowerCount;
@@ -140,6 +155,16 @@ internal sealed class CombatRootSnapshot
         bool hasRenewablePotionShapedRock = simulatedCombat.RelicsOf(player)
             .OfType<PetrifiedToad>()
             .Any(relic => !relic.IsMelted);
+        SearchablePotionSlotSnapshot[] searchablePotions = player.PotionSlots
+            .Select((potion, slot) => (Potion: potion, Slot: slot))
+            .Where(item => item.Potion != null && PotionOnUseSupport.CanSearch(item.Potion))
+            .Select(item => new SearchablePotionSlotSnapshot(
+                item.Slot,
+                item.Potion!.Id.Entry,
+                PotionUsePolicy.StrategicHpCost(
+                    item.Potion,
+                    hasRenewablePotionShapedRock)))
+            .ToArray();
         if (!string.Equals(
                 continuationBefore.StateText,
                 projected.StateText,
@@ -185,12 +210,12 @@ internal sealed class CombatRootSnapshot
             player.Creature.CurrentHp,
             player.Creature.MaxHp,
             player.PotionSlots.Count,
-            player.PotionSlots.Count(potion => potion != null && PotionOnUseSupport.CanSearch(potion)),
+            Array.AsReadOnly(searchablePotions),
             aliveEnemyMask,
             state.CurrentSide,
             playerState.Phase,
             state.Encounter?.RoomType,
-            ActEndingBossPolicy.IsRecoveryFight(state),
+            ActEndingBossPolicy.ResolveHpRelief(state),
             stopwatch.Elapsed.TotalMilliseconds,
             cardCount,
             powerCount,

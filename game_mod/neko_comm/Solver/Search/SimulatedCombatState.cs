@@ -37,7 +37,8 @@ internal sealed partial class SimulatedCombatState
       ICombatPredictionCreatureSemantics, ICombatPredictionMonsterStateSink,
       ICombatPredictionCardExecutionSink, ICombatPredictionEnemyDeathSink,
       ICombatPredictionPendingChoiceState,
-      ICombatPredictionRunSnapshot, ICombatPredictionPlayerLimits, ICombatPredictionPlayerCardRules,
+      ICombatPredictionRunSnapshot, ICombatPredictionCardGenerationPoolSnapshot,
+      ICombatPredictionPlayerLimits, ICombatPredictionPlayerCardRules,
       ICombatPredictionPetState,
       ICombatPredictionStateOwner, ICombatPredictionRootCaptureBoundary,
       ICombatPredictionRootMaterializable, IPredictionForkBoundary
@@ -69,6 +70,7 @@ internal sealed partial class SimulatedCombatState
     private readonly CardMultiplayerConstraint _cardMultiplayerConstraint;
     private readonly PredictionModHookSubscriberCapture _modHookSubscribers;
     private readonly IReadOnlyDictionary<Player, int> _rootMaxHandSizes;
+    private readonly RootCombatCardGenerationPoolSnapshot _rootCardGenerationPools;
 
     private sealed class CombinedRosterView(
         IReadOnlyList<Creature> first,
@@ -216,6 +218,9 @@ internal sealed partial class SimulatedCombatState
         _cardMultiplayerConstraint = inner.RunState.CardMultiplayerConstraint;
         _playerCreatures = inner.PlayerCreatures.ToArray();
         _players = inner.Players.ToArray();
+        _rootCardGenerationPools = RootCombatCardGenerationPoolSnapshot.Capture(
+            _players,
+            _cardMultiplayerConstraint);
         _encounter = inner.Encounter;
         _encounterSlots = inner.Encounter?.Slots.ToArray() ?? [];
         _rootHistory = RootCombatHistorySnapshot.Capture();
@@ -380,7 +385,12 @@ internal sealed partial class SimulatedCombatState
         }
     }
 
-    private SimulatedCombatState(SimulatedCombatState source)
+    private SimulatedCombatState(
+        SimulatedCombatState source,
+        ForkableList<Creature> allies,
+        ForkableList<Creature> enemies,
+        ForkableList<Creature> knownEnemies,
+        ForkableList<Creature> escapedCreatures)
     {
         _runState = source._runState;
         _runRngSnapshot = source._runRngSnapshot;
@@ -390,6 +400,7 @@ internal sealed partial class SimulatedCombatState
         _cardMultiplayerConstraint = source._cardMultiplayerConstraint;
         _modHookSubscribers = source._modHookSubscribers;
         _rootMaxHandSizes = source._rootMaxHandSizes;
+        _rootCardGenerationPools = source._rootCardGenerationPools;
         _playerCreatures = source._playerCreatures;
         _players = source._players;
         _modifiers = source._modifiers;
@@ -409,10 +420,10 @@ internal sealed partial class SimulatedCombatState
         _playerNames = source._playerNames;
         _rootFloatingCards = source._rootFloatingCards;
         _rootDeadCreatures = source._rootDeadCreatures;
-        _allies = [];
-        _enemies = [];
-        _knownEnemies = [];
-        _escapedCreatures = [];
+        _allies = allies;
+        _enemies = enemies;
+        _knownEnemies = knownEnemies;
+        _escapedCreatures = escapedCreatures;
     }
 
     public IRunState RunState => _runState;
@@ -420,6 +431,29 @@ internal sealed partial class SimulatedCombatState
     internal RoomType? CurrentRoomType => _currentRoomType;
     internal MapCoord? CurrentMapCoord => _currentMapCoord;
     public CardMultiplayerConstraint CardMultiplayerConstraint => _cardMultiplayerConstraint;
+
+    bool ICombatPredictionCardGenerationPoolSnapshot.TryGetRootEligibleCards(
+        Player player,
+        CardPoolModel cardPool,
+        CardMultiplayerConstraint multiplayerConstraint,
+        out IReadOnlyList<CardModel> cards)
+        => _rootCardGenerationPools.TryGetEligibleCards(
+            player,
+            cardPool,
+            multiplayerConstraint,
+            out cards);
+
+    bool ICombatPredictionCardGenerationPoolSnapshot.TryGetRootEligibleCharacterAttackCards(
+        Player player,
+        CardPoolModel cardPool,
+        CardMultiplayerConstraint multiplayerConstraint,
+        out IReadOnlyList<CardModel> cards)
+        => _rootCardGenerationPools.TryGetEligibleCharacterAttackCards(
+            player,
+            cardPool,
+            multiplayerConstraint,
+            out cards);
+
     public IReadOnlyList<Creature> Allies => _allies;
     public IReadOnlyList<Creature> Enemies => _enemies;
     public IReadOnlyList<Creature> KnownEnemies => _knownEnemies;
@@ -522,7 +556,7 @@ internal sealed partial class SimulatedCombatState
         int previousAmount = GameRef.Get<int>(simulated, "_amount");
         GameRef.Set(simulated, "_amount", Math.Clamp(GameRef.Get<int>(simulated, "_amount") + amount, -999_999_999, 999_999_999));
         UpdatePowerListenerOrder((target, typeof(T)), previousAmount, GameRef.Get<int>(simulated, "_amount"));
-        InvalidateHookListeners();
+        InvalidateHookListenersForAmountTransition(previousAmount, GameRef.Get<int>(simulated, "_amount"));
         int applied = GameRef.Get<int>(simulated, "_amount") - previousAmount;
         RecordPowerAmountChange(simulated, applied, applier);
         RecordPossessedStatChange(simulated, applied, applier);
@@ -655,7 +689,7 @@ internal sealed partial class SimulatedCombatState
         int previousAmount = GameRef.Get<int>(simulated, "_amount");
         GameRef.Set(simulated, "_amount", Math.Clamp(amount, -999_999_999, 999_999_999));
         UpdatePowerListenerOrder((target, typeof(T)), previousAmount, GameRef.Get<int>(simulated, "_amount"));
-        InvalidateHookListeners();
+        InvalidateHookListenersForAmountTransition(previousAmount, GameRef.Get<int>(simulated, "_amount"));
     }
 
     public void SetPowerAmount(PowerModel power, int amount)
@@ -671,7 +705,7 @@ internal sealed partial class SimulatedCombatState
                 previousAmount,
                 GameRef.Get<int>(mutable, "_amount"));
         }
-        InvalidateHookListeners();
+        InvalidateHookListenersForAmountTransition(previousAmount, GameRef.Get<int>(mutable, "_amount"));
     }
 
     public void SetPowerDynamicVar(
@@ -738,7 +772,7 @@ internal sealed partial class SimulatedCombatState
         GameRef.Set(simulated, "_target", target);
         GameRef.Set(simulated, "_amount", Math.Clamp(GameRef.Get<int>(simulated, "_amount") + amount, -999_999_999, 999_999_999));
         UpdatePowerListenerOrder((owner, typeof(T)), previousAmount, GameRef.Get<int>(simulated, "_amount"));
-        InvalidateHookListeners();
+        InvalidateHookListenersForAmountTransition(previousAmount, GameRef.Get<int>(simulated, "_amount"));
     }
 
     public void RecordThievery(CombatPredictionSimulator simulator, Creature owner)
@@ -1352,16 +1386,21 @@ internal sealed partial class SimulatedCombatState
         if (_effectivePowers is not null)
             return _effectivePowers;
         IReadOnlyList<AbstractModel> listeners = GetEffectiveHookListeners();
-        int expectedPowerCount = _rootPowerAmounts.Count
-            + _rootMultiInstancePowers.Count
-            + (_powers?.Count ?? 0)
-            + (_addedPowerInstances?.Count ?? 0)
-            + 8;
-        List<PowerModel> powers = new(Math.Min(listeners.Count, expectedPowerCount));
-        foreach (AbstractModel listener in listeners)
+        int listenerCount = listeners.Count;
+        int powerCount = 0;
+        for (int index = 0; index < listenerCount; index++)
         {
-            if (listener is PowerModel power)
-                powers.Add(power);
+            if (listeners[index] is PowerModel)
+                powerCount++;
+        }
+        PowerModel[] powers = powerCount == 0
+            ? Array.Empty<PowerModel>()
+            : new PowerModel[powerCount];
+        int powerIndex = 0;
+        for (int index = 0; index < listenerCount; index++)
+        {
+            if (listeners[index] is PowerModel power)
+                powers[powerIndex++] = power;
         }
         _effectivePowers = powers;
         return _effectivePowers;
@@ -1451,7 +1490,6 @@ internal sealed partial class SimulatedCombatState
         List<AbstractModel> listeners = new(baseListeners.Count
             + (_powers?.Count ?? 0)
             + (_addedPowerInstances?.Count ?? 0));
-        HashSet<PowerModel> emittedPowers = new(ReferenceEqualityComparer.Instance);
         foreach (AbstractModel listener in baseListeners)
         {
             if (listener is not PowerModel power)
@@ -1464,10 +1502,7 @@ internal sealed partial class SimulatedCombatState
                 ?? _powers?.GetValueOrDefault((power.Owner, power.GetType()))
                 ?? power;
             if (effective.Amount != 0)
-            {
                 listeners.Add(effective);
-                emittedPowers.Add(effective);
-            }
         }
         if (_powers != null)
         {
@@ -1475,7 +1510,7 @@ internal sealed partial class SimulatedCombatState
             {
                 if (_powers.TryGetValue(key, out PowerModel? power)
                     && power.Amount != 0
-                    && emittedPowers.Add(power))
+                    && !ContainsPowerReference(listeners, power))
                 {
                     InsertPowerAtOwnerPosition(listeners, power);
                 }
@@ -1485,12 +1520,24 @@ internal sealed partial class SimulatedCombatState
         {
             foreach (PowerModel power in _addedPowerInstances)
             {
-                if (power.Amount != 0 && emittedPowers.Add(power))
+                if (power.Amount != 0 && !ContainsPowerReference(listeners, power))
                     InsertPowerAtOwnerPosition(listeners, power);
             }
         }
         _effectiveHookListeners = listeners;
         return _effectiveHookListeners;
+    }
+
+    private static bool ContainsPowerReference(
+        IReadOnlyList<AbstractModel> listeners,
+        PowerModel candidate)
+    {
+        for (int index = 0; index < listeners.Count; index++)
+        {
+            if (ReferenceEquals(listeners[index], candidate))
+                return true;
+        }
+        return false;
     }
 
     private void InsertPowerAtOwnerPosition(List<AbstractModel> listeners, PowerModel power)
@@ -1529,6 +1576,12 @@ internal sealed partial class SimulatedCombatState
         _effectiveHookListeners = null;
         _effectiveRunHookListeners = null;
         _effectivePowers = null;
+    }
+
+    private void InvalidateHookListenersForAmountTransition(int previousAmount, int currentAmount)
+    {
+        if ((previousAmount == 0) != (currentAmount == 0))
+            InvalidateHookListeners();
     }
 
     private IReadOnlyList<AbstractModel> GetBaseHookListeners()
@@ -1614,6 +1667,7 @@ internal sealed partial class SimulatedCombatState
         _registeredCombatCards = simulator.State.Players
             .SelectMany(player => simulator.State.GetPlayerCombatState(player).AllCards)
             .ToList();
+        CapturePowerAfflictionRootCards(simulator);
         foreach (PredictedCard card in _registeredCombatCards)
         {
             if (_modHookSubscribers.HasBaseLibCardModifiers)
@@ -1625,6 +1679,8 @@ internal sealed partial class SimulatedCombatState
         {
             PowerModel mutable = GetMutablePowerInstance(power);
             PowerPredictionStateSupport.CaptureRootState(simulator, mutable, power);
+            if (power is DampenPower dampen)
+                CaptureDampenRootState(simulator, dampen);
         }
         foreach (Player player in Players)
         {
@@ -1777,8 +1833,9 @@ internal sealed partial class SimulatedCombatState
         ulong powersSecond = 0;
         int powerCount = 0;
         IReadOnlyList<PowerModel> effectivePowers = EffectivePowers();
-        foreach (PowerModel power in effectivePowers)
+        for (int index = 0; index < effectivePowers.Count; index++)
         {
+            PowerModel power = effectivePowers[index];
             if (power.Amount == 0)
                 continue;
             AddPower(power, ref powersFirst, ref powersSecond);
@@ -1883,14 +1940,14 @@ internal sealed partial class SimulatedCombatState
         ulong first = 0;
         ulong second = 0;
         int count = 0;
-        foreach (FeralPower power in effectivePowers.OfType<FeralPower>())
+        for (int index = 0; index < effectivePowers.Count; index++)
         {
-            if (power.Amount <= 0)
+            if (effectivePowers[index] is not FeralPower power || power.Amount <= 0)
                 continue;
             StateFingerprintBuilder item = new();
             item.Add(power.Owner.CombatId ?? uint.MaxValue);
             item.Add(simulator.StateStore
-                .Peek(power, () => new FeralPredictionState(power))
+                .Peek(power, static value => new FeralPredictionState(value))
                 .ZeroCostAttacksPlayed);
             AddUnorderedItem(item.Finish(), ref first, ref second);
             count++;
@@ -1906,14 +1963,14 @@ internal sealed partial class SimulatedCombatState
         ulong first = 0;
         ulong second = 0;
         int count = 0;
-        foreach (JugglingPower power in effectivePowers.OfType<JugglingPower>())
+        for (int index = 0; index < effectivePowers.Count; index++)
         {
-            if (power.Amount <= 0)
+            if (effectivePowers[index] is not JugglingPower power || power.Amount <= 0)
                 continue;
             StateFingerprintBuilder item = new();
             item.Add(power.Owner.CombatId ?? uint.MaxValue);
             item.Add(simulator.StateStore
-                .Peek(power, () => new JugglingPredictionState(power))
+                .Peek(power, static value => new JugglingPredictionState(value))
                 .AttacksPlayedThisTurn);
             AddUnorderedItem(item.Finish(), ref first, ref second);
             count++;
@@ -1929,24 +1986,28 @@ internal sealed partial class SimulatedCombatState
         ulong first = 0;
         ulong second = 0;
         int count = 0;
-        foreach (PowerModel power in effectivePowers)
+        for (int index = 0; index < effectivePowers.Count; index++)
         {
+            PowerModel power = effectivePowers[index];
             if (power.Amount <= 0)
                 continue;
             int? value = power switch
             {
                 HardenedShellPower shell => (int)simulator.StateStore
-                    .Peek(shell, () => new HardenedShellPredictionState(shell))
+                    .Peek(shell, static value => new HardenedShellPredictionState(value))
                     .DamageReceivedThisTurn,
                 AutomationPower automation => simulator.StateStore
-                    .Peek(automation, () => new AutomationPredictionState(automation))
+                    .Peek(automation, static value => new AutomationPredictionState(value))
                     .CardsLeft,
                 SlothPower sloth => simulator.StateStore
-                    .Peek(sloth, () => new CounterPredictionState(
-                        GetCardsPlayedThisTurn(sloth.Owner)))
+                    .Peek(
+                        sloth,
+                        (State: this, Power: sloth),
+                        static context => new CounterPredictionState(
+                            context.State.GetCardsPlayedThisTurn(context.Power.Owner)))
                     .Value,
                 VoidFormPower voidForm => simulator.StateStore
-                    .Peek(voidForm, () => new VoidFormPredictionState(voidForm))
+                    .Peek(voidForm, static value => new VoidFormPredictionState(value))
                     .CardsPlayedThisTurn,
                 ChainsOfBindingPower chains => EncodeChainsOfBindingState(simulator, chains),
                 _ => null,
@@ -1969,7 +2030,7 @@ internal sealed partial class SimulatedCombatState
     {
         ChainsOfBindingPredictionState state = simulator.StateStore.Peek(
             power,
-            () => new ChainsOfBindingPredictionState(power));
+            static value => new ChainsOfBindingPredictionState(value));
         return checked(state.BoundCardsAfflictedThisTurn * 2 + (state.BoundCardPlayed ? 1 : 0));
     }
 
@@ -1980,9 +2041,9 @@ internal sealed partial class SimulatedCombatState
         ulong first = 0;
         ulong second = 0;
         int count = 0;
-        foreach (NemesisPower power in effectivePowers.OfType<NemesisPower>())
+        for (int index = 0; index < effectivePowers.Count; index++)
         {
-            if (power.Amount <= 0)
+            if (effectivePowers[index] is not NemesisPower power || power.Amount <= 0)
                 continue;
             StateFingerprintBuilder item = new();
             item.Add(power.Owner.CombatId ?? uint.MaxValue);
@@ -2000,9 +2061,9 @@ internal sealed partial class SimulatedCombatState
         ulong first = 0;
         ulong second = 0;
         int count = 0;
-        foreach (TenderPower power in effectivePowers.OfType<TenderPower>())
+        for (int index = 0; index < effectivePowers.Count; index++)
         {
-            if (power.Amount <= 0)
+            if (effectivePowers[index] is not TenderPower power || power.Amount <= 0)
                 continue;
             StateFingerprintBuilder item = new();
             item.Add(power.Owner.CombatId ?? uint.MaxValue);
@@ -2016,7 +2077,7 @@ internal sealed partial class SimulatedCombatState
     private static void AddPlayerIntMap(
         ref StateFingerprintBuilder fingerprint,
         char marker,
-        IReadOnlyDictionary<Player, int>? values)
+        ForkableDictionary<Player, int>? values)
     {
         ulong first = 0;
         ulong second = 0;
@@ -2038,7 +2099,7 @@ internal sealed partial class SimulatedCombatState
     private static void AddCreatureIntMap(
         ref StateFingerprintBuilder fingerprint,
         char marker,
-        IReadOnlyDictionary<Creature, int>? values)
+        ForkableDictionary<Creature, int>? values)
     {
         ulong first = 0;
         ulong second = 0;
@@ -2060,7 +2121,7 @@ internal sealed partial class SimulatedCombatState
     private static void AddCreatureTypeSet(
         ref StateFingerprintBuilder fingerprint,
         char marker,
-        IReadOnlySet<(Creature Owner, Type Type)>? values)
+        ForkableSet<(Creature Owner, Type Type)>? values)
     {
         ulong first = 0;
         ulong second = 0;
@@ -2082,7 +2143,7 @@ internal sealed partial class SimulatedCombatState
     private static void AddCreatureSet(
         ref StateFingerprintBuilder fingerprint,
         char marker,
-        IReadOnlySet<Creature>? values)
+        ForkableSet<Creature>? values)
     {
         ulong first = 0;
         ulong second = 0;
@@ -2102,7 +2163,7 @@ internal sealed partial class SimulatedCombatState
 
     private static void AddSteamEruptionPhases(
         ref StateFingerprintBuilder fingerprint,
-        IReadOnlyDictionary<Creature, SteamEruptionPhase>? values)
+        ForkableDictionary<Creature, SteamEruptionPhase>? values)
     {
         ulong first = 0;
         ulong second = 0;
@@ -2256,11 +2317,15 @@ internal sealed partial class SimulatedCombatState
             ?? throw new InvalidOperationException("Only monsters can be prepared through the predicted monster path.");
         if (CurrentSide == CombatSide.Player)
         {
-            MoveState initial = monster.MoveStateMachine!.RollMove(
-                PlayerCreatures,
-                creature,
-                simulator.Rng.MonsterAi);
-            RegisterMonsterAi(creature, initial);
+            RegisterPendingInitialMonsterAi(creature);
+            BranchMonsterAiState pending = GetMonsterAiState(creature);
+            if (pending.NeedsInitialRoll)
+            {
+                (_monsterAiStates ??= [])[creature] = BranchMonsterAi.RollInitial(
+                    pending,
+                    simulator,
+                    this);
+            }
         }
         else
         {

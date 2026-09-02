@@ -31,8 +31,11 @@ internal static class CorePowerSupport
     {
         CardModel card = playedCard.Preview;
         Creature owner = playedCard.Preview.Owner.Creature;
+        bool targetDeathTriggersFatal = target == null
+            || combat.EffectivePowers()
+                .Where(power => power.Owner == target)
+                .All(power => power.ShouldOwnerDeathTriggerFatal());
         MonologuePower[] pendingMonologues = combat.CapturePendingMonologues(owner);
-        combat.BeginCardPowerApplication(card);
         CardOnPlaySupport.Apply(
             simulator,
             combat,
@@ -51,7 +54,7 @@ internal static class CorePowerSupport
         {
             SimCreatureState ownerState = simulator.State.GetCreature(owner);
             if (ownerState.Block <= ownerBlockBefore)
-                simulator.GainBlock(owner, card.DynamicVars.Block, playedCard, null);
+                simulator.GainBlock(owner, card.DynamicVars.Block, playedCard, cardPlay);
             if (card is Armaments && card.IsUpgraded)
             {
                 SimPlayerCombatState playerState = simulator.State.GetPlayerCombatState(card.Owner);
@@ -63,35 +66,52 @@ internal static class CorePowerSupport
         {
             case BlightStrike when target != null:
             {
-                int damage = simulator.History.Entries
-                    .Skip(historyEntryStart)
-                    .OfType<CombatPredictionDamageReceivedEntry>()
-                    .Where(entry => ReferenceEquals(entry.CardSource?.Original, playedCard.Original)
+                int damage = 0;
+                foreach (CombatPredictionHistoryEntry historyEntry in
+                         simulator.History.EntriesFrom(historyEntryStart))
+                {
+                    if (historyEntry is CombatPredictionDamageReceivedEntry entry
+                        && ReferenceEquals(entry.CardSource?.Original, playedCard.Original)
                         && ReferenceEquals(entry.Receiver, target))
-                    .Sum(entry => entry.Result.TotalDamage);
+                    {
+                        damage = checked(damage + entry.Result.TotalDamage);
+                    }
+                }
                 if (damage > 0)
                     combat.Apply<DoomPower>(target, damage, owner);
                 break;
             }
             case Fisticuffs:
             {
-                int block = simulator.History.Entries
-                    .Skip(historyEntryStart)
-                    .OfType<CombatPredictionDamageReceivedEntry>()
-                    .Where(entry => ReferenceEquals(entry.CardSource?.Original, playedCard.Original))
-                    .Sum(entry => entry.Result.TotalDamage + entry.Result.OverkillDamage);
+                int block = 0;
+                foreach (CombatPredictionHistoryEntry historyEntry in
+                         simulator.History.EntriesFrom(historyEntryStart))
+                {
+                    if (historyEntry is CombatPredictionDamageReceivedEntry entry
+                        && ReferenceEquals(entry.CardSource?.Original, playedCard.Original))
+                    {
+                        int contribution = entry.Result.TotalDamage + entry.Result.OverkillDamage;
+                        block = checked(block + contribution);
+                    }
+                }
                 if (block > 0)
-                    simulator.GainBlock(owner, block, ValueProp.Move, playedCard, null);
+                    simulator.GainBlock(owner, block, ValueProp.Move, playedCard, cardPlay);
                 break;
             }
             case BeatIntoShape when target != null:
             {
-                int currentHits = simulator.History.Entries
-                    .Skip(historyEntryStart)
-                    .OfType<CombatPredictionDamageReceivedEntry>()
-                    .Count(entry => entry.Dealer == owner
+                int currentHits = 0;
+                foreach (CombatPredictionHistoryEntry historyEntry in
+                         simulator.History.EntriesFrom(historyEntryStart))
+                {
+                    if (historyEntry is CombatPredictionDamageReceivedEntry entry
+                        && entry.Dealer == owner
                         && entry.Receiver == target
-                        && entry.Result.Props.IsPoweredAttack());
+                        && entry.Result.Props.IsPoweredAttack())
+                    {
+                        currentHits = checked(currentHits + 1);
+                    }
+                }
                 int priorHits = Math.Max(
                     0,
                     combat.GetPoweredAttackHitsThisTurn(owner, target) - currentHits);
@@ -100,7 +120,12 @@ internal static class CorePowerSupport
                 PersistentPowerSupport.Forge(simulator, card.Owner, forge);
                 break;
             }
-            case Feed when target != null && WasFatalKill(combat, simulator, playedCard, target, historyEntryStart):
+            case Feed when target != null && WasFatalKill(
+                targetDeathTriggersFatal,
+                simulator,
+                playedCard,
+                target,
+                historyEntryStart):
             {
                 int maxHpGain = card.DynamicVars.MaxHp.IntValue;
                 SimCreatureState ownerState = simulator.State.GetCreature(owner);
@@ -108,7 +133,12 @@ internal static class CorePowerSupport
                 simulator.Heal(owner, maxHpGain);
                 break;
             }
-            case HandOfGreed when target != null && WasFatalKill(combat, simulator, playedCard, target, historyEntryStart):
+            case HandOfGreed when target != null && WasFatalKill(
+                targetDeathTriggersFatal,
+                simulator,
+                playedCard,
+                target,
+                historyEntryStart):
             {
                 int gold = card.DynamicVars["Gold"].IntValue;
                 combat.GainPlayerGold(card.Owner, gold);
@@ -123,7 +153,12 @@ internal static class CorePowerSupport
                 break;
             case TheHunt when target != null:
             {
-                if (WasFatalKill(combat, simulator, playedCard, target, historyEntryStart))
+                if (WasFatalKill(
+                        targetDeathTriggersFatal,
+                        simulator,
+                        playedCard,
+                        target,
+                        historyEntryStart))
                 {
                     combat.Apply<TheHuntPower>(owner, 1, owner);
                     combat.RecordLongTermResource(TheHuntLongTermResourceValue);
@@ -171,8 +206,7 @@ internal static class CorePowerSupport
                 combat.Apply<ThornsPower>(owner, card.DynamicVars["ThornsPower"].IntValue, owner);
                 break;
             case Capacitor:
-                simulator.State.GetPlayerCombatState(card.Owner).OrbQueue.AddCapacity(
-                    card.DynamicVars.Repeat.IntValue);
+                simulator.AddOrbSlots(card.Owner, card.DynamicVars.Repeat.IntValue);
                 break;
             case Corruption:
                 combat.Apply<CorruptionPower>(owner, card.DynamicVars["Power"].IntValue, owner);
@@ -341,7 +375,6 @@ internal static class CorePowerSupport
                 combat.AddEnergyNextTurn(card.Owner, card.DynamicVars.Energy.IntValue);
                 break;
         }
-        combat.CompleteCardPowerApplication(card);
         PowerLifecycleSupport.AfterCardPlayed(
             simulator,
             combat,
@@ -354,14 +387,12 @@ internal static class CorePowerSupport
     }
 
     private static bool WasFatalKill(
-        SimulatedCombatState combat,
+        bool targetDeathTriggersFatal,
         CombatPredictionSimulator simulator,
         PredictedCard playedCard,
         Creature target,
         int historyEntryStart)
-        => combat.EffectivePowers()
-               .Where(power => power.Owner == target)
-               .All(power => power.ShouldOwnerDeathTriggerFatal())
+        => targetDeathTriggersFatal
            && WasCardKill(simulator, playedCard, target, historyEntryStart);
 
     private static bool WasCardKill(
@@ -369,12 +400,20 @@ internal static class CorePowerSupport
         PredictedCard playedCard,
         Creature target,
         int historyEntryStart)
-        => simulator.History.Entries
-            .Skip(historyEntryStart)
-            .OfType<CombatPredictionDamageReceivedEntry>()
-            .Any(entry => ReferenceEquals(entry.CardSource?.Original, playedCard.Original)
+    {
+        foreach (CombatPredictionHistoryEntry historyEntry in
+                 simulator.History.EntriesFrom(historyEntryStart))
+        {
+            if (historyEntry is CombatPredictionDamageReceivedEntry entry
+                && ReferenceEquals(entry.CardSource?.Original, playedCard.Original)
                 && entry.Receiver == target
-                && entry.Result.WasTargetKilled);
+                && entry.Result.WasTargetKilled)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     public static void TriggerPoison(
         CombatPredictionSimulator simulator,
@@ -569,7 +608,7 @@ internal static class CorePowerSupport
         List<PredictedCard>? toFlush = null;
         if (PersistentRelicSupport.ShouldFlush(combat, player))
         {
-            foreach (PredictedCard card in playerState.Hand.Cards)
+            foreach (PredictedCard card in playerState.Hand)
             {
                 if (!card.Preview.ShouldRetainThisTurn)
                     (toFlush ??= []).Add(card);

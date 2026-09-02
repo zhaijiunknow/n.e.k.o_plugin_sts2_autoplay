@@ -47,11 +47,8 @@ class CombatPlanSourceTests(unittest.TestCase):
             "in_combat": True,
             "turn": 3,
             "score": 42.0,
-            "action": "play_card",
-            "card_index": 1,
-            "card_id": "STRIKE",
-            "target_index": 0,
-            "reason": "search_top",
+            "state_fingerprint": "abc123",
+            "line": [{"turn": 1, "steps": [{"kind": "play_card", "card_index": 1, "card_id": "STRIKE", "target_index": 0}]}],
         }
         context = _combat_context(solver_plan, _combat_snapshot())
         result = self._planner.plan(context)
@@ -68,7 +65,7 @@ class CombatPlanSourceTests(unittest.TestCase):
                 "run": {"potions": [{"potion_id": "BLOOD_POTION", "index": 1, "can_use": True}]},
             }
         )
-        solver_plan = {"in_combat": True, "action": "use_potion", "card_id": "BLOOD_POTION", "target_index": 0}
+        solver_plan = {"in_combat": True, "line": [{"turn": 1, "steps": [{"kind": "use_potion", "card_id": "BLOOD_POTION", "target_index": 0}]}]}
         result = self._planner.plan(_combat_context(solver_plan, snapshot))
 
         self.assertIsInstance(result, PlannedOperation)
@@ -77,7 +74,7 @@ class CombatPlanSourceTests(unittest.TestCase):
         self.assertEqual(result.source, "mod_solver")
 
     def test_end_turn_from_mod_solver_plan(self) -> None:
-        solver_plan = {"in_combat": True, "action": "end_turn"}
+        solver_plan = {"in_combat": True, "line": [{"turn": 1, "steps": [{"kind": "end_turn"}]}]}
         result = self._planner.plan(_combat_context(solver_plan, _combat_snapshot()))
 
         self.assertIsInstance(result, PlannedOperation)
@@ -93,7 +90,7 @@ class CombatPlanSourceTests(unittest.TestCase):
             self.assertNotEqual(result.source, "mod_solver")
 
     def test_ignores_not_in_combat_plan(self) -> None:
-        solver_plan = {"in_combat": False, "reason": "not_in_combat"}
+        solver_plan = {"in_combat": False}
         context = _combat_context(solver_plan=solver_plan, snapshot=_combat_snapshot())
         result = self._planner.plan(context)
 
@@ -101,8 +98,8 @@ class CombatPlanSourceTests(unittest.TestCase):
             self.assertNotEqual(result.source, "mod_solver")
 
     def test_ignores_planless_card_index(self) -> None:
-        # in_combat true but no card_index -> not a usable play_card; fall through to heuristic.
-        solver_plan = {"in_combat": True, "action": "play_card"}
+        # in_combat true but line[0].steps[0] has no card_index -> not a usable play_card; fall through.
+        solver_plan = {"in_combat": True, "line": [{"turn": 1, "steps": [{"kind": "play_card"}]}]}
         context = _combat_context(solver_plan=solver_plan, snapshot=_combat_snapshot())
         result = self._planner.plan(context)
 

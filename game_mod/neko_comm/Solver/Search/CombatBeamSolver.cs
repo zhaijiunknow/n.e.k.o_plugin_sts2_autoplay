@@ -33,7 +33,8 @@ internal sealed partial class CombatBeamSolver(
     SolverPotionPolicy? potionPolicyOverride = null,
     PotionFreePolicyBaseline? potionFreePolicyBaseline = null,
     int? maximumPotionUses = null,
-    IReadOnlyList<PlanAction>? fixedPrefixActions = null)
+    IReadOnlyList<PlanAction>? fixedPrefixActions = null,
+    int? minimumPotionUses = null)
 {
     private readonly SolverSearchProfile _profile = searchProfile ?? SolverSearchProfile.Short;
     private readonly SearchRunContext _run = new(
@@ -46,9 +47,22 @@ internal sealed partial class CombatBeamSolver(
     private readonly int _startTurnNumber = root.StartTurnNumber;
     private readonly int _initialEnemyCount = root.Enemies.Count;
     private readonly bool _isActEndingBoss = root.IsActEndingBoss;
+    private readonly BossHpRelief _bossHpRelief = root.BossHpRelief;
+    private readonly BossHpRelief _strategicBossHpRelief = ActEndingBossPolicy.ResolveStrategicHpRelief(
+        root.BossHpRelief,
+        policy.ActTransitionBossHpStrategy,
+        policy.FinalBossHpStrategy);
     private readonly bool _detailedDiagnostics = policy.DetailedDiagnostics;
     private readonly int? _maximumPotionUses = maximumPotionUses;
+    private readonly int _minimumPotionUses = minimumPotionUses ?? 0;
+    private readonly SearchInteractionState? _interaction = policy.Interaction;
     private readonly IReadOnlyList<PlanAction> _fixedPrefixActions = fixedPrefixActions ?? [];
+    private readonly string? _progressPhaseOverride = DescribePotionProgressPhase(
+        displayNames,
+        potionPolicyOverride,
+        maximumPotionUses,
+        minimumPotionUses,
+        fixedPrefixActions);
     private readonly SolverTheftPolicy? _theftPolicy = policy.TheftPolicy;
     private readonly PotionStrategySnapshot _potionStrategy = policy.PotionStrategy;
     private readonly bool _forceAllPotionsDisabled = potionPolicyOverride == SolverPotionPolicy.Disabled;
@@ -77,8 +91,10 @@ internal sealed partial class CombatBeamSolver(
         _enforcePotionDirectives,
         root.HasRenewablePotionShapedRock,
         _theftPolicy,
+        _strategicBossHpRelief,
         potionFreePolicyBaseline,
         root.InitialPlayerMaxHp,
+        _minimumPotionUses,
         policy.Diagnostics,
         _detailedDiagnostics,
         battleDamage);
@@ -89,5 +105,46 @@ internal sealed partial class CombatBeamSolver(
             potionId,
             _potionPolicy,
             _forceAllPotionsDisabled);
+
+    private static int ExplicitPotionUseCount(SearchNode node)
+        => PotionUsePolicy.ExplicitUseCount(
+            node.PotionCount,
+            node.Snapshot.AutomaticPotionUseCount);
+
+    internal static string? DescribePotionProgressPhase(
+        SolverDisplayNames displayNames,
+        SolverPotionPolicy? potionPolicyOverride,
+        int? maximumPotionUses,
+        int? minimumPotionUses,
+        IReadOnlyList<PlanAction>? fixedPrefixActions)
+    {
+        if (potionPolicyOverride == SolverPotionPolicy.Disabled)
+            return "正在搜索无药路线";
+
+        string[] potionNames = (fixedPrefixActions ?? [])
+            .Where(action => action.Kind == PlanActionKind.UsePotion && action.PotionId != null)
+            .Select(action => displayNames.Potion(action.PotionId!))
+            .ToArray();
+        if (potionNames.Length == 1)
+            return $"正在搜索使用 {potionNames[0]} 路线";
+        if (potionNames.Length == 2)
+            return $"正在搜索使用 {potionNames[0]} 和 {potionNames[1]} 路线";
+        if (potionNames.Length > 2)
+        {
+            return $"正在搜索使用 {string.Join("、", potionNames[..^1])} " +
+                $"和 {potionNames[^1]} 路线";
+        }
+        if (potionPolicyOverride == SolverPotionPolicy.RequireAtLeastOne
+            || potionPolicyOverride == SolverPotionPolicy.Smart && maximumPotionUses.HasValue)
+        {
+            if (minimumPotionUses is > 0
+                && maximumPotionUses == minimumPotionUses)
+            {
+                return $"正在搜索恰好 {minimumPotionUses} 瓶药路线";
+            }
+            return "正在搜索用药路线";
+        }
+        return null;
+    }
 
 }

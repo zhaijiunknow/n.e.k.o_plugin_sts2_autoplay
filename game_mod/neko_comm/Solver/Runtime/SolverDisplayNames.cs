@@ -105,6 +105,9 @@ internal sealed class SolverDisplayNames
     public string Potion(PotionModel potion)
         => _potions.GetValueOrDefault(potion.Id.Entry, potion.Id.Entry);
 
+    public string Potion(string potionId)
+        => _potions.GetValueOrDefault(potionId, potionId);
+
     public string Relic(string relicId)
         => _relics.GetValueOrDefault(relicId, relicId);
 

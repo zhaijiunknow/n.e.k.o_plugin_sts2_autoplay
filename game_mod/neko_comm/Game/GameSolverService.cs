@@ -24,11 +24,11 @@ namespace NekoComm.Game
             var combat = CombatManager.Instance.DebugOnlyGetState();
             var run = RunManager.Instance.DebugOnlyGetState();
             if (combat == null || !CombatManager.Instance.IsInProgress)
-                return new SolverPlanPayload { in_combat = false, reason = "not_in_combat" };
+                return new SolverPlanPayload { in_combat = false };
 
             var me = GameStateService.GetLocalPlayer(combat);
             if (me == null || me.PlayerCombatState == null)
-                return new SolverPlanPayload { in_combat = false, reason = "no_local_player" };
+                return new SolverPlanPayload { in_combat = false };
 
             if (SolverEnabled)
             {
@@ -38,7 +38,7 @@ namespace NekoComm.Game
                 }
                 catch
                 {
-                    return new SolverPlanPayload { in_combat = false, reason = "solver_failed" };
+                    return new SolverPlanPayload { in_combat = false };
                 }
             }
 
@@ -49,7 +49,7 @@ namespace NekoComm.Game
             }
             catch
             {
-                return new SolverPlanPayload { in_combat = false, reason = "solver_failed" };
+                return new SolverPlanPayload { in_combat = false };
             }
         }
     }
@@ -59,12 +59,15 @@ namespace NekoComm.Game
         public bool in_combat { get; init; }
         public int? turn { get; init; }
         public double? score { get; init; }
-        public string action { get; init; } = "none";
-        public int? card_index { get; init; }
-        public string? card_id { get; init; }
-        public int? target_index { get; init; }
-        public string? reason { get; init; }
-        public SolverLineStep[] line { get; init; } = Array.Empty<SolverLineStep>();
+        // Fingerprint of the combat state this plan was solved from (hash of the capture's ContinuationStamp
+        // state text). Consumers compare it against the current state to decide whether the plan needs
+        // recomputing after an action. Null when a plan was not produced from a live capture (e.g. fallback).
+        public string? state_fingerprint { get; init; }
+
+        // The forecasted line: grouped per turn, each turn's steps ending with an "end_turn" boundary.
+        // The single source of truth for the next move is line[0].steps[0] (the current turn's first step,
+        // which carries the positional card_index); there is no duplicated top-level action/card_index/etc.
+        public SolverTurnStep[] line { get; init; } = Array.Empty<SolverTurnStep>();
         public int beam_width { get; init; }
         public int horizon { get; init; }
         public int max_turn_actions { get; init; }
@@ -87,6 +90,17 @@ namespace NekoComm.Game
         public int? card_index { get; init; }
         public string? card_id { get; init; }
         public int? target_index { get; init; }
+    }
+
+    /// <summary>
+    /// One turn's worth of the forecasted line, grouped so consumers can render/act per-turn. Each turn's
+    /// <see cref="steps"/> ends with an "end_turn" step (the end-turn boundary); only the first (current)
+    /// turn's card_index is a positional hand index — later turns are card_id-only (hand unknown yet).
+    /// </summary>
+    internal sealed class SolverTurnStep
+    {
+        public int turn { get; init; }
+        public SolverLineStep[] steps { get; init; } = Array.Empty<SolverLineStep>();
     }
 
     internal sealed class CoverageSummaryPayload

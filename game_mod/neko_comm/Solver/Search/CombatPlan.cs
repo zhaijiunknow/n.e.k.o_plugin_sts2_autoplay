@@ -56,6 +56,13 @@ internal enum SearchBoundaryReason
     TimeLimit,
 }
 
+internal enum SolverResultScope
+{
+    SearchCompletion,
+    CurrentTurnAdoption,
+    RouteAdoption,
+}
+
 [Flags]
 internal enum SearchRouteTraits
 {
@@ -160,6 +167,7 @@ internal sealed record PlanAction(
 internal sealed record TurnOutcome(
     int Turn,
     int HpLost,
+    int EnemyHpLost,
     int SoldHp,
     int MaxBlock,
     int ActualBlock,
@@ -237,6 +245,7 @@ internal sealed record SearchNode(
 
     public int RetentionRank { get; set; } = int.MaxValue;
     public int LongTermResourceRetentionRank { get; set; } = int.MaxValue;
+    public int CumulativeEnemyHpLost { get; init; }
     public IReadOnlyList<PlanAction> Actions => _actions ??= MaterializeActions();
 
     public IReadOnlyList<PlanCardChoice> GetTurnSetupChoices()
@@ -476,6 +485,7 @@ internal sealed record CachedContinuation(
 
 internal sealed class SolverResult
 {
+    public SolverResultScope ResultScope { get; internal set; } = SolverResultScope.SearchCompletion;
     public SolverSearchPhase SearchPhase { get; internal set; } = SolverSearchPhase.Short;
     public bool DeepSearchTriggered { get; internal set; }
     public bool DeepSearchImprovedResult { get; internal set; }
@@ -533,17 +543,20 @@ internal sealed class SolverResult
     public required SolverSnapshot Snapshot { get; init; }
     public required IntentForecast Forecast { get; init; }
     public required int ExpandedNodes { get; init; }
+    public long TotalExpandedNodes { get; internal set; }
     public required int DominatedActionsPruned { get; init; }
     public required int TopQueueActionsDropped { get; init; }
     public required int ActionAdmissionRepresentativesProtected { get; init; }
     public required int DuplicateCardBranchesPruned { get; init; }
     public required int ChoiceBranchesEvaluated { get; init; }
+    public long TotalChoiceBranchesEvaluated { get; internal set; }
     public required int ShuffleBranchesPruned { get; init; }
     public required int SoldHpBranchesPruned { get; init; }
     public required int HpInvestmentBranchesProtected { get; init; }
     public required int ReplayCount { get; init; }
     public required int ForkCount { get; init; }
     public required int TransitionCount { get; init; }
+    public long TotalTransitionCount { get; internal set; }
     public required int ReusedNodeSnapshots { get; init; }
     public required int TranspositionBranchesPruned { get; init; }
     public required int RepeatableNoProgressBranchesPruned { get; init; }
@@ -551,6 +564,18 @@ internal sealed class SolverResult
     public int ParallelExpansionWaves { get; init; }
     public int ParallelExpansionWorkItems { get; init; }
     public int MaxParallelExpansionConcurrency { get; init; }
+    public int ParallelActionReplayWaves { get; init; }
+    public int ParallelActionReplayWorkItems { get; init; }
+    public int MaxParallelActionReplayConcurrency { get; init; }
+    public int DeferredRoundChoiceActions { get; init; }
+    public int DeferredRoundChoiceLayerWidthTotal { get; init; }
+    public int MaxDeferredRoundChoiceLayerWidth { get; init; }
+    public int DeferredRoundChoiceFiniteQuotaFallbacks { get; init; }
+    public int DeferredRoundChoiceFinitePrimaryLayers { get; init; }
+    public int DeferredRoundChoiceFinitePendingFallbacks { get; init; }
+    public int ParallelRoundChoiceReplayWaves { get; init; }
+    public int ParallelRoundChoiceReplayWorkItems { get; init; }
+    public int MaxParallelRoundChoiceReplayConcurrency { get; init; }
     public int NodeLimitSnapshotsReleased { get; init; }
     public required int TransitionCacheHits { get; init; }
     public required long WorkerAllocatedBytes { get; init; }
@@ -571,6 +596,7 @@ internal sealed class SolverResult
     public required int ProjectedBattleHpLost { get; init; }
     public required int BattlePotionsUsedSoFar { get; init; }
     public required int PotionCount { get; init; }
+    public required int ExplicitPotionCount { get; init; }
     public int ProjectedBattlePotionCount => BattlePotionsUsedSoFar + PotionCount;
     public required int PotionHpSaved { get; internal set; }
     public required int PotionHpRequired { get; internal set; }
@@ -580,6 +606,7 @@ internal sealed class SolverResult
     public required int SoldHpThreshold { get; init; }
     public required IReadOnlyDictionary<int, int> SoldHpByTurn { get; init; }
     public required IReadOnlyDictionary<int, int> HpLostByTurn { get; init; }
+    public required IReadOnlyDictionary<int, int> EnemyHpLostByTurn { get; init; }
     public required IReadOnlyDictionary<int, int> MaxBlockByTurn { get; init; }
     public required IReadOnlyDictionary<int, int> ActualBlockByTurn { get; init; }
     public required IReadOnlyDictionary<int, int> EnergyLeftByTurn { get; init; }
@@ -590,6 +617,7 @@ internal sealed class SolverResult
     public required int? DeathTurn { get; init; }
     public required bool OnlyDeathRoutesFound { get; init; }
     public required bool IsActEndingBoss { get; init; }
+    public required BossHpRelief BossHpRelief { get; init; }
     public required TimeSpan Elapsed { get; init; }
     public required IReadOnlyList<CachedContinuation> Continuations { get; init; }
     public bool WasReused { get; init; }
@@ -628,6 +656,9 @@ internal sealed class SolverResult
         int remainingPotionCount = PotionCountByTurn
             .Where(item => item.Key >= cached.StartTurnNumber)
             .Sum(item => item.Value);
+        int remainingExplicitPotionCount = BestNode.Actions.Count(action =>
+            action.Kind == PlanActionKind.UsePotion
+            && action.Turn >= cached.StartTurnNumber);
         int remainingPotionCost = PotionStrategicCostByTurn
             .Where(item => item.Key >= cached.StartTurnNumber)
             .Sum(item => item.Value);
@@ -686,6 +717,7 @@ internal sealed class SolverResult
             ProjectedBattleHpLost = battleDamage.HpLostSoFar + totalRemainingLoss,
             BattlePotionsUsedSoFar = battleDamage.PotionsUsedSoFar,
             PotionCount = remainingPotionCount,
+            ExplicitPotionCount = remainingExplicitPotionCount,
             PotionHpSaved = remainingPotionCount == 0 ? 0 : PotionHpSaved,
             PotionHpRequired = remainingPotionCost,
             PotionBranchesRejected = 0,
@@ -694,6 +726,7 @@ internal sealed class SolverResult
             SoldHpThreshold = SoldHpThreshold,
             SoldHpByTurn = soldByTurn,
             HpLostByTurn = HpLostByTurn,
+            EnemyHpLostByTurn = EnemyHpLostByTurn,
             MaxBlockByTurn = MaxBlockByTurn,
             ActualBlockByTurn = ActualBlockByTurn,
             EnergyLeftByTurn = EnergyLeftByTurn,
@@ -704,6 +737,7 @@ internal sealed class SolverResult
             DeathTurn = DeathTurn,
             OnlyDeathRoutesFound = OnlyDeathRoutesFound,
             IsActEndingBoss = IsActEndingBoss,
+            BossHpRelief = BossHpRelief,
             Elapsed = TimeSpan.Zero,
             Continuations = Continuations.Where(item => item.StartTurnNumber > cached.StartTurnNumber).ToList(),
             WasReused = true,

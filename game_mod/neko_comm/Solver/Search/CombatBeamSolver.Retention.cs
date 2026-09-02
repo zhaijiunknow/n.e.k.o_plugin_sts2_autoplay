@@ -77,8 +77,10 @@ internal sealed partial class CombatBeamSolver
             {
                 for (SearchNode? ancestor = candidate.Parent; ancestor != null; ancestor = ancestor.Parent)
                 {
+                    // The first visit records this ancestor and its complete parent chain.
+                    // A repeated ancestor therefore proves every remaining parent is recorded too.
                     if (!ancestorRetentionRanks.TryAdd(ancestor, ancestor.RetentionRank))
-                        continue;
+                        break;
                     if (ancestor.LongTermResourceRetentionRank != int.MaxValue)
                         ancestor.RetentionRank = ancestor.LongTermResourceRetentionRank;
                 }

@@ -63,10 +63,17 @@ internal static class PowerLifecycleSupport
         PredictedCard card,
         int historyEntryStart)
     {
-        CombatPredictionCardPlayStartedEntry? started = simulator.History.Entries
-            .Skip(historyEntryStart)
-            .OfType<CombatPredictionCardPlayStartedEntry>()
-            .FirstOrDefault(entry => ReferenceEquals(entry.CardPlay.Card, card.Preview));
+        CombatPredictionCardPlayStartedEntry? started = null;
+        foreach (CombatPredictionHistoryEntry entry in simulator.History.EntriesFrom(historyEntryStart))
+        {
+            if (entry is not CombatPredictionCardPlayStartedEntry candidate
+                || !ReferenceEquals(candidate.CardPlay.Card, card.Preview))
+            {
+                continue;
+            }
+            started = candidate;
+            break;
+        }
         if (started == null)
             return;
 

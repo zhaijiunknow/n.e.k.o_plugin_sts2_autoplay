@@ -849,11 +849,37 @@ internal sealed partial class CombatBeamSolver
                         AddRequired(required, FindBestLane(potionCountGroup.ToList(), trait), limit);
                     }
                 }
+                // MultiObjectiveDominates intentionally cannot compare nodes from different
+                // combat/control/pile cohorts. Looking at the whole ranked pool therefore did
+                // O(n^2) fingerprint checks at large turn boundaries (tens of thousands of
+                // ended candidates) even though nearly every pair was incomparable.
+                Dictionary<(
+                    StateFingerprint EnemyCombat,
+                    StateFingerprint EnemyControl,
+                    StateFingerprint UnorderedPile), List<SearchNode>> paretoCohorts = [];
+                foreach (SearchNode node in ranked)
+                {
+                    var cohortKey = (
+                        node.Snapshot.EnemyCombatDistributionKey,
+                        node.Snapshot.EnemyControlDistributionKey,
+                        node.Snapshot.UnorderedPileKey);
+                    if (!paretoCohorts.TryGetValue(cohortKey, out List<SearchNode>? cohort))
+                    {
+                        cohort = [];
+                        paretoCohorts.Add(cohortKey, cohort);
+                    }
+                    cohort.Add(node);
+                }
+
                 List<SearchNode> pareto = new(3);
                 foreach (SearchNode candidate in ranked)
                 {
                     bool dominated = false;
-                    foreach (SearchNode other in ranked)
+                    var cohortKey = (
+                        candidate.Snapshot.EnemyCombatDistributionKey,
+                        candidate.Snapshot.EnemyControlDistributionKey,
+                        candidate.Snapshot.UnorderedPileKey);
+                    foreach (SearchNode other in paretoCohorts[cohortKey])
                     {
                         if (!MultiObjectiveDominates(other, candidate))
                             continue;

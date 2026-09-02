@@ -24,6 +24,12 @@ namespace CombatSolver;
 
 internal sealed partial class CombatBeamSolver
 {
+    private static int AccumulateEnemyHpLost(
+        SearchNode parent,
+        SimulationSnapshot childSnapshot)
+        => checked(parent.CumulativeEnemyHpLost
+            + Math.Max(0, parent.Snapshot.RawEnemyHp - childSnapshot.RawEnemyHp));
+
     private List<SearchNode> AnnotateTurnOutcomes(List<SearchNode> ended)
     {
         if (ended.Count == 0)
@@ -99,6 +105,8 @@ internal sealed partial class CombatBeamSolver
                     Outcome = new TurnOutcome(
                         outcome.Turn,
                         outcome.HpLost,
+                        outcome.Node.CumulativeEnemyHpLost
+                            - outcome.TurnStart.CumulativeEnemyHpLost,
                         soldThisTurn,
                         maxBlock,
                         outcome.ActualBlock,
@@ -179,6 +187,7 @@ internal sealed partial class CombatBeamSolver
         path.Reverse();
 
         Dictionary<int, int> losses = [];
+        Dictionary<int, int> enemyHpLosses = [];
         Dictionary<int, int> sold = [];
         Dictionary<int, int> maxBlock = [];
         Dictionary<int, int> actualBlock = [];
@@ -217,6 +226,7 @@ internal sealed partial class CombatBeamSolver
             if (node.Outcome is { } outcome)
             {
                 losses[outcome.Turn] = outcome.HpLost;
+                enemyHpLosses[outcome.Turn] = outcome.EnemyHpLost;
                 actualBlock[outcome.Turn] = outcome.ActualBlock;
                 maxBlock[outcome.Turn] = outcome.MaxBlock;
                 sold[outcome.Turn] = outcome.SoldHp;
@@ -233,6 +243,7 @@ internal sealed partial class CombatBeamSolver
         }
         return new RouteAnnotations(
             losses,
+            enemyHpLosses,
             sold,
             maxBlock,
             actualBlock,
@@ -253,12 +264,32 @@ internal sealed partial class CombatBeamSolver
     }
 
     private int SoldHpThreshold()
+        => ResolveSoldHpThreshold(
+            root.InitialPlayerMaxHp,
+            root.EncounterRoomType,
+            _strategicBossHpRelief,
+            _theftPolicy);
+
+    internal static int ResolveSoldHpThreshold(
+        int initialPlayerMaxHp,
+        RoomType? encounterRoomType,
+        BossHpRelief bossHpRelief,
+        SolverTheftPolicy? theftPolicy)
     {
-        if (_theftPolicy == SolverTheftPolicy.PreserveResources)
-            return root.InitialPlayerMaxHp;
-        if (_isActEndingBoss)
-            return Math.Max(0, root.InitialPlayerMaxHp - 1);
-        return root.EncounterRoomType switch
+        if (theftPolicy == SolverTheftPolicy.PreserveResources)
+            return initialPlayerMaxHp;
+        int survivalLimit = Math.Max(0, initialPlayerMaxHp - 1);
+        if (bossHpRelief == BossHpRelief.RunEnding)
+            return survivalLimit;
+        if (bossHpRelief == BossHpRelief.ActClearHeal)
+        {
+            return Math.Min(
+                survivalLimit,
+                ActEndingBossPolicy.RawHpRequiredForPersistentValue(
+                    SolverWeights.BossSoldHpThreshold,
+                    bossHpRelief));
+        }
+        return encounterRoomType switch
         {
             RoomType.Boss => SolverWeights.BossSoldHpThreshold,
             RoomType.Elite => SolverWeights.EliteSoldHpThreshold,

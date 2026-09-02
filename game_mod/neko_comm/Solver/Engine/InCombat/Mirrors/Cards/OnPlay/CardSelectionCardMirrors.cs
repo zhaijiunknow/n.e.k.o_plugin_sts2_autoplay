@@ -79,17 +79,19 @@ internal static class CardSelectionCardMirrors
         {
             var drawPileCards = context.OwnerState.DrawPile.Cards;
             var rngCounter = context.Rng?.Shuffle?.Counter() ?? -1;
-            var selectedCard = drawPileCards
+            List<PredictedCard> eligibleCards = drawPileCards
                 .Where(predictedCard =>
                     !predictedCard.HasKeyword(context.State, CardKeyword.Unplayable))
-                .ToList()
-                .StableShuffle(context.Rng.Shuffle)
-                .FirstOrDefault();
+                .ToList();
+            CombatBeamSolver.StableShuffleProjection(eligibleCards, context.Rng.Shuffle);
+            var selectedCard = eligibleCards.FirstOrDefault();
 
-            selectedCard ??= drawPileCards
-                .ToList()
-                .StableShuffle(context.Rng.Shuffle)
-                .FirstOrDefault();
+            if (selectedCard is null)
+            {
+                List<PredictedCard> fallbackCards = drawPileCards.ToList();
+                CombatBeamSolver.StableShuffleProjection(fallbackCards, context.Rng.Shuffle);
+                selectedCard = fallbackCards.FirstOrDefault();
+            }
 
             if (selectedCard is null)
             {
@@ -173,39 +175,6 @@ internal static class CardSelectionCardMirrors
     public static void SeekerStrikeOnPlay(SeekerStrike card, CardOnPlayMirrorContext context)
     {
         context.AttackSingle();
-
-        if (HasUnresolvedChoiceInCurrentAction(context.Simulator))
-        {
-            // The first unresolved choice changes the draw pile, so later replay options and their
-            // CombatCardSelection RNG consumption cannot be predicted from the current shadow state.
-            return;
-        }
-
-        var cardOptions = context.OwnerState.DrawPile.Cards
-            .ToList()
-            .StableShuffle(context.Rng.CombatCardSelection)
-            .Take(card.DynamicVars.Cards.IntValue)
-            .ToList();
-        if (cardOptions.Count == 0)
-        {
-            return;
-        }
-
-        context.Simulator.History.CardsSelected(cardOptions);
-        // Vanilla next asks the player to choose an option and moves it to hand. Record the options
-        // first so that this unresolved choice falls after their risk boundary.
-        context.History.RecordRisk(PredictionRiskReason.UnresolvedPlayerChoice);
-    }
-
-    internal static bool HasUnresolvedChoiceInCurrentAction(CombatPredictionSimulator simulator)
-    {
-        PredictionTraceFrame actionFrame = simulator.CurrentFrame?.FindOriginatingAction()
-            ?? throw new InvalidOperationException("探寻打击预测缺少当前出牌动作帧。");
-        return simulator.History
-            .OfType<CombatPredictionRiskEntry>()
-            .Any(entry =>
-                entry.Reason is PredictionRiskReason.UnresolvedPlayerChoice &&
-                ReferenceEquals(entry.Trace?.FindOriginatingAction(), actionFrame));
     }
 
     public static void ThrashOnPlay(Thrash card, CardOnPlayMirrorContext context)

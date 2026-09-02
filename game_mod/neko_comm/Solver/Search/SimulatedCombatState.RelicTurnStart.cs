@@ -334,8 +334,7 @@ internal sealed partial class SimulatedCombatState
                         relic.DynamicVars["StartOfTurn"].IntValue);
                     break;
                 case RunicCapacitor when turn <= 1:
-                    simulator.State.GetPlayerCombatState(relic.Owner)
-                        .OrbQueue.AddCapacity(relic.DynamicVars.Repeat.IntValue);
+                    simulator.AddOrbSlots(relic.Owner, relic.DynamicVars.Repeat.IntValue);
                     break;
                 case Sai:
                     simulator.GainBlock(
@@ -425,7 +424,7 @@ internal sealed partial class SimulatedCombatState
 
     private static void UpgradeHand(CombatPredictionSimulator simulator, Player player)
     {
-        foreach (PredictedCard card in simulator.State.GetPlayerCombatState(player).Hand.Cards)
+        foreach (PredictedCard card in simulator.State.GetPlayerCombatState(player).Hand)
         {
             if (card.Preview.IsUpgradable)
                 card.Upgrade();

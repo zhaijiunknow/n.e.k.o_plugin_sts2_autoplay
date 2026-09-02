@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+import json
+from typing import Any, AsyncIterator, Dict
 
 import httpx
 
@@ -37,6 +38,68 @@ class STS2TransportClient:
 
     async def execute_action(self, action: str, **kwargs: Any) -> Dict[str, Any]:
         return await self._request("POST", "/action", json=self._build_action_payload(action, **kwargs))
+
+    async def subscribe_events(self) -> AsyncIterator[Dict[str, Any]]:
+        """Stream the mod's scene-change events (GET /events/stream, server-sent events).
+
+        Yields one dict per SSE event — the parsed GameEventEnvelope (type / event_id /
+        timestamp_utc / data) — as it arrives, so callers react to the scene changing instead of
+        polling /state. Raise STS2TransportError on a transport/HTTP failure so the caller can
+        reconnect; the stream is long-lived, so browse it with ``async for``.
+        """
+        url = f"{self.base_url}/events/stream"
+        timeout = httpx.Timeout(connect=self.connect_timeout, read=60.0, write=60.0, pool=self.connect_timeout)
+        event_name: str | None = None
+        data_lines: list[str] = []
+
+        def _flush() -> Dict[str, Any] | None:
+            nonlocal event_name, data_lines
+            if not data_lines:
+                return None
+            text = "\n".join(data_lines)
+            data_lines = []
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                return None
+            if not isinstance(payload, dict):
+                return None
+            if event_name and not payload.get("type"):
+                payload["type"] = event_name
+            event_name = None
+            return payload
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+                async with client.stream("GET", url) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        raise STS2TransportError(
+                            f"events stream HTTP {response.status_code}: {body[:120]!r}"
+                        )
+                    async for raw_line in response.aiter_lines():
+                        line = raw_line.rstrip("\r")
+                        if not line:
+                            # Blank line terminates the current SSE event (if any).
+                            flushed = _flush()
+                            if flushed is not None:
+                                yield flushed
+                            continue
+                        if line.startswith(":"):
+                            # Comment / heartbeat; carries no event.
+                            continue
+                        if line.startswith("id:"):
+                            # id is also mirrored inside the JSON envelope; ignore the raw field.
+                            continue
+                        if line.startswith("event:"):
+                            event_name = line[len("event:"):].strip()
+                            continue
+                        if line.startswith("data:"):
+                            data_lines.append(line[len("data:"):].lstrip(" "))
+        except STS2TransportError:
+            raise
+        except httpx.HTTPError as exc:
+            raise STS2TransportError(f"events stream failed: {exc}") from exc
 
     async def push_danmaku(self, text: str, *, style: str = "catgirl", placement: str = "scrolling", avatar: str | None = None) -> Dict[str, Any]:
         """Push a catgirl danmaku line to the in-game overlay (POST /danmaku).

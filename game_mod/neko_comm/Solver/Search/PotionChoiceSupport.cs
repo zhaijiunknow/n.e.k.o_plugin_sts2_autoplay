@@ -29,14 +29,13 @@ internal static class PotionChoiceSupport
                 .OfType<CombatPredictionCardGenerationOptionsEntry>()
                 .LastOrDefault()
                 ?? throw new InvalidOperationException($"药水 {potion.Id.Entry} 没有生成三选一候选。");
-            List<PredictedCard> options = generated.Options.Select(option => option.Clone()).ToList();
             return RangeSpec(
                 state,
                 PlanChoiceEffect.GenerateToHand,
                 PileType.None,
                 0,
                 1,
-                options);
+                generated.Options);
         }
         return potion switch
         {

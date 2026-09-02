@@ -110,12 +110,21 @@ internal sealed partial class SimulatedCombatState
 
     public int CountEtherealCardsInHand(CombatPredictionSimulator simulator, Player player)
         => simulator.State.GetPlayerCombatState(player).Hand.Cards.Count(card =>
-            card.Preview.Keywords.Contains(CardKeyword.Ethereal));
+            card.HasKeyword(simulator.State, CardKeyword.Ethereal));
 
     public void NormalizePowerCardState(CombatPredictionSimulator simulator)
     {
         NormalizePowerAfflictions(simulator);
         NormalizeSwordSageReplays(simulator);
+    }
+
+    private void CapturePowerAfflictionRootCards(CombatPredictionSimulator simulator)
+    {
+        if (_liveCardsAtSnapshot != null)
+            throw new InvalidOperationException("Power affliction root cards were captured more than once.");
+        _liveCardsAtSnapshot = new ForkableSet<CardModel>(Players
+            .SelectMany(player => simulator.State.GetPlayerCombatState(player).AllCards)
+            .Select(card => card.Original));
     }
 
     public void ClearSmogAfflictions(CombatPredictionSimulator simulator, Creature owner)
@@ -132,9 +141,7 @@ internal sealed partial class SimulatedCombatState
     private void NormalizePowerAfflictions(CombatPredictionSimulator simulator)
     {
         ForkableSet<CardModel> liveCardsAtSnapshot = _liveCardsAtSnapshot
-            ??= new ForkableSet<CardModel>(Players
-                .SelectMany(player => simulator.State.GetPlayerCombatState(player).AllCards)
-                .Select(card => card.Original));
+            ?? throw new InvalidOperationException("Power affliction root cards were not captured.");
         IReadOnlyList<PowerModel> powers = EffectivePowers();
         int vitalSparkAmount = 0;
         for (int index = 0; index < powers.Count; index++)
@@ -156,11 +163,11 @@ internal sealed partial class SimulatedCombatState
                 bool enteredCombat = false;
                 if (!liveCardsAtSnapshot.Contains(card.Original))
                     enteredCombat = (_powerAfflictionKnownCards ??= []).Add(card);
-                if (card.Preview.Affliction is Tainted)
+                if (card.Preview.Affliction is Tainted tainted)
                 {
                     if (!hasVitalSpark)
                         card.ClearAffliction();
-                    else
+                    else if (tainted.Amount != vitalSparkAmount)
                         card.MutablePreview.Affliction!.Amount = vitalSparkAmount;
                     continue;
                 }

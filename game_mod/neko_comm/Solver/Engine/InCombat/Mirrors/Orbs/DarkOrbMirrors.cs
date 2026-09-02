@@ -10,7 +10,7 @@ internal static class DarkOrbMirrors
     // Mirrors DarkOrb.BeforeTurnEndOrbTrigger by forwarding through OrbModel.TriggerPassive.
     public static void BeforeTurnEndOrbTrigger(DarkOrb orb, OrbMirrorContext context)
     {
-        context.Simulator.TriggerOrbPassive(orb, target: null);
+        context.Simulator.TriggerOrbPassive(orb, target: null, context.ProcessedEnemyDeaths);
     }
 
     // Mirrors DarkOrb.Passive by mutating only the simulator's cloned orb.

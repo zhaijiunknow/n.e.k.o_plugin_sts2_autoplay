@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.CardPools;
@@ -54,6 +55,14 @@ internal sealed partial class SimulatedCombatState
                 case PollinousCore:
                     state = GetStatefulRelicState(relic);
                     SetStatefulRelicState(relic, state with { Current = state.Current + 1 });
+                    break;
+                case BlessedAntler when turn <= 1:
+                    simulator.CreateAndAddGeneratedCardsToCombat<Dazed>(
+                        player,
+                        PileType.Draw,
+                        relic.DynamicVars.Cards.IntValue,
+                        player,
+                        CardPilePosition.Random);
                     break;
                 case JeweledMask when turn <= 1:
                 {

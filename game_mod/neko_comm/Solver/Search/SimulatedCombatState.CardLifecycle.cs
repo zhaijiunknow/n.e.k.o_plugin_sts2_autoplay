@@ -416,23 +416,6 @@ internal sealed partial class SimulatedCombatState
         TurnStartChoiceCursor choices,
         ISet<uint> processedEnemyDeaths)
     {
-        if (TriggerScheduledAutoPlays(
-                simulator,
-                player,
-                turnNumber,
-                choices,
-                processedEnemyDeaths))
-            return true;
-        if (EnchantmentLifecycleSupport.TriggerAutoPrePlay(
-                simulator,
-                this,
-                player,
-                turnNumber,
-                choices,
-                processedEnemyDeaths))
-        {
-            return true;
-        }
         PredictedCard[] bombardments = simulator.State.GetPlayerCombatState(player)
             .ExhaustPile.Cards
             .Where(card => card.Preview is Bombardment)
@@ -450,6 +433,23 @@ internal sealed partial class SimulatedCombatState
             {
                 return true;
             }
+        }
+        if (TriggerScheduledAutoPlays(
+                simulator,
+                player,
+                turnNumber,
+                choices,
+                processedEnemyDeaths))
+            return true;
+        if (EnchantmentLifecycleSupport.TriggerAutoPrePlay(
+                simulator,
+                this,
+                player,
+                turnNumber,
+                choices,
+                processedEnemyDeaths))
+        {
+            return true;
         }
         TriggerWhisperingEarring(simulator, player, turnNumber, processedEnemyDeaths);
         return false;

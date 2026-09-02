@@ -63,7 +63,7 @@ internal static class CardPileOnPlaySupport
     private static void ReduceHandCosts(CombatPredictionSimulator simulator, CardModel source)
     {
         SimPlayerCombatState playerState = simulator.State.GetPlayerCombatState(source.Owner);
-        foreach (PredictedCard card in playerState.Hand.Cards)
+        foreach (PredictedCard card in playerState.Hand)
         {
             if (source.IsUpgraded)
                 card.MutablePreview.EnergyCost.SetThisCombat(1, reduceOnly: true);

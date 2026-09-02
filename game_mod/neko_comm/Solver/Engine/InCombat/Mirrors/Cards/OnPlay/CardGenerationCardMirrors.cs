@@ -223,8 +223,8 @@ internal static class CardGenerationCardMirrors
     {
         context.GainBlock(card.Owner.Creature);
 
-        var cards = card.Owner.GetUnlockedColorlessCards(context.CardMultiplayerConstraint)
-            .GetDistinctForCombat(
+        var cards = context.Simulator
+            .GetDistinctUnlockedColorlessForCombat(
                 card.Owner,
                 1,
                 context.Rng.CombatCardGeneration,
@@ -237,9 +237,8 @@ internal static class CardGenerationCardMirrors
 
     public static void MetamorphosisOnPlay(Metamorphosis card, CardOnPlayMirrorContext context)
     {
-        var cards = card.Owner.GetUnlockedCharacterCards(context.CardMultiplayerConstraint)
-            .Where(candidate => candidate.Type == CardType.Attack)
-            .GetForCombat(
+        var cards = context.Simulator
+            .GetUnlockedCharacterAttacksForCombat(
                 card.Owner,
                 card.DynamicVars.Cards.IntValue,
                 context.Rng.CombatCardGeneration,
@@ -256,8 +255,8 @@ internal static class CardGenerationCardMirrors
 
     public static void QuasarOnPlay(Quasar card, CardOnPlayMirrorContext context)
     {
-        var cards = card.Owner.GetUnlockedColorlessCards(context.CardMultiplayerConstraint)
-            .GetDistinctForCombat(
+        var cards = context.Simulator
+            .GetDistinctUnlockedColorlessForCombat(
                 card.Owner,
                 3,
                 context.Rng.CombatCardGeneration,

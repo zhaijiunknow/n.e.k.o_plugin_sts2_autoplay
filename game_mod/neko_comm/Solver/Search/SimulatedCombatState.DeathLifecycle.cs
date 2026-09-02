@@ -134,10 +134,7 @@ internal sealed partial class SimulatedCombatState
     {
         PredictedDeathPhase phase = _deathPhases?.GetValueOrDefault(creature)
             ?? PredictedDeathPhase.None;
-        if (phase == PredictedDeathPhase.PermanentlyDead)
-            return false;
-        return phase != PredictedDeathPhase.Reviving
-            || GetAmount<IllusionPower>(creature) <= 0;
+        return phase == PredictedDeathPhase.None;
     }
 
     public void ResolveReviveMove(

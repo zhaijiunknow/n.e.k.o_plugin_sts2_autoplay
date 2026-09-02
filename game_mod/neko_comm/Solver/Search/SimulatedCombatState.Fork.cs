@@ -10,7 +10,12 @@ internal sealed partial class SimulatedCombatState
     ICombatState ICombatPredictionForkableState.Fork(PredictionForkContext context)
     {
         AssertForkable();
-        SimulatedCombatState fork = new(this)
+        SimulatedCombatState fork = new(
+            this,
+            _allies.Fork(),
+            _enemies.Fork(),
+            _knownEnemies.Fork(),
+            _escapedCreatures.Fork())
         {
             _drawNextTurn = _drawNextTurn?.Fork(),
             _skipNextDurationTick = _skipNextDurationTick?.Fork(),
@@ -49,10 +54,6 @@ internal sealed partial class SimulatedCombatState
             _deathPhases = _deathPhases?.Fork(),
             _stolenStrength = _stolenStrength?.Fork(),
             _stolenDexterity = _stolenDexterity?.Fork(),
-            _allies = _allies.Fork(),
-            _enemies = _enemies.Fork(),
-            _knownEnemies = _knownEnemies.Fork(),
-            _escapedCreatures = _escapedCreatures.Fork(),
             _nextCreatureId = _nextCreatureId,
             _roundNumber = _roundNumber,
             _currentSide = _currentSide,

@@ -85,18 +85,20 @@ internal sealed class CombatPredictionState
             owner.AttachPredictionState(this);
     }
 
-    public IReadOnlyList<Creature> Allies => _removedCreatures.Count == 0
+    public IReadOnlyList<Creature> Allies => !RequiresRemovedCreatureFiltering
         ? CombatState.Allies
         : [.. ExcludeRemoved(CombatState.Allies)];
 
-    public IReadOnlyList<Creature> Enemies => _removedCreatures.Count == 0
+    public IReadOnlyList<Creature> Enemies => !RequiresRemovedCreatureFiltering
         ? CombatState.Enemies
         : [.. ExcludeRemoved(CombatState.Enemies)];
 
-    public IReadOnlyList<Creature> Creatures => _removedCreatures.Count == 0
+    public IReadOnlyList<Creature> Creatures => !RequiresRemovedCreatureFiltering
         ? CombatState.Creatures
         : [.. ExcludeRemoved(CombatState.Creatures)];
 
+    // SimulatedCombatState updates its allies/enemies rosters, but PlayerCreatures is an
+    // immutable root projection and can still contain a removed player-side summon.
     public IReadOnlyList<Creature> PlayerCreatures => _removedCreatures.Count == 0
         ? CombatState.PlayerCreatures
         : [.. ExcludeRemoved(CombatState.PlayerCreatures)];
@@ -133,19 +135,26 @@ internal sealed class CombatPredictionState
     }
 
     public IReadOnlyList<Creature> GetOpponentsOf(Creature creature)
-        => _removedCreatures.Count == 0
+        => !RequiresRemovedCreatureFiltering
             ? CombatState.GetOpponentsOf(creature)
             : [.. ExcludeRemoved(CombatState.GetOpponentsOf(creature))];
 
     public IReadOnlyList<Creature> GetTeammatesOf(Creature creature)
-        => _removedCreatures.Count == 0
+        => !RequiresRemovedCreatureFiltering
             ? CombatState.GetTeammatesOf(creature)
             : [.. ExcludeRemoved(CombatState.GetTeammatesOf(creature))];
 
     public IReadOnlyList<Creature> GetCreaturesOnSide(CombatSide side)
-        => _removedCreatures.Count == 0
+        => !RequiresRemovedCreatureFiltering
             ? CombatState.GetCreaturesOnSide(side)
             : [.. ExcludeRemoved(CombatState.GetCreaturesOnSide(side))];
+
+    // A prediction roster sink has already removed the creature from its mutable side rosters.
+    // Filtering those views again used to rebuild LINQ iterators and arrays on every read after
+    // the first death, which dominates long multi-enemy searches. Keep the fallback for combat
+    // state implementations that cannot update their own roster.
+    private bool RequiresRemovedCreatureFiltering
+        => _removedCreatures.Count != 0 && CombatState is not ICombatPredictionRosterSink;
 
     public IReadOnlyList<AbstractModel> IterateHookListeners()
     {

@@ -109,6 +109,18 @@ internal sealed partial class CombatBeamSolver
         public int ParallelExpansionWaves;
         public int ParallelExpansionWorkItems;
         public int MaxParallelExpansionConcurrency;
+        public int ParallelActionReplayWaves;
+        public int ParallelActionReplayWorkItems;
+        public int MaxParallelActionReplayConcurrency;
+        public int DeferredRoundChoiceActions;
+        public int DeferredRoundChoiceLayerWidthTotal;
+        public int MaxDeferredRoundChoiceLayerWidth;
+        public int DeferredRoundChoiceFiniteQuotaFallbacks;
+        public int DeferredRoundChoiceFinitePrimaryLayers;
+        public int DeferredRoundChoiceFinitePendingFallbacks;
+        public int ParallelRoundChoiceReplayWaves;
+        public int ParallelRoundChoiceReplayWorkItems;
+        public int MaxParallelRoundChoiceReplayConcurrency;
         public int NodeLimitSnapshotsReleased;
         public int InitialPersistentBuffValue;
         public int InitialEnemyStrengthSuppression;
@@ -130,6 +142,13 @@ internal sealed partial class CombatBeamSolver
                         node.Score));
             }
             ExpandedTranspositions = [];
+            StandPatCache = [];
+            ThreatProjectionCache = [];
+            CoverageCache = [];
+        }
+
+        public void ResetReclaimableCaches()
+        {
             StandPatCache = [];
             ThreatProjectionCache = [];
             CoverageCache = [];
@@ -174,6 +193,7 @@ internal sealed partial class CombatBeamSolver
 
     private sealed record RouteAnnotations(
         IReadOnlyDictionary<int, int> HpLostByTurn,
+        IReadOnlyDictionary<int, int> EnemyHpLostByTurn,
         IReadOnlyDictionary<int, int> SoldHpByTurn,
         IReadOnlyDictionary<int, int> MaxBlockByTurn,
         IReadOnlyDictionary<int, int> ActualBlockByTurn,
@@ -264,7 +284,6 @@ internal sealed partial class CombatBeamSolver
     private sealed record FinalPlanCandidate(
         SearchNode Node,
         SimulationSnapshot Snapshot,
-        RouteAnnotations Annotations,
         SearchFeatures Features,
         int FutureSold,
         int BattleSold,

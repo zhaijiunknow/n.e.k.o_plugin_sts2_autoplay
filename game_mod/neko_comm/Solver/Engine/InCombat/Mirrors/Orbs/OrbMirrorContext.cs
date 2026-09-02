@@ -2,7 +2,10 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 
 namespace CombatSolver.Engine.InCombat.Mirrors.Orbs;
 
-internal class OrbMirrorContext : CombatMirrorContext;
+internal class OrbMirrorContext : CombatMirrorContext
+{
+    public ISet<uint>? ProcessedEnemyDeaths { get; init; }
+}
 
 internal sealed class OrbPassiveMirrorContext : OrbMirrorContext
 {

@@ -3,8 +3,10 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Extensions;
 using MegaCrit.Sts2.Core.Factories;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.CardPools;
 using MegaCrit.Sts2.Core.Random;
 using CombatSolver.Engine.Common;
+using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver.Engine.InCombat.Extensions;
 
@@ -65,6 +67,67 @@ internal static class CombatCardGenerationExtensions
         return cards
             .TakeRandomDistinctForCombat(player, count, rng, multiplayerConstraint)
             .Select(card => PredictedCard.Create(card, player));
+    }
+
+    public static IEnumerable<PredictedCard> GetDistinctUnlockedColorlessForCombat(
+        this CombatPredictionSimulator simulator,
+        Player player,
+        int count,
+        Rng rng,
+        CardMultiplayerConstraint multiplayerConstraint)
+    {
+        CardPoolModel colorlessPool = ModelDb.CardPool<ColorlessCardPool>();
+        if (simulator.State.CombatState is ICombatPredictionCardGenerationPoolSnapshot snapshot
+            && snapshot.TryGetRootEligibleCards(
+                player,
+                colorlessPool,
+                multiplayerConstraint,
+                out IReadOnlyList<CardModel>? cached))
+        {
+            // Keep the upstream TakeRandom/UnstableShuffle RNG behavior and create a fresh
+            // prediction-owned card for every branch. Only eligibility filtering is cached.
+            return cached.AsEnumerable()
+                .TakeRandom(count, rng)
+                .Select(card => PredictedCard.Create(card, player));
+        }
+
+        return player.GetUnlockedCards(colorlessPool, multiplayerConstraint)
+            .GetDistinctForCombat(
+                player,
+                count,
+                rng,
+                multiplayerConstraint);
+    }
+
+    public static IEnumerable<PredictedCard> GetUnlockedCharacterAttacksForCombat(
+        this CombatPredictionSimulator simulator,
+        Player player,
+        int count,
+        Rng rng,
+        CardMultiplayerConstraint multiplayerConstraint)
+    {
+        CardPoolModel characterPool = player.Character.CardPool;
+        if (simulator.State.CombatState is ICombatPredictionCardGenerationPoolSnapshot snapshot
+            && snapshot.TryGetRootEligibleCharacterAttackCards(
+                player,
+                characterPool,
+                multiplayerConstraint,
+                out IReadOnlyList<CardModel>? cached))
+        {
+            if (cached.Count == 0)
+                return [];
+
+            // Selection and mutable card creation stay branch-local. Rng.NextItem sees the
+            // same ordered candidates and advances all five RNG fields exactly as the fallback.
+            List<CardModel> selected = [];
+            for (int index = 0; index < count; index++)
+                selected.Add(rng.NextItem(cached)!);
+            return selected.Select(card => PredictedCard.Create(card, player));
+        }
+
+        return player.GetUnlockedCharacterCards(multiplayerConstraint)
+            .Where(static card => card.Type == CardType.Attack)
+            .GetForCombat(player, count, rng, multiplayerConstraint);
     }
 
     // Mirrors CardFactory.GetForCombat, but returns PredictedCard instead of CardModel.

@@ -8,14 +8,14 @@ internal sealed class PredictionStateStore
     private readonly Dictionary<AbstractModel, AbstractModel> _modelAliases;
 
     public PredictionStateStore()
-        : this(0)
+        : this(0, 0)
     {
     }
 
-    private PredictionStateStore(int capacity)
+    private PredictionStateStore(int stateCapacity, int aliasCapacity)
     {
-        _states = new Dictionary<(AbstractModel Model, Type StateType), StateEntry>(capacity);
-        _modelAliases = new Dictionary<AbstractModel, AbstractModel>(capacity);
+        _states = new Dictionary<(AbstractModel Model, Type StateType), StateEntry>(stateCapacity);
+        _modelAliases = new Dictionary<AbstractModel, AbstractModel>(aliasCapacity);
     }
 
     private abstract class StateEntry
@@ -41,11 +41,24 @@ internal sealed class PredictionStateStore
 
     public TState Get<TState>(AbstractModel model, Func<TState> create)
         where TState : IPredictionStateForkable
+        => Get(model, create, static factory => factory());
+
+    public TState Get<TModel, TState>(TModel model, Func<TModel, TState> create)
+        where TModel : AbstractModel
+        where TState : IPredictionStateForkable
+        => Get(model, model, create);
+
+    public TState Get<TArgument, TState>(
+        AbstractModel model,
+        TArgument argument,
+        Func<TArgument, TState> create)
+        where TState : IPredictionStateForkable
     {
         var key = (ResolveModel(model), typeof(TState));
         if (!_states.TryGetValue(key, out StateEntry? entry))
         {
-            object state = create() ?? throw new InvalidOperationException("Prediction state factory returned null.");
+            object state = create(argument)
+                ?? throw new InvalidOperationException("Prediction state factory returned null.");
             entry = new OwnedStateEntry(state);
             _states[key] = entry;
         }
@@ -55,11 +68,24 @@ internal sealed class PredictionStateStore
 
     public TState GetReadOnly<TState>(AbstractModel model, Func<TState> create)
         where TState : IPredictionStateForkable
+        => GetReadOnly(model, create, static factory => factory());
+
+    public TState GetReadOnly<TModel, TState>(TModel model, Func<TModel, TState> create)
+        where TModel : AbstractModel
+        where TState : IPredictionStateForkable
+        => GetReadOnly(model, model, create);
+
+    public TState GetReadOnly<TArgument, TState>(
+        AbstractModel model,
+        TArgument argument,
+        Func<TArgument, TState> create)
+        where TState : IPredictionStateForkable
     {
         var key = (ResolveModel(model), typeof(TState));
         if (!_states.TryGetValue(key, out StateEntry? entry))
         {
-            object state = create() ?? throw new InvalidOperationException("Prediction state factory returned null.");
+            object state = create(argument)
+                ?? throw new InvalidOperationException("Prediction state factory returned null.");
             entry = new OwnedStateEntry(state);
             _states[key] = entry;
         }
@@ -72,10 +98,23 @@ internal sealed class PredictionStateStore
     /// </summary>
     public TState Peek<TState>(AbstractModel model, Func<TState> create)
         where TState : IPredictionStateForkable
+        => Peek(model, create, static factory => factory());
+
+    public TState Peek<TModel, TState>(TModel model, Func<TModel, TState> create)
+        where TModel : AbstractModel
+        where TState : IPredictionStateForkable
+        => Peek(model, model, create);
+
+    public TState Peek<TArgument, TState>(
+        AbstractModel model,
+        TArgument argument,
+        Func<TArgument, TState> create)
+        where TState : IPredictionStateForkable
     {
         if (_states.TryGetValue((ResolveModel(model), typeof(TState)), out StateEntry? entry))
             return (TState)entry.Read();
-        return create() ?? throw new InvalidOperationException("Prediction state factory returned null.");
+        return create(argument)
+            ?? throw new InvalidOperationException("Prediction state factory returned null.");
     }
 
     public bool TryGetReadOnly<TState>(AbstractModel model, out TState? state)
@@ -136,7 +175,7 @@ internal sealed class PredictionStateStore
     internal PredictionStateStore Fork(PredictionForkContext context)
     {
         AssertForkable();
-        PredictionStateStore fork = new(_states.Count);
+        PredictionStateStore fork = new(_states.Count, _modelAliases.Count);
         foreach (((AbstractModel model, Type stateType), StateEntry entry) in _states)
         {
             object state = entry.Read();

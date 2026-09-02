@@ -14,6 +14,53 @@ namespace CombatSolver.Engine.InCombat.Simulation;
 internal sealed class CombatPredictionHistory(PredictionTrace trace)
     : IReadOnlyList<CombatPredictionHistoryEntry>
 {
+    public readonly struct HistoryEntryRange
+    {
+        private readonly CombatPredictionHistory _history;
+        private readonly int _startIndex;
+        private readonly List<CombatPredictionHistoryEntry>? _tail;
+        private readonly int _tailOffset;
+
+        internal HistoryEntryRange(
+            CombatPredictionHistory history,
+            int startIndex,
+            int count,
+            List<CombatPredictionHistoryEntry>? tail,
+            int tailOffset)
+        {
+            _history = history;
+            _startIndex = startIndex;
+            Count = count;
+            _tail = tail;
+            _tailOffset = tailOffset;
+        }
+
+        public int Count { get; }
+
+        public CombatPredictionHistoryEntry this[int index]
+        {
+            get
+            {
+                if ((uint)index >= (uint)Count)
+                    throw new ArgumentOutOfRangeException(nameof(index));
+                return _tail is null
+                    ? _history[_startIndex + index]
+                    : _tail[_tailOffset + index];
+            }
+        }
+
+        public Enumerator GetEnumerator() => new(this);
+
+        public struct Enumerator(HistoryEntryRange range)
+        {
+            private int _index = -1;
+
+            public CombatPredictionHistoryEntry Current => range[_index];
+
+            public bool MoveNext() => ++_index < range.Count;
+        }
+    }
+
     private HistorySegment? _prefix;
     private List<CombatPredictionHistoryEntry>? _tail;
     private Dictionary<CombatPredictionHistoryEntry, CombatPredictionHistoryEntry>? _tailCompletions;
@@ -56,6 +103,35 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
     public IReadOnlyList<CombatPredictionHistoryEntry> Entries => this;
 
     private int EntryCount => (_prefix?.Count ?? 0) + (_tail?.Count ?? 0);
+
+    /// <summary>
+    /// Captures the current suffix beginning at <paramref name="startIndex"/>.
+    /// Ranges wholly inside the mutable tail enumerate without walking the persistent prefix.
+    /// </summary>
+    public HistoryEntryRange EntriesFrom(int startIndex)
+        => EntriesBetween(startIndex, EntryCount);
+
+    /// <summary>
+    /// Captures the current half-open history range [<paramref name="startIndex"/>,
+    /// <paramref name="endExclusive"/>).
+    /// </summary>
+    public HistoryEntryRange EntriesBetween(int startIndex, int endExclusive)
+    {
+        int entryCount = EntryCount;
+        if ((uint)startIndex > (uint)entryCount)
+            throw new ArgumentOutOfRangeException(nameof(startIndex));
+        if (endExclusive < startIndex || endExclusive > entryCount)
+            throw new ArgumentOutOfRangeException(nameof(endExclusive));
+
+        int prefixCount = _prefix?.Count ?? 0;
+        bool whollyInTail = startIndex >= prefixCount && _tail is not null;
+        return new HistoryEntryRange(
+            this,
+            startIndex,
+            endExclusive - startIndex,
+            whollyInTail ? _tail : null,
+            whollyInTail ? startIndex - prefixCount : 0);
+    }
 
     int IReadOnlyCollection<CombatPredictionHistoryEntry>.Count => EntryCount;
 
@@ -219,7 +295,10 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
         Record(new CombatPredictionCardGenerationOptionsEntry
         {
             Cards = SnapshotCards(cards),
-            Options = cards.Select(card => card.Clone()).ToArray(),
+            // Choice generators hand ownership of these prediction-only cards to history.
+            // The entry is immutable after publication; a selected option is cloned only
+            // when it is materialized into a branch's combat state.
+            Options = cards.ToArray(),
         });
     }
 

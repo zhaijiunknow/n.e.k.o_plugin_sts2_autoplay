@@ -12,6 +12,7 @@ using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models.Orbs;
 using MegaCrit.Sts2.Core.Models.Powers;
+using CombatSolver.Engine.InCombat.Mirrors.Hooks.Card;
 using MegaCrit.Sts2.Core.Models.Potions;
 using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
@@ -165,16 +166,11 @@ internal sealed partial class CombatBeamSolver
                 (int)Math.Round(CardChoiceSupport.CardValue(liveCard.Preview)));
         }
         ThreatFocus focus = BuildThreatFocus(simulator, combat);
-        StrategicEffectContext strategicContext = StrategicEffectContext.Build(
-            liveCards,
-            enemyHp,
-            focus.TotalThreat,
-            focus.IncomingHitCount);
-        StrategicEffectVector strategicEffects = StrategicEffectVector.Zero;
-        int offensivePersistentBuffValue = 0;
-        PersistentSetupTraits persistentSetupTraits = PersistentSetupTraits.None;
-        foreach (PowerModel power in combat.EffectivePowers())
+        IReadOnlyList<PowerModel> effectivePowers = combat.EffectivePowers();
+        StrategicEffectRequirements strategicRequirements = StrategicEffectRequirements.None;
+        for (int powerIndex = 0; powerIndex < effectivePowers.Count; powerIndex++)
         {
+            PowerModel power = effectivePowers[powerIndex];
             if (!ReferenceEquals(power.Owner, _player.Creature)
                 || power.Amount <= 0
                 || power.TypeForCurrentAmount != PowerType.Buff
@@ -182,7 +178,31 @@ internal sealed partial class CombatBeamSolver
             {
                 continue;
             }
-            StrategicEffectVector effect = StrategicEffectModel.Evaluate(power, strategicContext);
+            strategicRequirements |= StrategicEffectModel.Requirements(power);
+        }
+        StrategicEffectContext? strategicContext = null;
+        StrategicEffectVector strategicEffects = StrategicEffectVector.Zero;
+        int offensivePersistentBuffValue = 0;
+        PersistentSetupTraits persistentSetupTraits = PersistentSetupTraits.None;
+        for (int powerIndex = 0; powerIndex < effectivePowers.Count; powerIndex++)
+        {
+            PowerModel power = effectivePowers[powerIndex];
+            if (!ReferenceEquals(power.Owner, _player.Creature)
+                || power.Amount <= 0
+                || power.TypeForCurrentAmount != PowerType.Buff
+                || power is ITemporaryPower)
+            {
+                continue;
+            }
+            strategicContext ??= StrategicEffectContext.Build(
+                liveCards,
+                enemyHp,
+                focus.TotalThreat,
+                focus.IncomingHitCount,
+                strategicRequirements);
+            StrategicEffectVector effect = StrategicEffectModel.Evaluate(
+                power,
+                strategicContext.Value);
             strategicEffects += effect;
             offensivePersistentBuffValue += effect.DamagePotential + effect.ScalingPotential;
             persistentSetupTraits |= PersistentPowerSetupTrait(power);
@@ -219,13 +239,23 @@ internal sealed partial class CombatBeamSolver
             simulator,
             combat,
             playerState,
-            _player.Creature);
+            _player.Creature)
+            + VoidFormOpportunityValue(
+                simulator,
+                combat,
+                playerState,
+                _player.Creature);
+        int summonNextTurn = combat.GetAmount<SummonNextTurnPower>(_player.Creature);
+        int summonNextTurnValue = summonNextTurn == 0
+            ? 0
+            : summonNextTurn
+                * (4 + Math.Min(12, liveCards.Count(card =>
+                    card.Preview.Tags.Contains(CardTag.OstyAttack)) * 2));
         int futureResourceValue = combat.GetAmount<EnergyNextTurnPower>(_player.Creature) * 16
             + combat.GetAmount<DrawCardsNextTurnPower>(_player.Creature) * 8
             + combat.GetAmount<StarNextTurnPower>(_player.Creature) * 8
             + combat.GetAmount<RetainHandPower>(_player.Creature) * 4
-            + combat.GetAmount<SummonNextTurnPower>(_player.Creature)
-                * (4 + Math.Min(12, liveCards.Count(card => card.Preview.Tags.Contains(CardTag.OstyAttack)) * 2))
+            + summonNextTurnValue
             + retainedHandValue
             + freeCardOpportunityValue;
         Creature? currentOsty = combat.GetOsty(_player);
@@ -394,7 +424,7 @@ internal sealed partial class CombatBeamSolver
         int totalEnergyCost = 0;
         int totalStarCost = 0;
         int zeroCostPlayableCount = 0;
-        foreach (PredictedCard card in playerState.Hand.Cards)
+        foreach (PredictedCard card in playerState.Hand)
         {
             if (!combat.CanPlayCard(simulator, card))
                 continue;
@@ -432,6 +462,63 @@ internal sealed partial class CombatBeamSolver
         }
         return (best[energyCapacity, starCapacity], zeroCostPlayableCount);
     }
+
+    /// <summary>
+    /// Void Form waives the cost of the first N cards played each turn. Unlike the free-attack powers it is not
+    /// limited to one card type and it waives stars as well as energy, so the slots are worth what the most
+    /// expensive cards in hand would have cost - not what the whole hand would have cost.
+    /// </summary>
+    /// <remarks>
+    /// Without this the hand looks strictly cheaper than it is. The cost hook only asks whether any free slot is
+    /// left, not which card would occupy it, so while the counter is below the amount every card in hand reports
+    /// zero and <see cref="CalculateReachableHandPotential"/> concludes the entire hand is affordable.
+    ///
+    /// X-cost cards are excluded on purpose. <c>GetStarCostWithModifiers</c> and its energy counterpart return the
+    /// whole resource pool for them before the cost-modifier hook runs, so an X card still spends everything
+    /// inside the free window: the slot is consumed and buys nothing. Counting it here would recreate the same
+    /// over-statement one card at a time.
+    /// </remarks>
+    private static int VoidFormOpportunityValue(
+        CombatPredictionSimulator simulator,
+        SimulatedCombatState combat,
+        SimPlayerCombatState playerState,
+        Creature owner)
+    {
+        if (combat.GetPower<VoidFormPower>(owner) is not { } power)
+            return 0;
+        // Peek so that merely scoring a state does not make every later fork copy the counter.
+        int freeUses = power.Amount
+            - simulator.StateStore.Peek(power, () => new VoidFormPredictionState(power)).CardsPlayedThisTurn;
+        if (freeUses <= 0)
+            return 0;
+
+        return playerState.Hand.Cards
+            .Where(card => !card.Preview.EnergyCost.CostsX
+                && !card.Preview.HasStarCostX
+                && combat.CanPlayCard(simulator, card))
+            .Select(card =>
+            {
+                int normalEnergy = Math.Max(
+                    0,
+                    (int)Math.Ceiling((double)card.Preview.EnergyCost.GetWithModifiers(CostModifiers.Local)));
+                int currentEnergy = Math.Max(0, card.GetEnergyCostWithModifiers(simulator, playerState));
+                int normalStars = Math.Max(0, card.Preview.CurrentStarCost);
+                int currentStars = Math.Max(0, card.GetStarCostWithModifiers(simulator, playerState));
+                return Math.Max(0, normalEnergy - currentEnergy) * 16
+                    + Math.Max(0, normalStars - currentStars) * 8
+                    + Math.Min(16, Math.Max(1, (int)Math.Ceiling(CardChoiceSupport.CardValue(card.Preview))));
+            })
+            .OrderDescending()
+            .Take(freeUses)
+            .Sum();
+    }
+
+    internal static int CaptureVoidFormOpportunityValueForTesting(
+        CombatPredictionSimulator simulator,
+        SimulatedCombatState combat,
+        SimPlayerCombatState playerState,
+        Creature owner)
+        => VoidFormOpportunityValue(simulator, combat, playerState, owner);
 
     private static int FreeCardOpportunityValue(
         CombatPredictionSimulator simulator,
@@ -503,7 +590,7 @@ internal sealed partial class CombatBeamSolver
     {
         ulong first = 0;
         ulong second = 0;
-        foreach (PredictedCard card in pile.Cards)
+        foreach (PredictedCard card in pile)
         {
             StateFingerprint cardKey = BuildCardStateFingerprint(card);
             first += StateFingerprintBuilder.MixFirst(cardKey.First);
@@ -1094,7 +1181,7 @@ internal sealed partial class CombatBeamSolver
         SearchMeasurement measurement = _run.Performance.Begin();
         StateFingerprintBuilder pileKey = new();
         pileKey.Add(pile.Cards.Count);
-        foreach (PredictedCard card in pile.Cards)
+        foreach (PredictedCard card in pile)
         {
             StateFingerprint cardFingerprint = BuildCardStateFingerprint(card);
             pileKey.Add(cardFingerprint.First);

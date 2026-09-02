@@ -36,7 +36,7 @@ internal static partial class CardOnPlaySupport
                 combat.Apply<PoisonPower>(target, card.DynamicVars.Poison.IntValue, owner);
                 break;
             case BulletTime:
-                foreach (PredictedCard handCard in simulator.State.GetPlayerCombatState(card.Owner).Hand.Cards)
+                foreach (PredictedCard handCard in simulator.State.GetPlayerCombatState(card.Owner).Hand)
                 {
                     if (!handCard.Preview.EnergyCost.CostsX)
                         handCard.MutablePreview.SetToFreeThisTurn();

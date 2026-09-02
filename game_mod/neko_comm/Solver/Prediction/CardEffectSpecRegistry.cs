@@ -325,7 +325,7 @@ internal static class CardEffectSpecRegistry
                 applied = true;
                 break;
             case Modded:
-                simulator.State.GetPlayerCombatState(card.Owner).OrbQueue.AddCapacity(card.DynamicVars.Repeat.IntValue);
+                simulator.AddOrbSlots(card.Owner, card.DynamicVars.Repeat.IntValue);
                 playedCard.MutablePreview.EnergyCost.AddThisCombat(1);
                 applied = true;
                 break;

@@ -14,6 +14,15 @@ from .snapshot_normalizer import normalize_snapshot
 
 
 class STS2LoopRunner:
+    # Mod /events/stream event types that mark a real state change worth re-fetching /state for.
+    _RELEVANT_EVENT_TYPES = frozenset({
+        "screen_changed", "available_actions_changed", "combat_started", "combat_ended",
+        "combat_turn_changed", "player_action_window_opened", "player_action_window_closed",
+        "route_decision_required", "reward_decision_required", "event_state_changed", "session_started",
+    })
+    # Coalesce a burst of SSE events into at most one /state fetch per this window.
+    _EVENT_FETCH_MIN_INTERVAL_SECONDS = 0.5
+
     def __init__(self, service: Any) -> None:
         self._service = service
         self._poll_task: asyncio.Task[Any] | Future[Any] | None = None
@@ -30,6 +39,12 @@ class STS2LoopRunner:
         # so the LLM is not re-consulted every tick while the event options are unchanged.
         self._event_llm_sig: Any = None
         self._event_llm_cached: dict[int, float] | None = None
+        # Scene-change event streaming (mod GET /events/stream): drive a refresh on a real change
+        # instead of polling /state on a timer. See _event_loop / _RELEVANT_EVENT_TYPES.
+        self._event_task: asyncio.Task[Any] | Future[Any] | None = None
+        self._last_event_refresh = 0.0
+        self._event_backoff = 1.0
+        self._sse_connected = False
 
     async def tick(self) -> dict[str, Any]:
         client = self._service._require_client()
@@ -272,6 +287,14 @@ class STS2LoopRunner:
         if self._poll_task is None or self._task_done(self._poll_task):
             self._ensure_owner_loop()
             self._poll_task = self._create_task(self._poll_loop(), name="sts2-poll-loop")
+        # When the mod exposes /events/stream, drive refresh from scene changes and keep the poll
+        # loop as a slow fallback. Uses hasattr() so a client that predates SSE just falls back to
+        # the timer-only behavior (event task never starts).
+        if self._service._cfg_use_event_stream() and (
+            self._event_task is None or self._task_done(self._event_task)
+        ):
+            self._ensure_owner_loop()
+            self._event_task = self._create_task(self._event_loop(), name="sts2-event-stream")
 
     def start_autoplay(self) -> None:
         self._shutdown = False
@@ -351,8 +374,66 @@ class STS2LoopRunner:
                 await self._service.refresh_state(trigger_sync=True)
             except Exception as exc:
                 self._service._mark_loop_error(exc)
-            interval = self._service._cfg_poll_interval(active=self._service._state.autoplay_state == "running")
-            await asyncio.sleep(interval)
+            await asyncio.sleep(self._poll_interval())
+
+    def _poll_interval(self) -> float:
+        # With the event stream active the poll loop is only a fallback (slow), so it never races the
+        # event-driven refresh; without SSE it keeps the historical reactive cadence.
+        if self._service._cfg_use_event_stream():
+            return self._service._cfg_fallback_poll_interval()
+        return self._service._cfg_poll_interval(active=self._service._state.autoplay_state == "running")
+
+    async def _event_loop(self) -> None:
+        # Subscribe to the mod's /events/stream and re-read /state on a scene change (the mod already
+        # diffs its state, so these events fire only when something actually changed). Keeps reconnecting
+        # with exponential backoff; the slow _poll_loop remains the safety net.
+        while not self._shutdown:
+            try:
+                client = self._service._require_client()
+                if not hasattr(client, "subscribe_events"):
+                    # No SSE-capable transport; nothing to do.
+                    return
+            except Exception:
+                await asyncio.sleep(1.0)
+                continue
+
+            try:
+                async for envelope in client.subscribe_events():
+                    event_type = envelope.get("type", "") if isinstance(envelope, dict) else ""
+                    if event_type == "stream_ready":
+                        # Connection (re)established: reset backoff and pull the current state once.
+                        self._event_backoff = 1.0
+                        self._mark_sse_connected(True)
+                        await self._maybe_event_refresh(force=True)
+                        continue
+                    if event_type in self._RELEVANT_EVENT_TYPES:
+                        await self._maybe_event_refresh(force=False)
+                    # heartbeat / unknown events -> ignore.
+            except Exception as exc:
+                self._service.logger.warning("SSE events stream dropped: %s", exc)
+            finally:
+                self._mark_sse_connected(False)
+
+            # Disconnected: backoff and retry. Do not flood while the mod is briefly unavailable.
+            await asyncio.sleep(self._event_backoff)
+            self._event_backoff = min(self._event_backoff * 2, 30.0)
+
+    async def _maybe_event_refresh(self, *, force: bool) -> None:
+        now = time()
+        if not force and now - self._last_event_refresh < self._EVENT_FETCH_MIN_INTERVAL_SECONDS:
+            return
+        self._last_event_refresh = now
+        try:
+            await self._service.refresh_state(trigger_sync=True)
+        except Exception as exc:
+            self._service._mark_loop_error(exc)
+
+    def _mark_sse_connected(self, connected: bool) -> None:
+        state = self._service._state
+        # Count only a real transition (an established stream that dropped), not a clean shutdown.
+        if not connected and self._sse_connected and not self._shutdown:
+            state.sse_reconnect_count += 1
+        self._sse_connected = connected
 
     async def _autoplay_loop(self) -> None:
         while not self._shutdown:
@@ -390,12 +471,13 @@ class STS2LoopRunner:
 
     def stop_background_sync(self) -> None:
         self._shutdown = True
-        for task in (self._autoplay_task, self._poll_task):
+        for task in (self._autoplay_task, self._poll_task, self._event_task):
             if task is None or task.done():
                 continue
             task.cancel()
         self._autoplay_task = None
         self._poll_task = None
+        self._event_task = None
         self._stop_owner_loop()
 
 

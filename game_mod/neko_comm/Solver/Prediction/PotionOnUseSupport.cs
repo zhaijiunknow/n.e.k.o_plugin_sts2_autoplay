@@ -109,7 +109,7 @@ internal static class PotionOnUseSupport
                 combat.Apply<ShrinkPower>(target, value.DynamicVars.Repeat.IntValue, owner);
                 break;
             case BlessingOfTheForge:
-                foreach (PredictedCard card in simulator.State.GetPlayerCombatState(PlayerTarget()).Hand.Cards)
+                foreach (PredictedCard card in simulator.State.GetPlayerCombatState(PlayerTarget()).Hand)
                 {
                     if (card.Preview.IsUpgradable)
                     {
@@ -255,7 +255,7 @@ internal static class PotionOnUseSupport
                 }
                 break;
             case PotionOfCapacity value:
-                simulator.State.GetPlayerCombatState(PlayerTarget()).OrbQueue.AddCapacity(value.DynamicVars.Repeat.IntValue);
+                simulator.AddOrbSlots(PlayerTarget(), value.DynamicVars.Repeat.IntValue);
                 break;
             case PotionOfDoom value when target != null:
                 combat.Apply<DoomPower>(target, value.DynamicVars.Doom.IntValue, owner);

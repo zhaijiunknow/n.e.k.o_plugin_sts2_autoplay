@@ -271,7 +271,7 @@ internal sealed partial class SimulatedCombatState
 
     private static void AddPoweredAttackHits(
         ref StateFingerprintBuilder fingerprint,
-        IReadOnlyDictionary<(Creature Dealer, Creature Receiver), int>? values)
+        ForkableDictionary<(Creature Dealer, Creature Receiver), int>? values)
     {
         ulong first = 0;
         ulong second = 0;

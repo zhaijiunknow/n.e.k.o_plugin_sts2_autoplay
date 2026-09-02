@@ -19,6 +19,10 @@ public static class ModEntry
         RegisterShutdownHooks();
         GameThread.Initialize();
         GameEventService.Instance.Start();
+        // Real-transition event sources: screen changes (ActiveScreenContext.Updated) + combat state
+        // changes (CombatStateTracker.NotifyCombatStateChanged) push into GameEventService.EvaluateNow(),
+        // so /events/stream is driven by actual game transitions instead of the (fallback) poll.
+        ScreenEventBridge.Install();
         HttpServer.Instance.Start();
         CombatSolver.CombatSolverRuntime.Install();
         NekoConfig.Load();
@@ -42,6 +46,7 @@ public static class ModEntry
     {
         try
         {
+            ScreenEventBridge.Uninstall();
             GameEventService.Instance.Stop();
             HttpServer.Instance.Stop();
         }

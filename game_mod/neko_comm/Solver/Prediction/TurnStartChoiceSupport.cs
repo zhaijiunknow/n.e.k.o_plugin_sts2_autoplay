@@ -230,16 +230,30 @@ internal static class TurnStartChoiceSupport
         int requestedCount,
         PileType sourcePile = PileType.Hand)
     {
-        IReadOnlyList<PredictedCard> options = Options(simulator, player, effect, sourcePile);
+        SimPlayerCombatState state = simulator.State.GetPlayerCombatState(player);
+        IReadOnlyList<PredictedCard> sourceCards = state.GetCardPile(sourcePile)?.Cards
+            ?? throw new InvalidOperationException($"回合开始选择不支持牌堆 {sourcePile}。");
+        IReadOnlyList<PredictedCard> options = effect == PlanChoiceEffect.Transform
+            ? sourceCards.Where(card => card.Preview.IsTransformable).ToArray()
+            : sourceCards.ToArray();
         int count = Math.Min(requestedCount, options.Count);
         if (count <= 0)
             return true;
 
+        CardChoiceSpec spec = new(
+            effect,
+            sourcePile,
+            count,
+            count,
+            options,
+            sourceCards,
+            ReplacementValue: 0d);
         TurnStartChoiceRequest request = new(
             sourceId,
             effect,
             sourcePile,
             count,
+            spec,
             Timing: combat.ActiveActionChoiceTiming);
         IReadOnlyList<PredictedCard> selected;
         if (cursor == null || !cursor.TryTake(request, out PlanCardChoice? choice))
@@ -303,6 +317,8 @@ internal static class TurnStartChoiceSupport
         if (request.Spec != null)
             return request.Spec;
         SimPlayerCombatState state = simulator.State.GetPlayerCombatState(player);
+        IReadOnlyList<PredictedCard> sourceCards = state.GetCardPile(request.SourcePile)?.Cards
+            ?? throw new InvalidOperationException($"回合开始选择不支持牌堆 {request.SourcePile}。");
         IReadOnlyList<PredictedCard> options = Options(simulator, player, request.Effect, request.SourcePile);
         int count = Math.Min(request.Count, options.Count);
         if (count <= 0)
@@ -313,7 +329,7 @@ internal static class TurnStartChoiceSupport
             count,
             count,
             options,
-            state.Hand.Cards,
+            sourceCards,
             ReplacementValue: 0d);
     }
 
@@ -343,15 +359,15 @@ internal static class TurnStartChoiceSupport
             PredictedCard card = options.Where(candidate => CardChoiceSupport.MatchesToken(candidate, token))
                 .Skip(token.OptionOccurrence)
                 .FirstOrDefault()
-                ?? throw new InvalidOperationException(
+                ?? throw new InvalidPlannedChoiceBranchException(
                     $"回合开始选牌时找不到 {token.CardId}+{token.UpgradeLevel}#{token.OptionOccurrence}。");
             if (selected.Contains(card))
-                throw new InvalidOperationException($"回合开始计划重复选择了 {token.CardId}。");
+                throw new InvalidPlannedChoiceBranchException($"回合开始计划重复选择了 {token.CardId}。");
             selected.Add(card);
         }
         if (selected.Count < minCount || selected.Count > maxCount)
         {
-            throw new InvalidOperationException(
+            throw new InvalidPlannedChoiceBranchException(
                 $"回合开始计划选择 {selected.Count} 张牌，但当前要求 {minCount}..{maxCount} 张。");
         }
         return selected;

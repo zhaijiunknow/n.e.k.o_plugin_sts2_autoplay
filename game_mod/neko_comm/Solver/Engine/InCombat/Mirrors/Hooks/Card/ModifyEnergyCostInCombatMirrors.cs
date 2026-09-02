@@ -94,7 +94,8 @@ internal static class ModifyEnergyCostInCombatMirrors
     {
         return context.Card.Preview.Owner.Creature == power.Owner &&
             IsInPlayablePile(context) &&
-            context.StateStore.Get(power, () => new VoidFormPredictionState(power)).CardsPlayedThisTurn < power.Amount
+            context.StateStore.Get(power, static value => new VoidFormPredictionState(value)).CardsPlayedThisTurn <
+            power.Amount
                 ? 0
                 : context.Cost;
     }
@@ -105,7 +106,7 @@ internal static class ModifyEnergyCostInCombatMirrors
     {
         return context.Card.Preview.Owner == relic.Owner &&
             IsInPlayablePile(context) &&
-            context.StateStore.Get(relic, () => new CounterPredictionState(GameRef.Get<int>(relic, "_cardsPlayedThisTurn"))).Value ==
+            context.StateStore.Get(relic, static value => new CounterPredictionState(GameRef.Get<int>(value, "_cardsPlayedThisTurn"))).Value ==
             relic.DynamicVars.Cards.IntValue - 1
                 ? 0
                 : context.Cost;

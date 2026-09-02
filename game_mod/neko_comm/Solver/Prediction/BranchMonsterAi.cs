@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
 using MegaCrit.Sts2.Core.Random;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Simulation;
+using System.Reflection;
 
 namespace CombatSolver;
 
@@ -106,6 +107,10 @@ internal sealed record BranchMonsterStaticSnapshot(
 
 internal static class BranchMonsterAi
 {
+    private static readonly FieldInfo InitialStateField = typeof(MonsterMoveStateMachine)
+        .GetField("_initialState", BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(typeof(MonsterMoveStateMachine).FullName, "_initialState");
+
     public static BranchMonsterAiState Capture(MonsterModel monster)
     {
         MonsterMoveStateMachine machine = monster.MoveStateMachine
@@ -197,6 +202,51 @@ internal static class BranchMonsterAi
 
         throw new InvalidOperationException(
             $"怪物 {source.Monster.Id.Entry} 的分支内行动状态机未能在 32 步内落到行动节点。");
+    }
+
+    public static BranchMonsterAiState RollInitial(
+        BranchMonsterAiState source,
+        CombatPredictionSimulator simulator,
+        SimulatedCombatState combat)
+    {
+        MonsterState nextState = (MonsterState?)InitialStateField.GetValue(source.Machine)
+            ?? throw new InvalidOperationException($"怪物 {source.Monster.Id.Entry} 没有初始行动状态。");
+        List<string> log = new(source.StateLog);
+        for (int guard = 0; guard < 32; guard++)
+        {
+            switch (nextState)
+            {
+                case MoveState move:
+                    log.Add(move.Id);
+                    return source with
+                    {
+                        Current = move,
+                        StateLog = log,
+                        NeedsInitialRoll = false,
+                    };
+                case RandomBranchState random:
+                    nextState = source.Machine.States[MonsterRandomBranchResolver.Pick(
+                        source.Machine,
+                        random,
+                        log,
+                        simulator.Rng.MonsterAi,
+                        state => GetBranchWeight(state, random.Id, source, combat))];
+                    break;
+                case ConditionalBranchState conditional:
+                    nextState = source.Machine.States[ResolveConditional(
+                        conditional,
+                        source,
+                        combat,
+                        simulator)];
+                    break;
+                default:
+                    throw new PredictionUnsupportedException(
+                        $"Unsupported initial monster state {nextState.GetType().FullName} " +
+                        $"for {source.Monster.Id.Entry}.");
+            }
+        }
+        throw new InvalidOperationException(
+            $"怪物 {source.Monster.Id.Entry} 的初始状态未能在 32 步内落到行动节点。");
     }
 
     private static MonsterState ResolveFollowUp(MonsterMoveStateMachine machine, MoveState move)

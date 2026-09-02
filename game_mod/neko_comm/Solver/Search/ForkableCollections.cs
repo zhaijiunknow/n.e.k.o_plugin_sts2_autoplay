@@ -168,8 +168,10 @@ internal sealed class ForkableDictionary<TKey, TValue> : IReadOnlyDictionary<TKe
     public TValue GetValueOrDefault(TKey key, TValue defaultValue)
         => _storage.Values.GetValueOrDefault(key, defaultValue);
 
-    public IEnumerator<KeyValuePair<TKey, TValue>> GetEnumerator() => _storage.Values.GetEnumerator();
+    public Dictionary<TKey, TValue>.Enumerator GetEnumerator() => _storage.Values.GetEnumerator();
 
+    IEnumerator<KeyValuePair<TKey, TValue>> IEnumerable<KeyValuePair<TKey, TValue>>.GetEnumerator()
+        => GetEnumerator();
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
     private void EnsureWritable()
@@ -279,7 +281,8 @@ internal sealed class ForkableSet<T> : ISet<T>, IReadOnlySet<T>
         EnsureWritable();
         _storage.Values.UnionWith(other);
     }
-    public IEnumerator<T> GetEnumerator() => _storage.Values.GetEnumerator();
+    public HashSet<T>.Enumerator GetEnumerator() => _storage.Values.GetEnumerator();
+    IEnumerator<T> IEnumerable<T>.GetEnumerator() => GetEnumerator();
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
     private void EnsureWritable()

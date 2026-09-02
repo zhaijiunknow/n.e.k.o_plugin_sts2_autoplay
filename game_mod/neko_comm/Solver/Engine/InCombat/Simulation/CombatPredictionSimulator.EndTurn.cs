@@ -65,7 +65,7 @@ internal sealed partial class CombatPredictionSimulator
         List<PredictedCard>? turnEndCards = null;
         List<PredictedCard>? etherealCards = null;
 
-        foreach (var card in playerState.Hand.Cards)
+        foreach (var card in playerState.Hand)
         {
             if (card.Preview.HasTurnEndInHandEffect)
             {

@@ -99,6 +99,7 @@ internal sealed partial class SimulatedCombatState :
             spec.SourcePile,
             spec.MinCount,
             spec,
+            spec.ContextId,
             Timing: _activeActionChoiceTiming);
         if (!choices.TryTake(request, out PlanCardChoice? choice))
         {

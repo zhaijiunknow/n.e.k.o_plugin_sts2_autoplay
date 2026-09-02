@@ -506,6 +506,18 @@ class STS2AutoplayService:
         key = "poll_interval_active_seconds" if active else "poll_interval_idle_seconds"
         return float(self._cfg.get(key, 1 if active else 3) or (1 if active else 3))
 
+    def _cfg_use_event_stream(self) -> bool:
+        try:
+            return bool(self._cfg.get("use_event_stream", True))
+        except Exception:
+            return True
+
+    def _cfg_fallback_poll_interval(self) -> float:
+        try:
+            return max(5.0, float(self._cfg.get("poll_fallback_seconds", 5.0) or 5.0))
+        except (TypeError, ValueError):
+            return 5.0
+
     def _cfg_action_interval(self) -> float:
         return float(self._cfg.get("action_interval_seconds", 1.5) or 1.5)
 
@@ -1323,6 +1335,7 @@ class STS2AutoplayService:
                 "standby": self._state.standby,
                 "autoplay_state": self._state.autoplay_state,
                 "step_count": self._state.step_count,
+                "sse_reconnect_count": getattr(self._state, "sse_reconnect_count", 0),
             })
         except Exception:
             pass

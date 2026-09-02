@@ -5,19 +5,55 @@ namespace CombatSolver.Engine.Common;
 
 internal sealed class PredictedCard : IComparable<PredictedCard>
 {
-    private sealed class PreviewStorage(CardModel? preview)
+    private sealed class PreviewStorage(CardModel original, CardModel? preview)
     {
+        public CardModel Original { get; } = original;
         public CardModel? Preview { get; } = preview;
         public volatile bool Shared;
+
+        private bool _hasCachedFingerprint;
+        private ulong _cachedFingerprintFirst;
+        private ulong _cachedFingerprintSecond;
+        private string? _cachedChoiceKey;
+
+        public bool TryGetCachedFingerprint(out ulong first, out ulong second)
+        {
+            if (!Volatile.Read(ref _hasCachedFingerprint))
+            {
+                first = 0;
+                second = 0;
+                return false;
+            }
+            first = _cachedFingerprintFirst;
+            second = _cachedFingerprintSecond;
+            return true;
+        }
+
+        public void SetCachedFingerprint(ulong first, ulong second)
+        {
+            _cachedFingerprintFirst = first;
+            _cachedFingerprintSecond = second;
+            Volatile.Write(ref _hasCachedFingerprint, true);
+        }
+
+        public bool TryGetCachedChoiceKey(out string key)
+        {
+            string? cached = Volatile.Read(ref _cachedChoiceKey);
+            key = cached ?? string.Empty;
+            return cached is not null;
+        }
+
+        public void SetCachedChoiceKey(string key)
+            => Volatile.Write(ref _cachedChoiceKey, key);
+
+        public void InvalidateCaches()
+        {
+            Volatile.Write(ref _hasCachedFingerprint, false);
+            Volatile.Write(ref _cachedChoiceKey, null);
+        }
     }
 
-    private readonly CardModel _original;
     private PreviewStorage _previewStorage;
-    private int _mutationVersion;
-    private bool _hasCachedFingerprint;
-    private ulong _cachedFingerprintFirst;
-    private ulong _cachedFingerprintSecond;
-    private string? _cachedChoiceKey;
     private SimCardPile? _ownerPile;
     private Action? _mutationObserver;
     private bool _observeEveryPreviewMutation;
@@ -25,21 +61,15 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
 
     public PredictedCard(CardModel original, CardModel? preview = null)
     {
-        _original = original;
-        _previewStorage = new PreviewStorage(preview);
+        _previewStorage = new PreviewStorage(original, preview);
     }
 
-    private PredictedCard(CardModel original, PreviewStorage previewStorage)
-    {
-        _original = original;
-        _previewStorage = previewStorage;
-    }
+    private PredictedCard(PreviewStorage previewStorage)
+        => _previewStorage = previewStorage;
 
-    public CardModel Original => _original;
+    public CardModel Original => _previewStorage.Original;
 
-    public CardModel Preview => _previewStorage.Preview ?? _original;
-
-    public int MutationVersion => _mutationVersion;
+    public CardModel Preview => _previewStorage.Preview ?? _previewStorage.Original;
 
     internal SimCardPile? OwnerPile => _ownerPile;
 
@@ -49,26 +79,27 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
     {
         get
         {
-            _mutationVersion++;
-            _hasCachedFingerprint = false;
-            _cachedChoiceKey = null;
             _ownerPile?.InvalidateFingerprint();
             if (_observeEveryPreviewMutation)
                 NotifyHookListenerStructureChanged();
             CardModel? preview = _previewStorage.Preview;
             if (preview is null)
             {
-                preview = PredictionUtils.CloneCardStateForSimulation(_original);
-                _previewStorage = new PreviewStorage(preview);
+                preview = PredictionUtils.CloneCardStateForSimulation(_previewStorage.Original);
+                _previewStorage = new PreviewStorage(_previewStorage.Original, preview);
                 if (!_observeEveryPreviewMutation)
                     NotifyHookListenerStructureChanged();
             }
             else if (_previewStorage.Shared)
             {
                 preview = PredictionUtils.CloneCardStateForSimulation(preview);
-                _previewStorage = new PreviewStorage(preview);
+                _previewStorage = new PreviewStorage(_previewStorage.Original, preview);
                 if (!_observeEveryPreviewMutation)
                     NotifyHookListenerStructureChanged();
+            }
+            else
+            {
+                _previewStorage.InvalidateCaches();
             }
             return preview;
         }
@@ -78,7 +109,9 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
     {
         if (_previewStorage.Preview is not null)
             return;
-        _previewStorage = new PreviewStorage(PredictionUtils.CloneCardStateForSimulation(_original));
+        _previewStorage = new PreviewStorage(
+            _previewStorage.Original,
+            PredictionUtils.CloneCardStateForSimulation(_previewStorage.Original));
     }
 
     public static List<PredictedCard> FromCards(IEnumerable<CardModel> cards)
@@ -98,14 +131,15 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
 
     public bool References(object? card)
     {
-        return ReferenceEquals(_original, card) || ReferenceEquals(_previewStorage.Preview, card);
+        return ReferenceEquals(_previewStorage.Original, card)
+            || ReferenceEquals(_previewStorage.Preview, card);
     }
 
     // Clones the prediction wrapper state only. Combat effects that generate a gameplay
     // clone of a card should use CombatPredictedCardExtensions.CreateClone instead.
     public PredictedCard Clone()
     {
-        return new PredictedCard(_original, _previewStorage.Preview is { } preview
+        return new PredictedCard(_previewStorage.Original, _previewStorage.Preview is { } preview
             ? PredictionUtils.CloneCardStateForSimulation(preview)
             : null)
         {
@@ -118,21 +152,18 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
         PreviewStorage forkStorage;
         if (_isolateAttachedModelsOnFork)
         {
-            CardModel source = _previewStorage.Preview ?? _original;
-            forkStorage = new PreviewStorage(PredictionUtils.CloneCardStateForSimulation(source));
+            CardModel source = _previewStorage.Preview ?? _previewStorage.Original;
+            forkStorage = new PreviewStorage(
+                _previewStorage.Original,
+                PredictionUtils.CloneCardStateForSimulation(source));
         }
         else
         {
             _previewStorage.Shared = true;
             forkStorage = _previewStorage;
         }
-        PredictedCard fork = new(_original, forkStorage)
+        PredictedCard fork = new(forkStorage)
         {
-            _mutationVersion = _mutationVersion,
-            _hasCachedFingerprint = _hasCachedFingerprint,
-            _cachedFingerprintFirst = _cachedFingerprintFirst,
-            _cachedFingerprintSecond = _cachedFingerprintSecond,
-            _cachedChoiceKey = _cachedChoiceKey,
             _isolateAttachedModelsOnFork = _isolateAttachedModelsOnFork,
         };
         context.Register(this, fork);
@@ -141,30 +172,36 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
 
     internal bool TryGetCachedFingerprint(out ulong first, out ulong second)
     {
-        first = _cachedFingerprintFirst;
-        second = _cachedFingerprintSecond;
-        return !_isolateAttachedModelsOnFork && _hasCachedFingerprint;
+        if (_isolateAttachedModelsOnFork)
+        {
+            first = 0;
+            second = 0;
+            return false;
+        }
+        return _previewStorage.TryGetCachedFingerprint(out first, out second);
     }
 
     internal void SetCachedFingerprint(ulong first, ulong second)
     {
         if (_isolateAttachedModelsOnFork)
             return;
-        _cachedFingerprintFirst = first;
-        _cachedFingerprintSecond = second;
-        _hasCachedFingerprint = true;
+        _previewStorage.SetCachedFingerprint(first, second);
     }
 
     internal bool TryGetCachedChoiceKey(out string key)
     {
-        key = _cachedChoiceKey ?? string.Empty;
-        return !_isolateAttachedModelsOnFork && _cachedChoiceKey is not null;
+        if (_isolateAttachedModelsOnFork)
+        {
+            key = string.Empty;
+            return false;
+        }
+        return _previewStorage.TryGetCachedChoiceKey(out key);
     }
 
     internal void SetCachedChoiceKey(string key)
     {
         if (!_isolateAttachedModelsOnFork)
-            _cachedChoiceKey = key;
+            _previewStorage.SetCachedChoiceKey(key);
     }
 
     internal void SetOwnerPile(SimCardPile? pile)
@@ -183,8 +220,7 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
     internal void EnableAttachedModelForkIsolation()
     {
         _isolateAttachedModelsOnFork = true;
-        _hasCachedFingerprint = false;
-        _cachedChoiceKey = null;
+        _previewStorage.InvalidateCaches();
         _ownerPile?.DisableFingerprintCache();
         PredictionModModelSupport.RegisterBaseLibCardModifierOwner(Preview);
     }

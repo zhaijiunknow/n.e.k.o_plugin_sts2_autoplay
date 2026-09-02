@@ -9,7 +9,7 @@ internal static class LightningOrbMirrors
     // Mirrors LightningOrb.BeforeTurnEndOrbTrigger by forwarding through OrbModel.TriggerPassive.
     public static void BeforeTurnEndOrbTrigger(LightningOrb orb, OrbMirrorContext context)
     {
-        context.Simulator.TriggerOrbPassive(orb, target: null);
+        context.Simulator.TriggerOrbPassive(orb, target: null, context.ProcessedEnemyDeaths);
     }
 
     // Mirrors LightningOrb.Passive without VFX/SFX or waits.

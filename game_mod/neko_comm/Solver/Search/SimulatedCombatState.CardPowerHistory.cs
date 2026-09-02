@@ -19,6 +19,27 @@ internal readonly record struct CardPlayPowerSuppression(
 
 internal sealed partial class SimulatedCombatState
 {
+    private sealed class HistorySensitiveCardModifierScope(
+        SimulatedCombatState owner,
+        CardPlayPowerSuppression suppression) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            owner.RestoreHistorySensitiveCardModifiers(suppression);
+        }
+    }
+
+    IDisposable ICombatPredictionCardExecutionSink.BeginHistorySensitiveCardModifierScope(
+        PredictedCard card)
+        => new HistorySensitiveCardModifierScope(
+            this,
+            SuppressHistorySensitiveCardModifiers(card));
+
     public CardPlayPowerSuppression SuppressHistorySensitiveCardModifiers(PredictedCard card)
     {
         Creature owner = card.Preview.Owner.Creature;

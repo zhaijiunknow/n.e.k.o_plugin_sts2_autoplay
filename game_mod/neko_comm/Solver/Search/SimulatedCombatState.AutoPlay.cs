@@ -165,20 +165,20 @@ internal sealed partial class SimulatedCombatState
             return false;
         CardChoiceSpec? spec = CardChoiceSupport.GetSpec(simulator, card);
         PlanCardChoice? emptyChoice = CardChoiceSupport.BuildRequiredEmptyChoice(card.Preview);
-        if (spec == null && emptyChoice == null)
+        if (spec == null)
         {
-            CardChoiceSupport.ApplyNoChoiceEffects(simulator, this, card);
+            if (emptyChoice == null)
+                CardChoiceSupport.ApplyNoChoiceEffects(simulator, this, card);
+            else
+                CardChoiceSupport.Apply(simulator, this, card, emptyChoice, processedEnemyDeaths);
             return true;
         }
 
-        PlanChoiceEffect effect = spec?.Effect ?? emptyChoice!.Effect;
-        PileType pile = spec?.SourcePile ?? emptyChoice!.SourcePile;
-        int count = spec?.MinCount ?? emptyChoice!.Cards.Count;
         TurnStartChoiceRequest request = new(
             sourceId,
-            effect,
-            pile,
-            count,
+            spec.Effect,
+            spec.SourcePile,
+            spec.MinCount,
             spec,
             contextId,
             ActiveActionChoiceTiming);
@@ -187,10 +187,7 @@ internal sealed partial class SimulatedCombatState
             SetPendingTurnStartChoice(request);
             return false;
         }
-        if (spec == null)
-            CardChoiceSupport.Apply(simulator, this, card, emptyChoice!, processedEnemyDeaths);
-        else
-            CardChoiceSupport.Apply(simulator, this, card, choice!, processedEnemyDeaths);
+        CardChoiceSupport.Apply(simulator, this, card, choice!, processedEnemyDeaths);
         return true;
     }
 

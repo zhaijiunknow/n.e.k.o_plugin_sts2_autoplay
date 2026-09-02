@@ -5,6 +5,7 @@ internal sealed class SearchMemoryPressureSignal
     private long _allocatedBytesAtStart;
     private long _allocationLimitBytes = long.MaxValue;
     private Action<CancellationToken>? _reclaimAndContinue;
+    private Func<bool>? _unexpectedNoGcLossProbe;
 
     public int ReclaimCount { get; private set; }
 
@@ -13,21 +14,47 @@ internal sealed class SearchMemoryPressureSignal
 
     public long AllocationLimitBytes => Volatile.Read(ref _allocationLimitBytes);
 
+    public bool IsEnabled => AllocationLimitBytes != long.MaxValue;
+
+    public long RemainingBytes
+    {
+        get
+        {
+            long limit = AllocationLimitBytes;
+            return limit == long.MaxValue
+                ? long.MaxValue
+                : Math.Max(0, limit - AllocatedBytes);
+        }
+    }
+
     public void Configure(
         long allocatedBytesAtStart,
         long allocationLimitBytes,
-        Action<CancellationToken> reclaimAndContinue)
+        Action<CancellationToken> reclaimAndContinue,
+        Func<bool>? unexpectedNoGcLossProbe = null)
     {
         if (allocationLimitBytes <= 0)
             throw new ArgumentOutOfRangeException(nameof(allocationLimitBytes));
         ArgumentNullException.ThrowIfNull(reclaimAndContinue);
         Volatile.Write(ref _allocatedBytesAtStart, allocatedBytesAtStart);
         Volatile.Write(ref _reclaimAndContinue, reclaimAndContinue);
+        Volatile.Write(ref _unexpectedNoGcLossProbe, unexpectedNoGcLossProbe);
         Volatile.Write(ref _allocationLimitBytes, allocationLimitBytes);
     }
 
     public bool IsLimitReached()
         => AllocatedBytes >= AllocationLimitBytes;
+
+    public bool CanReachCommit(long reservedBytes)
+    {
+        if (reservedBytes < 0)
+            throw new ArgumentOutOfRangeException(nameof(reservedBytes));
+        long remaining = RemainingBytes;
+        return remaining == long.MaxValue || reservedBytes <= remaining;
+    }
+
+    public bool HasUnexpectedNoGcLoss()
+        => Volatile.Read(ref _unexpectedNoGcLossProbe)?.Invoke() == true;
 
     public void ReclaimAndContinue(CancellationToken cancellationToken)
     {
@@ -41,5 +68,6 @@ internal sealed class SearchMemoryPressureSignal
     {
         Volatile.Write(ref _allocationLimitBytes, long.MaxValue);
         Volatile.Write(ref _reclaimAndContinue, null);
+        Volatile.Write(ref _unexpectedNoGcLossProbe, null);
     }
 }
