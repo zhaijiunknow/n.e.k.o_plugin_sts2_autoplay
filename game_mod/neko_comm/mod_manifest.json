@@ -1,10 +1,10 @@
 {
   "id": "neko_comm",
   "pck_name": "neko_comm",
-  "name": "NEKO通信",
+  "name": "猫娘尖塔 NekoSpire",
   "author": "N.E.K.O Team",
-  "description": "NEKO 陪玩通信桥：将 Slay the Spire 2 局面/操作与 NEKO 客户端互通（co-op / 陪玩）。",
-  "version": "0.0.1",
+  "description": "猫娘尖塔 NekoSpire：在杀戮尖塔 2 内提供战斗求解/co-op/局面对账，可独立运行（自配 LLM）或连接 NEKO 客户端。",
+  "version": "0.1.0",
   "has_pck": true,
   "has_dll": true,
   "dependencies": []

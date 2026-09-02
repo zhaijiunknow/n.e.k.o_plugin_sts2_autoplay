@@ -49,7 +49,8 @@ param(
     [int]$HostCharacterIndex = 1,
     [int]$ClientCharacterIndex = 4,
     [switch]$SkipHostLaunch,
-    [switch]$EnterCombat
+    [switch]$EnterCombat,
+    [switch]$ClientAutoplays    # catgirl client drives itself (join/select/ready/vote) via the mod autoplay
 )
 
 $ErrorActionPreference = "Stop"
@@ -116,6 +117,23 @@ function Wait-ForScreen {
     throw "timeout waiting for '$Target' on $BaseUrl ($Desc); last screen=$((Get-StateScreen -BaseUrl $BaseUrl))"
 }
 
+function Wait-ForClientLobbyReady {
+    param([string]$BaseUrl, [int]$MaxSeconds = 90)
+    $deadline = (Get-Date).AddSeconds($MaxSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $resp = Invoke-RestMethod -Method Get -Uri "$BaseUrl/state" -TimeoutSec 5
+            $lobby = $resp.data.multiplayer_lobby
+            if ($lobby -and $lobby.has_lobby -and $lobby.local_ready) {
+                Write-Host "[coop] client is ready in lobby"
+                return $true
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 700
+    }
+    throw "timeout waiting for client to be ready in lobby at $BaseUrl; last=$((Get-StateScreen -BaseUrl $BaseUrl))"
+}
+
 Write-Host "=== Neko co-op launcher ==="
 Write-Host "[coop] game=$ExePath"
 Write-Host "[coop] host=18080 client=18081 (chars host=$HostCharacterIndex client=$ClientCharacterIndex)"
@@ -139,10 +157,15 @@ $clientBase = "http://127.0.0.1:$ClientApiPort"
 Write-Host "[coop] starting client (catgirl, port $ClientApiPort, debug)..."
 & $startSession -ExePath $ExePath -EnableDebugActions -ApiPort $ClientApiPort -KeepExistingProcesses | Out-Host
 
-$null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "run_console_command"; command = "multiplayer test" } -Label "client open multiplayer test"
-$null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "join_multiplayer_lobby" } -Label "client join lobby"
-$null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "select_character"; option_index = $ClientCharacterIndex } -Label "client select character"
-$null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "ready_multiplayer_lobby" } -Label "client ready"
+if (-not $ClientAutoplays) {
+    $null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "run_console_command"; command = "multiplayer test" } -Label "client open multiplayer test"
+    $null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "join_multiplayer_lobby" } -Label "client join lobby"
+    $null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "select_character"; option_index = $ClientCharacterIndex } -Label "client select character"
+    $null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "ready_multiplayer_lobby" } -Label "client ready"
+} else {
+    Write-Host "[coop] -ClientAutoplays: catgirl client joins/selects/readies itself (port $ClientApiPort)"
+    $null = Wait-ForClientLobbyReady -BaseUrl $clientBase
+}
 $null = Invoke-Action -BaseUrl $hostBase -Payload @{ action = "ready_multiplayer_lobby" } -Label "host ready"
 
 # run should start -> map
@@ -152,7 +175,9 @@ $null = Wait-ForScreen -BaseUrl $clientBase -Target "MAP" -MaxSeconds 60 -Desc "
 if ($EnterCombat) {
     # vote into first available node on both (same index 0)
     $null = Invoke-Action -BaseUrl $hostBase -Payload @{ action = "choose_map_node"; option_index = 0 } -Label "host vote node 0"
-    $null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "choose_map_node"; option_index = 0 } -Label "client vote node 0"
+    if (-not $ClientAutoplays) {
+        $null = Invoke-Action -BaseUrl $clientBase -Payload @{ action = "choose_map_node"; option_index = 0 } -Label "client vote node 0"
+    }
     $null = Wait-ForScreen -BaseUrl $clientBase -Target "COMBAT" -MaxSeconds 90 -Desc "entered co-op combat (client view)"
     Write-Host "=== at COMBAT: catgirl client ready to play on port $ClientApiPort ==="
 } else {

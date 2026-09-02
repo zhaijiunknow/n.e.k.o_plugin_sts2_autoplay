@@ -1,10 +1,12 @@
-// In-game scrolling catgirl danmaku overlay for neko_comm.
+// In-game scrolling catgirl danmaku overlay for neko_comm. Style modeled on the "弹幕尖塔 DanmakuSpire" mod:
+// each line is a horizontal "smoke" strip (rounded translucent panel tinted with the catgirl color) with the
+// character icon on the left and centered light text with a soft drop shadow — instead of bare pink text.
 //
 // neko_comm builds with Microsoft.NET.Sdk (not Godot.NET.Sdk) and the game data dir ships no
 // Godot.SourceGenerators, so a C# node subclass overriding _Process is NOT wired by Godot. We instead
-// use BUILT-IN nodes (CanvasLayer -> Control -> Label) attached to the SceneTree root and drive the
-// per-frame scroll with the SceneTree.ProcessFrame signal (an already-proven path in GameActionService).
-// All node creation/mutation happens on the game thread (see DanmakuService -> GameThread.InvokeAsync).
+// use BUILT-IN nodes (CanvasLayer -> Control -> PanelContainer -> Label) attached to the SceneTree root and
+// drive the per-frame scroll with the SceneTree.ProcessFrame signal. All node creation/mutation happens on the
+// game thread (see DanmakuService -> GameThread.InvokeAsync).
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -18,12 +20,16 @@ namespace NekoComm.Game
     internal sealed class DanmakuOverlay
     {
         private const float SpeedPxPerSecond = 120f;
-        private const int FontSize = 24;
         private const int LaneCount = 8;
-        private const float LaneStep = 34f;
         private const int MaxActive = 16;
-        private const float AvatarSize = 36f;
-        private static readonly Color CatgirlColor = new(1f, 0.78f, 0.9f);
+        private const float AvatarGap = 6f;
+        private const float Padding = 14f;
+
+        // DanmakuSpire-style palette: light champagne text + dark soft shadow; the catgirl color tints the smoke.
+        private static readonly Color TextColor = new(0.96f, 0.93f, 0.87f, 1f);
+        private static readonly Color TextShadowColor = new(0f, 0f, 0f, 0.6f);
+        private static readonly Color CatgirlColor = new(1f, 0.72f, 0.88f);
+        private static readonly Color SmokeBase = new(0.05f, 0.035f, 0.06f, 0.78f);
 
         private readonly List<(Control Node, float Speed)> _active = new();
         private readonly Dictionary<string, Texture2D> _avatarCache = new();
@@ -64,8 +70,6 @@ namespace NekoComm.Game
             if (clean.Length == 0)
                 return;
 
-            // The overlay is added to the tree root via CallDeferred, so on the very first POST it may not
-            // be inside the tree yet; GetViewportRect would warn. Use defaults until it is.
             if (control.IsInsideTree())
             {
                 var viewport = control.GetViewportRect();
@@ -78,11 +82,16 @@ namespace NekoComm.Game
 
             int lane = _nextLane % LaneCount;
             _nextLane++;
-            float y = Mathf.Max(40f, _viewportHeight * 0.12f) + lane * LaneStep;
 
-            var avatarTex = DecodeAvatar(avatarBase64);
-            float textX = 0f;
-            float textY = 4f; // center a ~28px label against the 36px avatar
+            // Size follows the configurable font size (like DanmakuSpire: font 24 -> icon 2x, ~56px tall).
+            int fontSize = Math.Clamp(NekoConfig.Current.danmaku_font_size, 16, 40);
+            float avatar = fontSize * 2f;
+            float laneStep = fontSize * 1.9f;
+            float y = Mathf.Max(40f, _viewportHeight * 0.12f) + lane * laneStep;
+
+            var avatarTex = ResolveAvatar(avatarBase64);
+
+            // container: just a position/scroll holder.
             var container = new Control
             {
                 Name = "NekoCatgirlDanmaku",
@@ -90,37 +99,70 @@ namespace NekoComm.Game
                 ZIndex = 2,
             };
 
+            // Smoke strip: a rounded translucent panel tinted with the catgirl color, with a soft drop shadow —
+            // the DanmakuSpire "smoke ninepatch" look, approximated with a StyleBoxFlat.
+            var smoke = new PanelContainer
+            {
+                Name = "NekoDanmakuSmoke",
+                MouseFilter = Control.MouseFilterEnum.Ignore,
+            };
+            var smokeStyle = new StyleBoxFlat
+            {
+                BgColor = SmokeBase.Lerp(CatgirlColor, 0.16f),
+                ShadowColor = new Color(0f, 0f, 0f, 0.55f),
+                ShadowSize = 8,
+                CornerRadiusTopLeft = 20,
+                CornerRadiusTopRight = 20,
+                CornerRadiusBottomLeft = 20,
+                CornerRadiusBottomRight = 20,
+                ContentMarginLeft = Padding,
+                ContentMarginRight = Padding,
+                ContentMarginTop = 6f,
+                ContentMarginBottom = 6f,
+            };
+            smoke.AddThemeStyleboxOverride("panel", smokeStyle);
+
+            var row = new HBoxContainer
+            {
+                Name = "NekoDanmakuRow",
+                MouseFilter = Control.MouseFilterEnum.Ignore,
+            };
+            row.AddThemeConstantOverride("separation", (int)AvatarGap);
+            smoke.AddChild(row);
+
             if (avatarTex != null)
             {
                 var rect = new TextureRect
                 {
                     Texture = avatarTex,
-                    Position = new Vector2(0f, 0f),
-                    Size = new Vector2(AvatarSize, AvatarSize),
+                    CustomMinimumSize = new Vector2(avatar, avatar),
                     MouseFilter = Control.MouseFilterEnum.Ignore,
                     StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                    ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
                 };
-                container.AddChild(rect);
-                textX = AvatarSize + 4f;
-                textY = (AvatarSize - (FontSize + 6f)) / 2f;
+                row.AddChild(rect);
             }
 
             var label = new Label
             {
                 Name = "NekoDanmakuText",
                 Text = clean,
-                Position = new Vector2(textX, textY),
                 MouseFilter = Control.MouseFilterEnum.Ignore,
-                HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
             };
-            label.AddThemeFontSizeOverride("font_size", FontSize);
+            label.AddThemeFontSizeOverride("font_size", fontSize);
             if (_font != null)
                 label.AddThemeFontOverride("font", _font);
-            label.AddThemeColorOverride("font_color", CatgirlColor);
+            label.AddThemeColorOverride("font_color", TextColor);
+            // Soft drop shadow (DanmakuSpire uses a shadow, not an outline).
+            label.AddThemeColorOverride("font_shadow_color", TextShadowColor);
+            label.AddThemeConstantOverride("shadow_offset_x", 2);
+            label.AddThemeConstantOverride("shadow_offset_y", 2);
+            label.AddThemeConstantOverride("shadow_outline_size", 0);
+            row.AddChild(label);
 
-            container.AddChild(label);
-            container.Position = new Vector2(_viewportWidth + 40f, y);
+            container.AddChild(smoke);
+            container.Position = new Vector2(_viewportWidth + 60f, y);
             control.AddChild(container);
             _active.Add((container, SpeedPxPerSecond));
         }
@@ -146,15 +188,27 @@ namespace NekoComm.Game
                         continue;
                     }
                     node.Position += new Vector2(-speed * delta, 0f);
-                    // Catgirl line (<=60 chars + one 36px avatar) is far narrower than 500px, so this
-                    // cleanly drops it once it has fully scrolled off the left edge.
-                    if (node.Position.X < -500f)
+                    if (node.Position.X < -700f)
                     {
                         node.QueueFree();
                         _active.RemoveAt(i);
                     }
                 }
             }
+        }
+
+        // Prefer the ACTUAL catgirl avatar: (1) caller-supplied base64 (the catgirl image from the N.E.K.O
+        // client/main server), (2) the custom avatar configured via NekoConfig.danmaku_avatar (a file in
+        // mods/nekospire_ui/, default catgirl.png — the user's own catgirl portrait). No icon if missing.
+        private Texture2D? ResolveAvatar(string? avatarBase64)
+        {
+            var fromBase64 = DecodeAvatar(avatarBase64);
+            if (fromBase64 != null)
+                return fromBase64;
+            var filename = NekoConfig.Current.danmaku_avatar;
+            if (!string.IsNullOrWhiteSpace(filename))
+                return NekoUi.LoadUserTexture(filename);
+            return null;
         }
 
         private Texture2D? DecodeAvatar(string? avatarBase64)
@@ -170,16 +224,13 @@ namespace NekoComm.Game
             {
                 var bytes = Convert.FromBase64String(raw);
                 var image = new Image();
-                // Sniff format by magic bytes so the correct loader is used without trying the wrong one
-                // (avoids Godot's noisy LoadPng/LoadJpg push-errors on a mismatched image). Any failure
-                // -> null -> the caller renders text-only (per "if it doesn't render, fall back to text").
                 bool ok;
                 if (bytes.Length >= 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47)
                     ok = image.LoadPngFromBuffer(bytes) == Error.Ok;
                 else if (bytes.Length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF)
                     ok = image.LoadJpgFromBuffer(bytes) == Error.Ok;
                 else
-                    return null; // unknown/unsupported -> plain text
+                    return null;
                 if (!ok)
                     return null;
                 var texture = ImageTexture.CreateFromImage(image);
@@ -190,7 +241,7 @@ namespace NekoComm.Game
             }
             catch
             {
-                return null; // decode/allocation failure -> plain text
+                return null;
             }
         }
 
@@ -209,7 +260,6 @@ namespace NekoComm.Game
 
         private static Font? ResolveFont()
         {
-            // Mirrors DanmakuSpire's LoadLocalizedFont + LoadFallbackFont, which compiles against sts2.
             try
             {
                 if (LocManager.Instance != null && FontManager.NeedsFontSubstitution(LocManager.Instance.Language))

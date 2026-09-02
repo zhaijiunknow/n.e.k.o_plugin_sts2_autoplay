@@ -3428,6 +3428,20 @@ internal static class GameStateService
         ("临时", "临时牌通常会在回合结束或打出后离开牌组流转。")
     };
 
+    // Steam transport exposes the raw lobby id (decimal SteamID string, what +connect_lobby needs); ENet and
+    // single-player return null. Null-guarded so a transient unconnected service can't throw the state build.
+    private static string? GetLobbyIdentifier(INetGameService? netService)
+    {
+        try
+        {
+            return netService?.GetRawLobbyIdentifier();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static MultiplayerPayload? BuildMultiplayerPayload(IScreenContext? currentScreen, RunState? runState)
     {
         var multiplayerTestScene = GetMultiplayerTestScene();
@@ -3443,7 +3457,8 @@ internal static class GameStateService
                 connected_player_ids = multiplayerTestLobby.Players
                     .OrderBy(player => player.slotId)
                     .Select(player => NetIdToString(player.id))
-                    .ToArray()
+                    .ToArray(),
+                lobby_id = GetLobbyIdentifier(multiplayerTestLobby.NetService)
             };
         }
 
@@ -3465,7 +3480,8 @@ internal static class GameStateService
                 connected_player_ids = lobby.Players
                     .OrderBy(player => player.slotId)
                     .Select(player => NetIdToString(player.id))
-                    .ToArray()
+                    .ToArray(),
+                lobby_id = GetLobbyIdentifier(lobby.NetService)
             };
         }
 
@@ -3484,7 +3500,8 @@ internal static class GameStateService
             connected_player_ids = GetConnectedPlayerIds(runState)
                 .OrderBy(id => runState.GetPlayerSlotIndex(id))
                 .Select(NetIdToString)
-                .ToArray()
+                .ToArray(),
+            lobby_id = GetLobbyIdentifier(RunManager.Instance.NetService)
         };
     }
 
@@ -3504,6 +3521,7 @@ internal static class GameStateService
         return new MultiplayerLobbyPayload
         {
             net_game_type = lobby?.NetService.Type.ToString() ?? NetGameType.Singleplayer.ToString(),
+            lobby_id = GetLobbyIdentifier(lobby?.NetService),
             join_host = GetMultiplayerLobbyJoinHost(),
             join_port = GetMultiplayerLobbyJoinPort(),
             local_net_id_hint = NetIdToString(GetMultiplayerLobbyJoinNetIdHint()),
@@ -5695,11 +5713,18 @@ internal sealed class MultiplayerPayload
     public int player_count { get; init; }
 
     public string[] connected_player_ids { get; init; } = Array.Empty<string>();
+
+    /// <summary>Steam lobby id (decimal SteamID string) for a game-UI Steam-hosted room; null for ENet /
+    /// single-player. This is the value <c>+connect_lobby</c> consumes.</summary>
+    public string? lobby_id { get; init; }
 }
 
 internal sealed class MultiplayerLobbyPayload
 {
     public string net_game_type { get; init; } = string.Empty;
+
+    /// <summary>Steam lobby id (decimal SteamID string); null for ENet / no lobby.</summary>
+    public string? lobby_id { get; init; }
 
     public string join_host { get; init; } = "127.0.0.1";
 

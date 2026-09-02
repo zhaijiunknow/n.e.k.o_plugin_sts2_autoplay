@@ -4,7 +4,8 @@ param(
     [int]$DelaySeconds = 1,
     [switch]$EnableDebugActions,
     [int]$ApiPort = 8080,
-    [switch]$KeepExistingProcesses
+    [switch]$KeepExistingProcesses,
+    [string]$ConnectLobbyId = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -119,6 +120,7 @@ if (-not $KeepExistingProcesses) {
 
 $previousDebugValue = [Environment]::GetEnvironmentVariable("STS2_ENABLE_DEBUG_ACTIONS", "Process")
 $previousPortValue = [Environment]::GetEnvironmentVariable("STS2_API_PORT", "Process")
+$previousConnectLobbyValue = [Environment]::GetEnvironmentVariable("STS2_CONNECT_LOBBY", "Process")
 
 try {
     [Environment]::SetEnvironmentVariable("STS2_API_PORT", [string]$ApiPort, "Process")
@@ -128,12 +130,29 @@ try {
     else {
         [Environment]::SetEnvironmentVariable("STS2_ENABLE_DEBUG_ACTIONS", $null, "Process")
     }
+    if ($ConnectLobbyId) {
+        [Environment]::SetEnvironmentVariable("STS2_CONNECT_LOBBY", $ConnectLobbyId, "Process")
+    }
+    else {
+        [Environment]::SetEnvironmentVariable("STS2_CONNECT_LOBBY", $null, "Process")
+    }
 
-    $proc = Start-Process -FilePath $ExePath -WorkingDirectory $launchDir -PassThru
+    $startParams = @{
+        FilePath = $ExePath
+        WorkingDirectory = $launchDir
+        PassThru = $true
+    }
+    if ($ConnectLobbyId) {
+        # +connect_lobby <lobbyid> auto-joins the Steam room; SteamID is digits-only so no quoting needed.
+        # Array form avoids PowerShell re-splitting a single space-joined string.
+        $startParams.ArgumentList = @("+connect_lobby", $ConnectLobbyId)
+    }
+    $proc = Start-Process @startParams
 }
 finally {
     [Environment]::SetEnvironmentVariable("STS2_API_PORT", $previousPortValue, "Process")
     [Environment]::SetEnvironmentVariable("STS2_ENABLE_DEBUG_ACTIONS", $previousDebugValue, "Process")
+    [Environment]::SetEnvironmentVariable("STS2_CONNECT_LOBBY", $previousConnectLobbyValue, "Process")
 }
 
 Wait-ForHealth -MaxAttempts $Attempts -SleepSeconds $DelaySeconds -Process $proc -BaseUrl $baseUrl
@@ -144,5 +163,6 @@ Wait-ForStateReady -MaxAttempts $Attempts -SleepSeconds 1 -Process $proc -BaseUr
     debug_actions_enabled = [bool]$EnableDebugActions
     api_port = $ApiPort
     base_url = $baseUrl
+    connect_lobby_id = $ConnectLobbyId
     health = "ready"
 } | ConvertTo-Json -Compress

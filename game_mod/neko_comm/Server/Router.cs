@@ -5,14 +5,13 @@ using System.Threading;
 using MegaCrit.Sts2.Core.Debug;
 using MegaCrit.Sts2.Core.Logging;
 using NekoComm.Game;
-using NekoComm.Game.Sim;
 namespace NekoComm.Server;
 
 internal static class Router
 {
-    private const string ServiceName = "sts2-ai-agent";
+    private const string ServiceName = "nekospire";
     private const string ProtocolVersion = "2026-03-11-v1";
-    private const string ModVersion = "0.8.1";
+    private const string ModVersion = "0.1.0";
     private const string LogPrefix = "[NekoComm.Router]";
 
     private static long _requestCounter;
@@ -29,20 +28,6 @@ internal static class Router
         try
         {
             Log.Info($"{LogPrefix} {requestId} {request.HttpMethod} {request.Url?.AbsolutePath}");
-
-            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
-                (request.Url?.AbsolutePath == "/capture/on" || request.Url?.AbsolutePath == "/capture/off"))
-            {
-                SimCapture.Enabled = request.Url?.AbsolutePath == "/capture/on";
-                await WriteJsonAsync(response, 200, new
-                {
-                    ok = true,
-                    request_id = requestId,
-                    data = new { capture = SimCapture.Enabled, dir = SimCapture.CaptureDirectory }
-                });
-                statusCode = 200;
-                return;
-            }
 
             if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath == "/health")
@@ -126,28 +111,6 @@ internal static class Router
             }
 
             if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
-                request.Url?.AbsolutePath == "/solver/test")
-            {
-                // Debug route: run Capture + Solve and return the plan alongside solver/engine state so
-                // the operator can confirm the vendored brain is live and the isolation patches held.
-                var plan = await GameThread.InvokeAsync(() => GameSolverService.BuildSolverPlanAsync());
-                await WriteJsonAsync(response, 200, new
-                {
-                    ok = true,
-                    request_id = requestId,
-                    data = new
-                    {
-                        solver_enabled = GameSolverService.SolverEnabled,
-                        isolation_guaranteed = CombatSolver.CombatSolverRuntime.IsolationGuaranteed,
-                        engine = "combatsolver",
-                        plan,
-                    }
-                });
-                statusCode = 200;
-                return;
-            }
-
-            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath is string dataPath &&
                 dataPath.StartsWith("/data/", StringComparison.OrdinalIgnoreCase))
             {
@@ -217,6 +180,43 @@ internal static class Router
                     ok = true,
                     request_id = requestId,
                     data = new { status }
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/config/open")
+            {
+                // Open the in-game LLM config window (standalone build). The window itself does the editing.
+                await NekoConfigWindow.OpenAsync();
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = new { status = "opened" }
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/config")
+            {
+                // Read the LLM config (api_key omitted — never expose a secret over the mod HTTP API).
+                var cfg = NekoConfig.Current;
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = new
+                    {
+                        coop_enabled = cfg.coop_enabled,
+                        llm_enabled = cfg.llm_enabled,
+                        llm_base_url = cfg.llm_base_url,
+                        llm_model = cfg.llm_model,
+                        llm_max_tokens = cfg.llm_max_tokens,
+                    }
                 });
                 statusCode = 200;
                 return;

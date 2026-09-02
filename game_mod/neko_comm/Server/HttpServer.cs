@@ -7,7 +7,7 @@ namespace NekoComm.Server;
 public sealed class HttpServer
 {
     private const string DefaultHost = "127.0.0.1";
-    private const int DefaultPort = 8080;
+    private const int DefaultPort = 18080;
     private const string LogPrefix = "[NekoComm.HttpServer]";
     private const int StartRetryCount = 20;
     private static readonly TimeSpan StartRetryDelay = TimeSpan.FromMilliseconds(250);
