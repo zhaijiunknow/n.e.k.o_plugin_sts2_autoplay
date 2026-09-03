@@ -264,8 +264,15 @@ class STS2AutoplayService:
             snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
         operation = snapshot.get("agent_operation") if isinstance(snapshot.get("agent_operation"), dict) else None
         if operation is None:
-            message = self.t("autoplay.no_planned_operation", default="当前没有可执行的规划动作。")
-            return {"status": "idle", "message": message, "summary": message}
+            # 跨屏切换（如 reward->map / 战斗结束->奖励 等）时 /state 可能尚未切到下一屏，导致
+            # choose_map_node 等动作还没出现在 available_actions。短延迟后再刷一次，捕捉切换。
+            await asyncio.sleep(0.6)
+            await self.refresh_state(trigger_sync=True)
+            snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
+            operation = snapshot.get("agent_operation") if isinstance(snapshot.get("agent_operation"), dict) else None
+            if operation is None:
+                message = self.t("autoplay.no_planned_operation", default="当前没有可执行的规划动作。")
+                return {"status": "idle", "message": message, "summary": message}
         result = await self.execute_operation(operation)
         if result.get("status") == "ok":
             self._state.step_count += 1
