@@ -235,7 +235,8 @@ internal static class CombatSolverFacade
             : a.Kind == PlanActionKind.UsePotion ? "use_potion"
             : "end_turn";
         int? cardIndex = a.Turn == me.PlayerCombatState?.TurnNumber ? MapStepCardIndex(a, me) : null;
-        var exhaust = MapExhaust(a);
+        var choice = MapChoice(a);   // 任意计划卡牌选择（消耗/拉弃牌堆/生成到手上/变换/弃牌等）
+        var exhaust = MapExhaust(a); // 仅消耗子集，保留给特定消耗消费方
         return new SolverLineStep
         {
             kind = kind,
@@ -245,11 +246,24 @@ internal static class CombatSolverFacade
             target_index = a.TargetIndex >= 0 ? a.TargetIndex : null,
             exhaust_card_id = exhaust.Item1,
             exhaust_card_name = exhaust.Item2,
+            choice_card_id = choice.Item1,
+            choice_card_name = choice.Item2,
         };
     }
 
-    /// <summary>若这步出牌要求玩家从手牌选一张消耗，取 solver 选定的那张（PlanAction.Choice.Cards[0]）。
-    /// 返回 (cardId, cardName)，无则 (null, null)。</summary>
+    /// <summary>任意计划卡牌选择（消耗/拉弃牌堆/生成到手/变换/弃牌等）：取 PlanAction.Choice.Cards[0]。
+    /// 无选择返回 (null, null)。</summary>
+    private static (string?, string?) MapChoice(PlanAction a)
+    {
+        if (a.Choice is not { Cards.Count: > 0 })
+        {
+            return (null, null);
+        }
+        var token = a.Choice.Cards[0];
+        return (token.CardId, token.Title);
+    }
+
+    /// <summary>消耗子集：仅当 PlanChoiceEffect.Exhaust 时取 PlanAction.Choice.Cards[0]。</summary>
     private static (string?, string?) MapExhaust(PlanAction a)
     {
         if (a.Choice is not { Effect: PlanChoiceEffect.Exhaust, Cards.Count: > 0 })

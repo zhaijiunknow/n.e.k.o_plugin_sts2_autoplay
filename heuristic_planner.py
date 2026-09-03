@@ -105,7 +105,7 @@ class STS2HeuristicPlanner:
         if state_name in {"card_selection", "card_selection_unusefull", "card_selection_delet", "card_selection_transform", "card_selection_remove"}:
             action = self._find_action(available_actions, "select_deck_card")
             if action is not None:
-                preferred_option = self._preferred_exhaust_option(summary_context, preferences, context)
+                preferred_option = self._preferred_choice_option(summary_context, preferences, context)
                 self._debug(
                     "[sts2_remove_plan] cards=%s chosen=%s payload=%s",
                     summary_context.get("payload", {}).get("selection_cards") if isinstance(summary_context.get("payload"), dict) else [],
@@ -538,10 +538,10 @@ class STS2HeuristicPlanner:
                 return fallback_index
         return None
 
-    def _preferred_exhaust_option(self, summary_context: dict[str, Any], preferences: dict[str, Any], context: dict[str, Any]) -> int | None:
-        """选牌消耗（combat_hand_select）：优先用 /solver/plan 的 exhaust_card_id（solver 已优化该烧哪张），
-        命中不到（或非消耗）再走删牌启发式。避免卡死在选牌消耗上。"""
-        pending = context.get("pending_card_exhaust_id") if isinstance(context, dict) else None
+    def _preferred_choice_option(self, summary_context: dict[str, Any], preferences: dict[str, Any], context: dict[str, Any]) -> int | None:
+        """选牌（消耗/拉弃牌堆/生成到手/变换等，弹的是人选牌界面）：优先用 /solver/plan 的 choice_card_id
+        （solver 已优化选哪张），命中不到再走删牌启发式。避免卡死在选牌上。"""
+        pending = context.get("pending_card_choice_id") if isinstance(context, dict) else None
         if pending:
             payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
             cards = payload.get("selection_cards") if isinstance(payload.get("selection_cards"), list) else []

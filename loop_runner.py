@@ -103,18 +103,18 @@ class STS2LoopRunner:
             # Not in a combat decision phase: drop the cache so re-entering combat refetches.
             self._solver_plan_sig = None
             self._solver_plan_cached = None
-        # 若当前这步是"选牌消耗"卡的出牌（如升级版坚毅），solver 已选好该烧哪张（exhaust_card_id）。
-        # 只在战斗决策态设置；非战斗决策态（含 combat_hand_select）不清空，让选牌分支拿到它。
+        # 若当前这步是需要"选一张牌"的动作（消耗/拉弃牌堆/生成到手/变换等），solver 已选好那张
+        # （choice_card_id）。只在战斗决策态设置；非战斗决策态（含选牌界面）不清空，让选牌分支拿到它。
         if in_combat_decision:
-            pending_exhaust: str | None = None
+            pending_choice: str | None = None
             line = solver_plan.get("line") if isinstance(solver_plan, dict) else None
             if isinstance(line, list) and line and isinstance(line[0], dict):
                 steps = line[0].get("steps") if isinstance(line[0].get("steps"), list) else []
                 if steps and isinstance(steps[0], dict):
                     step0 = steps[0]
-                    if step0.get("kind") == "play_card" and step0.get("exhaust_card_id"):
-                        pending_exhaust = str(step0.get("exhaust_card_id"))
-            self._service._state.pending_card_exhaust_id = pending_exhaust
+                    if step0.get("choice_card_id"):
+                        pending_choice = str(step0.get("choice_card_id"))
+            self._service._state.pending_card_choice_id = pending_choice
         # Event-room LLM advice (per-option scores) for heuristic fusion. plan() is sync and the LLM
         # is async, so fetch here (async tick) and inject into the contexts it reads. Cache by
         # event-state signature so the LLM is not re-consulted while the event options are unchanged.
@@ -226,7 +226,7 @@ class STS2LoopRunner:
             "solver_plan": solver_plan,
             "event_llm_scores": event_llm_scores,
             "event_llm_weight": event_llm_weight,
-            "pending_card_exhaust_id": self._service._state.pending_card_exhaust_id,
+            "pending_card_choice_id": self._service._state.pending_card_choice_id,
         }
         planned_operation = self._service._planner.plan(planning_context) if mode_info.get("allows_planner") else None
         planned_operation_dict = planned_operation.as_dict() if planned_operation is not None else None
