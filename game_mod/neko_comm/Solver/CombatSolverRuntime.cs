@@ -1,7 +1,8 @@
 // Runtime installer for the vendored CombatSolver brain. Called from NekoComm.ModEntry.Initialize().
-// RitsuLib is NOT used: the two isolation patches are plain Harmony and registered here; the direct private
-// game-access is routed through GameRef (reflection) so it runs without runtime publicization. Recommendation
-// only — never deploys.
+// RitsuLib is referenced for card-effect fidelity APIs (HarmonyIl / GetMaxHandSize / IComputedDynamicVar) but is
+// NOT runtime-publicizing for a mods/-dir mod, so the engine's DIRECT private game member access is routed
+// through GameRef (reflection). The two isolation patches are plain Harmony and registered here via PatchAll.
+// Recommendation only — never deploys.
 using System;
 using HarmonyLib;
 

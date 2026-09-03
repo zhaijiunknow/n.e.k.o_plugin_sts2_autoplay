@@ -20,10 +20,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Compile-time publicization of sts2 so the vendored 0.28 engine can access private game members
-         directly (matches upstream CombatSolver; no runtime GameRef needed for the engine). -->
-    <PackageReference Include="Krafs.Publicizer" Version="2.3.0" PrivateAssets="all" />
-    <Publicize Include="sts2" IncludeVirtualMembers="false" IncludeCompilerGeneratedMembers="false" />
     <Reference Include="sts2">
       <HintPath>$(Sts2DataDir)/sts2.dll</HintPath>
       <Private>false</Private>

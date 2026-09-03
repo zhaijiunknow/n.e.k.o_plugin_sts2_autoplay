@@ -232,3 +232,49 @@ internal sealed record SolverProgress(
     SolverCurrentTurnPreview? CurrentTurnPreview = null,
     SolverSpeculativeRoutePreview? SpeculativeRoutePreview = null,
     SolverRouteAdoptionSeed? RouteAdoptionSeed = null);
+
+// SearchProgressDisplayState is declared upstream inside src/Runtime/SolverControllerSessions.cs (a
+// controller-subsystem file we do NOT vendor wholesale). SolverProgress references it, so the type is lifted
+// here alone. It depends only on vendored types SolverProgress and SolverWeights.
+internal sealed class SearchProgressDisplayState(long startedAtTick)
+{
+    public SearchProgressDisplayState() : this(Environment.TickCount64)
+    {
+    }
+
+    public long StartedAtTick { get; private set; } = startedAtTick;
+    public long LastRenderAtTick { get; private set; } = startedAtTick;
+    public SolverProgress? RenderedProgress { get; private set; }
+
+    public void Restart(long nowTick)
+    {
+        StartedAtTick = nowTick;
+        LastRenderAtTick = nowTick;
+        RenderedProgress = null;
+    }
+
+    public bool TryCreate(
+        SolverProgress? progress,
+        long nowTick,
+        out SolverProgress displayProgress)
+    {
+        if (progress == null
+            || nowTick - LastRenderAtTick < SolverWeights.ProgressUiIntervalMilliseconds)
+        {
+            displayProgress = null!;
+            return false;
+        }
+
+        long elapsedMilliseconds = Math.Max(
+            progress.ElapsedMilliseconds,
+            Math.Max(
+                RenderedProgress?.ElapsedMilliseconds ?? 0L,
+                Math.Max(0L, nowTick - StartedAtTick)));
+        displayProgress = elapsedMilliseconds == progress.ElapsedMilliseconds
+            ? progress
+            : progress with { ElapsedMilliseconds = elapsedMilliseconds };
+        LastRenderAtTick = nowTick;
+        RenderedProgress = displayProgress;
+        return true;
+    }
+}
