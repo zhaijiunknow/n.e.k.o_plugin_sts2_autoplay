@@ -125,7 +125,7 @@ class STS2AutoplayService:
                 pass
             companion_enabled = bool(self._cfg.get("companion_mode_enabled", self._cfg.get("neko_commentary_enabled", True)))
             if companion_enabled:
-                self.set_companion_mode(True, emit_status=False)
+                self.set_companion_mode(True, emit_status=False, push_message=False)
                 startup_result["companion_mode_enabled"] = True
             else:
                 self._sync_background_polling()
@@ -455,7 +455,7 @@ class STS2AutoplayService:
         normalized = self._apply_control_mode("standby" if standby else "program")
         return self._mode_controller.describe(normalized) | {"mode": normalized}
 
-    def set_companion_mode(self, enabled: bool, *, emit_status: bool = True) -> dict[str, Any]:
+    def set_companion_mode(self, enabled: bool, *, emit_status: bool = True, push_message: bool = True) -> dict[str, Any]:
         if not enabled and self._loop_runner.is_polling() and not self._loop_runner.is_autoplaying() and hasattr(self.logger, "info"):
             try:
                 self.logger.info("[sts2_companion] disabling companion while polling active; keeping state refresh path quiet during teardown")
@@ -477,7 +477,8 @@ class STS2AutoplayService:
             self._emit_status()
         if enabled:
             self._sync_background_polling()
-            self._push_companion_message()
+            if push_message:
+                self._push_companion_message()
         else:
             self._sync_background_polling()
         return {

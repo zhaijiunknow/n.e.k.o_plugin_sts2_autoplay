@@ -503,7 +503,11 @@ class STS2LoopRunner:
         for task in (self._autoplay_task, self._poll_task, self._event_task):
             if task is None or task.done():
                 continue
-            task.cancel()
+            try:
+                task.cancel()
+            except RuntimeError:
+                # 事件循环已被关闭（shutdown 撞上 NEKO 超时强杀时会出现），忽略。
+                pass
         self._autoplay_task = None
         self._poll_task = None
         self._event_task = None
