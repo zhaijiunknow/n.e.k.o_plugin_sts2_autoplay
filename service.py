@@ -112,6 +112,13 @@ class STS2AutoplayService:
 
         try:
             await self.health_check()
+            # The plugin drives the catgirl's decision screens, so disable the mod's own LLM so it defers
+            # to this plugin instead of its own OpenAI-compatible LLM (the mod's /solver/plan stays on).
+            if self._client is not None:
+                try:
+                    await self._client.set_config(llm_enabled=False)
+                except Exception as _llm_exc:
+                    self.logger.debug(f"[sts2] disabling mod LLM on connect failed (non-fatal): {_llm_exc}")
             companion_enabled = bool(self._cfg.get("companion_mode_enabled", self._cfg.get("neko_commentary_enabled", True)))
             if companion_enabled:
                 self.set_companion_mode(True)

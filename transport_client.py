@@ -112,6 +112,14 @@ class STS2TransportClient:
             payload["avatar"] = avatar
         return await self._request("POST", "/danmaku", json=payload)
 
+    async def set_config(self, **fields: Any) -> Dict[str, Any]:
+        """Write the mod's config (POST /config). Only the fields provided are applied.
+
+        When the plugin drives the catgirl, call ``set_config(llm_enabled=False)`` so the mod defers its
+        MAP/reward/deck/event decision screens to this plugin instead of its own LLM.
+        """
+        return await self._request("POST", "/config", json=fields)
+
     def _build_action_payload(self, action_name: str, **kwargs: Any) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"action": action_name}
         for key, value in kwargs.items():

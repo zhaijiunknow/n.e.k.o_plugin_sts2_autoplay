@@ -223,6 +223,44 @@ internal static class Router
                 return;
             }
 
+            if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/config")
+            {
+                // The NEKO plugin drives the mod by switching its own LLM off: POST /config with
+                // llm_enabled=false (plus any other config fields) so the mod defers MAP/reward/deck/event
+                // decisions to the plugin driver instead of its own OpenAI-compatible LLM. Only the fields
+                // the request provides are applied; the api_key is written but never echoed back.
+                var cfgWrite = await JsonHelper.DeserializeAsync<ConfigWriteRequest>(request.InputStream, cancellationToken);
+                if (cfgWrite == null)
+                    throw new ApiException(400, "invalid_request", "Request body must be a JSON object.");
+
+                var cfg = NekoConfig.Current;
+                cfg.llm_enabled = cfgWrite.llm_enabled ?? cfg.llm_enabled;
+                cfg.danmaku_enabled = cfgWrite.danmaku_enabled ?? cfg.danmaku_enabled;
+                cfg.coop_enabled = cfgWrite.coop_enabled ?? cfg.coop_enabled;
+                cfg.coop_client_port = cfgWrite.coop_client_port ?? cfg.coop_client_port;
+                cfg.llm_base_url = cfgWrite.llm_base_url ?? cfg.llm_base_url;
+                cfg.llm_model = cfgWrite.llm_model ?? cfg.llm_model;
+                cfg.llm_api_key = cfgWrite.llm_api_key ?? cfg.llm_api_key;
+                cfg.llm_max_tokens = cfgWrite.llm_max_tokens ?? cfg.llm_max_tokens;
+                cfg.Save();
+
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = new
+                    {
+                        status = "updated",
+                        llm_enabled = cfg.llm_enabled,
+                        llm_model = cfg.llm_model,
+                        llm_base_url = cfg.llm_base_url,
+                    }
+                });
+                statusCode = 200;
+                return;
+            }
+
             statusCode = 404;
             await WriteErrorAsync(response, statusCode, "not_found", "Route not found.", requestId);
         }
@@ -369,4 +407,19 @@ internal static class Router
         return response.OutputStream.WriteAsync(bytes);
     }
 }
+
+/// <summary>
+/// Write request for POST /config. Only the fields present (nullable) are applied to
+/// <see cref="NekoComm.Game.NekoConfig"/>; the NEKO plugin sends { "llm_enabled": false } to hand the
+/// MAP/reward/deck/event decision screens to the plugin driver instead of the mod's own LLM.
+/// </summary>
+internal sealed record ConfigWriteRequest(
+    bool? llm_enabled,
+    bool? danmaku_enabled,
+    bool? coop_enabled,
+    int? coop_client_port,
+    string? llm_base_url,
+    string? llm_model,
+    string? llm_api_key,
+    int? llm_max_tokens);
 
