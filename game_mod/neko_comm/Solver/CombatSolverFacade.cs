@@ -31,25 +31,14 @@ internal static class CombatSolverFacade
         bool includeTurnSetup;
         try
         {
-            // Prefer the Start-phase snapshot captured at the last turn-start transition: searching there can use
-            // IncludeTurnSetup=true and reproduce the standalone solver's turn-setup-seeded killing line. Fall back
-            // to a live Play-phase capture (includeTurnSetup=false) when no valid Start snapshot is held — the
-            // latter keeps the pre-existing behaviour, so an absent/missed Start capture degrades gracefully.
-            CombatRootSnapshot? startRoot = TurnSetupRootHolder.TryGetStartSnapshot(me);
-            if (startRoot != null)
-            {
-                root = startRoot;
-                includeTurnSetup = true;
-                Entry.Logger?.Info(
-                    $"[CombatSolver/Test] SOLVED_FROM_START_SNAPSHOT turn={me.PlayerCombatState?.TurnNumber}");
-            }
-            else
-            {
-                root = CombatRootSnapshot.Capture(state);
-                includeTurnSetup = false;
-                if (!ReferenceEquals(root.PlayerIdentity, me))
-                    return Failed("solver_failed", "捕获的玩家与本地玩家不一致。");
-            }
+            // Always capture the LIVE Play-phase combat state (the current turn's real hand), so the line's
+            // current turn and card_index are grounded to the actual hand. The turn-setup Start-phase snapshot
+            // path was a diagnostic addition and caused stale-snapshot / live-hand mismatches; the 0.28 engine
+            // grounds the current turn from a Play-phase root on its own, so Start+IncludeTurnSetup is not needed.
+            root = CombatRootSnapshot.Capture(state);
+            includeTurnSetup = false;
+            if (!ReferenceEquals(root.PlayerIdentity, me))
+                return Failed("solver_failed", "捕获的玩家与本地玩家不一致。");
             names = SolverDisplayNames.Capture(state);
             damage = BattleDamageTracker.Observe(state);
         }
@@ -145,12 +134,9 @@ internal static class CombatSolverFacade
             // when set to 3s, hid the winning line.
             ShortBudgetOverrideMilliseconds: null,
             DeepBudgetOverrideMilliseconds: null,
-            // IncludeTurnSetup must match the captured root's phase: true only when solving from a Start-phase
-            // snapshot (TurnSetupRootHolder). The facade cannot use true on a live Play-phase root — CombatBeamSolver
-            // would throw — so this flag is false for the plain Play-phase capture fallback. The killing line here
-            // does not need turn-setup cards but does need the Start-phase seeding (enemy weak turns / retained
-            // attack / persistent buff / strength suppression) to model the boss's sleep window, which is what the
-            // Start snapshot provides.
+            // The facade captures a live Play-phase root, so IncludeTurnSetup must be false — CombatBeamSolver
+            // would throw "回合准备选牌搜索只能在玩家回合准备阶段计算" if true on a Play-phase root. The 0.28 engine
+            // grounds the current turn to the real hand from a Play-phase root, so turn-setup seeding is not needed.
             IncludeTurnSetup: includeTurnSetup,
             TheftPolicy: null,
             ActTransitionBossHpStrategy: BossHpStrategy.ProgressionFirst,
