@@ -1272,8 +1272,32 @@ class STS2AutoplayService:
             except Exception:
                 pass
             return
-        # catgirl 点评 → 游戏内弹幕（mod /danmaku）。节流/开关在 _maybe_emit_catgirl_llm 内部；
-        # 不再有社区旁白（narration）轨道与外部 overlay 显示。
+        # 先做指纹/间隔去重，再进入点评 —— 防刷屏统一由 _should_deliver_sync 把关。
+        # 否则点评(弹幕)不受节流控制，同一 fingerp指/场景反复刷屏。
+        if not self._should_deliver_sync(catgirl_sync):
+            if str(companion_evaluation.get("trigger") or payload.get("trigger") or "") == "combat_turn":
+                try:
+                    self.logger.info(
+                        "[sts2_combat_turn_path] return=should_deliver_sync_false turn_key=%s last_turn_key=%s fingerprint=%s",
+                        companion_evaluation.get("turn_key"),
+                        self._state.last_companion_turn_key,
+                        catgirl_sync.get("fingerprint"),
+                    )
+                except Exception:
+                    pass
+            print("[sts2_companion_sync:skip] reason=dedup_or_interval_gate")
+            try:
+                self.logger.info(
+                    "[sts2_push_debug] deliver_catgirl_sync skipped: _should_deliver_sync false fingerprint=%s last_fingerprint=%s last_sync_at=%s repeat_count=%s",
+                    catgirl_sync.get("fingerprint"),
+                    self._state.last_sync_fingerprint,
+                    self._state.last_sync_at,
+                    self._state.sync_repeat_count,
+                )
+            except Exception:
+                pass
+            return
+        # catgirl 点评 → 游戏内弹幕（mod /danmaku）。防刷屏由上方 _should_deliver_sync 把关。
         self._maybe_emit_catgirl_llm(snapshot, companion_evaluation, payload)
         if companion_evaluation:
             if str(companion_evaluation.get("trigger") or "") == "combat_turn":
@@ -1323,29 +1347,6 @@ class STS2AutoplayService:
                 except Exception:
                     pass
                 return
-        if not self._should_deliver_sync(catgirl_sync):
-            if str(companion_evaluation.get("trigger") or payload.get("trigger") or "") == "combat_turn":
-                try:
-                    self.logger.info(
-                        "[sts2_combat_turn_path] return=should_deliver_sync_false turn_key=%s last_turn_key=%s fingerprint=%s",
-                        companion_evaluation.get("turn_key"),
-                        self._state.last_companion_turn_key,
-                        catgirl_sync.get("fingerprint"),
-                    )
-                except Exception:
-                    pass
-            print("[sts2_companion_sync:skip] reason=dedup_or_interval_gate")
-            try:
-                self.logger.info(
-                    "[sts2_push_debug] deliver_catgirl_sync skipped: _should_deliver_sync false fingerprint=%s last_fingerprint=%s last_sync_at=%s repeat_count=%s",
-                    catgirl_sync.get("fingerprint"),
-                    self._state.last_sync_fingerprint,
-                    self._state.last_sync_at,
-                    self._state.sync_repeat_count,
-                )
-            except Exception:
-                pass
-            return
         if not bool(catgirl_sync.get("force")) and not self._should_allow_push_by_probability(companion_mode=self._companion_mode_active()):
             try:
                 self.logger.info(

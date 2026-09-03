@@ -323,8 +323,15 @@ async def test_execute_operation_seeds_action_frame_before_refresh(monkeypatch: 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_refresh_state_attaches_player_operation_observation_and_delivers_sync(monkeypatch: pytest.MonkeyPatch) -> None:
-    delivered: list[dict] = []
-    service = STS2AutoplayService(DummyLogger(), lambda payload: None, lambda **kwargs: delivered.append(kwargs))
+    calls: list[str] = []
+    # 点评已改走 /danmaku（_maybe_emit_catgirl_llm 是真实推送入口），不再经 frontend_notifier。
+    # 这里用 spy 观测点评入口被触发的次数。
+    service = STS2AutoplayService(DummyLogger(), lambda payload: None)
+
+    def _spy(snapshot, companion_evaluation, payload):
+        calls.append(str(payload.get("summary_kind") or ""))
+
+    service._maybe_emit_catgirl_llm = _spy  # type: ignore[method-assign]
     service._cfg["companion_mode_enabled"] = True
     service._cfg["neko_commentary_enabled"] = True
     service._cfg["neko_reporting_enabled"] = True
@@ -380,4 +387,4 @@ async def test_refresh_state_attaches_player_operation_observation_and_delivers_
 
     observation = result["snapshot"].get("player_operation_observation")
     assert observation is None
-    assert delivered
+    assert calls  # 事件屏 catgirl_sync(force=True, should_comment=True) 应触发点评

@@ -67,7 +67,7 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
     entries = collect_entries()
     entry_ids = {entry_id for entry_id, _ in entries}
 
-    assert len(entries) == 13
+    assert len(entries) == 14
     assert entry_ids == {
         "sts2_health_check",
         "sts2_read_state",
@@ -79,6 +79,7 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
         "sts2_stop_autoplay",
         "sts2_enable_companion_mode",
         "sts2_disable_companion_mode",
+        "sts2_open_coop_room",
         "sts2_get_planned_operation",
         "sts2_execute_planned_operation",
         "sts2_apply_user_override",

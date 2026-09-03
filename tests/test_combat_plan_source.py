@@ -50,12 +50,23 @@ class CombatPlanSourceTests(unittest.TestCase):
             "state_fingerprint": "abc123",
             "line": [{"turn": 1, "steps": [{"kind": "play_card", "card_index": 1, "card_id": "STRIKE", "target_index": 0}]}],
         }
-        context = _combat_context(solver_plan, _combat_snapshot())
+        # 手牌里给一张可打出的 STRIKE，使 _resolve_solver_card_index 按 card_id 映射回手牌枚举位置。
+        # 注意：_resolve_solver_card_index 返回的是手牌枚举位置（从0数），不是卡上自带的 index 字段。
+        snapshot = _combat_snapshot(
+            raw_state={
+                "combat": {"player": {"energy": 3, "block": 0}, "enemies": [], "hand": [
+                    {"card_id": "STRIKE", "index": 1, "playable": True},
+                ]},
+                "run": {"potions": []},
+            }
+        )
+        context = _combat_context(solver_plan, snapshot)
         result = self._planner.plan(context)
 
         self.assertIsInstance(result, PlannedOperation)
         self.assertEqual(result.action_type, "play_card")
-        self.assertEqual(result.kwargs, {"card_index": 1, "target_index": 0})
+        # STRIKE 在手牌枚举位置 0（尽管卡上 index 字段标 1），故 card_index 应为 0。
+        self.assertEqual(result.kwargs, {"card_index": 0, "target_index": 0})
         self.assertEqual(result.source, "mod_solver")
 
     def test_maps_use_potion_to_option_index(self) -> None:
@@ -122,15 +133,17 @@ class CombatPlanSignatureTests(unittest.TestCase):
         snapshot = _combat_snapshot()
         self.assertEqual(_combat_plan_signature(snapshot), _combat_plan_signature(snapshot))
 
-    def test_signature_changes_when_combat_state_changes(self) -> None:
-        a = _combat_snapshot()
-        b = _combat_snapshot(raw_state={"combat": {"player": {"energy": 0}, "hand": [], "enemies": []}, "run": {"potions": []}})
+    def test_signature_changes_when_turn_changes(self) -> None:
+        # 整回合缓存：签名只按 run_id + turn。换 turn 应变化。
+        a = _combat_snapshot(raw_state={"run_id": "r1", "turn": 1})
+        b = _combat_snapshot(raw_state={"run_id": "r1", "turn": 2})
         self.assertNotEqual(_combat_plan_signature(a), _combat_plan_signature(b))
 
-    def test_signature_changes_when_potions_change(self) -> None:
-        a = _combat_snapshot(raw_state={"combat": {"player": {"energy": 3}, "hand": [], "enemies": []}, "run": {"potions": [{"potion_id": "X", "index": 1, "can_use": True}]}})
-        b = _combat_snapshot(raw_state={"combat": {"player": {"energy": 3}, "hand": [], "enemies": []}, "run": {"potions": []}})
-        self.assertNotEqual(_combat_plan_signature(a), _combat_plan_signature(b))
+    def test_signature_stable_within_same_turn(self) -> None:
+        # 同一 run_id + turn 内，即使手牌/药水等局面细节变化，签名也应保持稳定（整回合缓存、不重查）。
+        a = _combat_snapshot(raw_state={"run_id": "r1", "turn": 1, "combat": {"player": {"energy": 3}, "hand": [], "enemies": []}, "run": {"potions": []}})
+        b = _combat_snapshot(raw_state={"run_id": "r1", "turn": 1, "combat": {"player": {"energy": 0}, "hand": [], "enemies": []}, "run": {"potions": [{"potion_id": "X", "index": 1, "can_use": True}]}})
+        self.assertEqual(_combat_plan_signature(a), _combat_plan_signature(b))
 
 
 if __name__ == "__main__":

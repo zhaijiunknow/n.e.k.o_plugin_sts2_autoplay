@@ -326,13 +326,20 @@ def test_service_probability_gate_skips_non_forced_companion_push(monkeypatch: p
 
 @pytest.mark.unit
 def test_service_throttles_duplicate_companion_sync_pushes() -> None:
-    messages: list[dict] = []
-    service = STS2AutoplayService(DummyLogger(), lambda payload: None, lambda **kwargs: messages.append(kwargs))
+    # 点评已改走 /danmaku（_maybe_emit_catgirl_llm 是真实推送入口），不再经 frontend_notifier。
+    # 这里验证「同 fingerprint + min_interval 内」的节流：第一次触发点评，第二次被挡不触发。
+    calls: list[str] = []
+    service = STS2AutoplayService(DummyLogger(), lambda payload: None)
     service._cfg["companion_mode_enabled"] = True
     service._cfg["neko_commentary_enabled"] = True
     service._cfg["companion_push_probability"] = 1.0
     service._cfg["autoplay_push_probability"] = 1.0
     service._state.step_count = 3
+
+    def _spy(snapshot, companion_evaluation, payload):
+        calls.append(str(payload.get("summary_kind") or ""))
+
+    service._maybe_emit_catgirl_llm = _spy  # type: ignore[method-assign]
 
     snapshot = {
         "catgirl_sync": {
@@ -356,4 +363,4 @@ def test_service_throttles_duplicate_companion_sync_pushes() -> None:
     service._state.step_count = 4
     service._deliver_catgirl_sync(snapshot)
 
-    assert len(messages) == 1
+    assert len(calls) == 1  # 第一次触发点评，第二次被 _should_deliver_sync 节流挡掉
