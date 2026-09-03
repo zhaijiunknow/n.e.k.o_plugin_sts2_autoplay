@@ -116,6 +116,11 @@ class STS2HeuristicPlanner:
                 )
                 kwargs = self._reward_kwargs(summary_context, action, preferred_option)
                 return PlannedOperation(action_type=action["type"], kwargs=kwargs, confidence=0.72, source="heuristic", reason="reward_preference_or_default")
+            # 奖励已领完（rewards/card_options 为空、can_proceed=true）-> 发「继续/前往地图」动作推进到下一屏。
+            proceed = (self._find_action(available_actions, "collect_rewards_and_proceed")
+                       or self._find_action(available_actions, "resolve_rewards"))
+            if proceed is not None:
+                return PlannedOperation(action_type=proceed["type"], kwargs={}, confidence=0.85, source="heuristic", reason="reward_proceed_to_map")
 
         # plain "card_selection" 覆盖战斗内选牌（如「坚毅」烧牌 / combat_hand_select）与菜单卡牌选择；
         # reward 类走上面的 reward 分支（那里找 choose_reward_card/claim_reward，这里没有才落到 select_deck_card）。
