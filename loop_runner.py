@@ -429,6 +429,11 @@ class STS2LoopRunner:
                         self._event_backoff = 1.0
                         self._mark_sse_connected(True)
                         await self._maybe_event_refresh(force=True)
+                        # 连接上 mod 后把其自身 LLM/弹幕交给本插件（mod 可能晚于插件启动），失败静默。
+                        try:
+                            await self._service._require_client().set_config(llm_enabled=False, danmaku_enabled=False)
+                        except Exception:
+                            pass
                         continue
                     if event_type in self._RELEVANT_EVENT_TYPES:
                         await self._maybe_event_refresh(force=False)

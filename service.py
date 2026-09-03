@@ -111,35 +111,30 @@ class STS2AutoplayService:
         startup_result = {"connected": False, "companion_mode_enabled": False}
 
         try:
-            # 限时：mod 未起/网络慢时 health_check 的连接重试可能拖到 ~10s，撞 NEKO 启动超时被杀。
-            # 这里 3s 内失败即快速返回（mod 正常时 /health 一瞬即回）；断连状态记录在 state，按需读取。
-            await asyncio.wait_for(self.health_check(), timeout=3.0)
-            # The plugin drives the catgirl's decision screens and commentary, so disable the mod's own LLM
-            # and danmaku so it defers to this plugin instead of its own OpenAI-compatible LLM / in-game
-            # danmaku overlay (the mod's /solver/plan stays on).
-            if self._client is not None:
-                try:
-                    await self._client.set_config(llm_enabled=False, danmaku_enabled=False)
-                except Exception as _llm_exc:
-                    self.logger.debug(f"[sts2] disabling mod LLM/danmaku on connect failed (non-fatal): {_llm_exc}")
+            # 启动不阻塞、不等 mod：尽力 health 一次(限时)，成功则标记 connected + 顺手禁用 mod 自身
+            # LLM/弹幕；失败**不提前 return**，由后台事件循环在 mod 上线时自动重连并禁用其 LLM/弹幕。
+            try:
+                await asyncio.wait_for(self.health_check(), timeout=3.0)
+                startup_result["connected"] = True
+                if self._client is not None:
+                    try:
+                        await self._client.set_config(llm_enabled=False, danmaku_enabled=False)
+                    except Exception as _llm_exc:
+                        self.logger.debug(f"[sts2] disabling mod LLM/danmaku on connect failed (non-fatal): {_llm_exc}")
+            except Exception:
+                pass
             companion_enabled = bool(self._cfg.get("companion_mode_enabled", self._cfg.get("neko_commentary_enabled", True)))
             if companion_enabled:
                 self.set_companion_mode(True, emit_status=False)
                 startup_result["companion_mode_enabled"] = True
-                # 初次状态刷新交给后台事件循环（stream_ready 会 force refresh），避免启动同步等待
-                # /solver/plan 等慢查询——否则会撞 NEKO 的 10s 启动超时被强杀。
             else:
                 self._sync_background_polling()
-                await self.refresh_state(trigger_sync=True)
-            startup_result["connected"] = True
             if bool(self._cfg.get("autoplay_on_start", False)) and not self._state.standby:
                 self.start_autoplay()
         except Exception as exc:
             self._state.transport_state = "disconnected"
             self._state.last_error = str(exc)
             self._state.consecutive_errors += 1
-            # 启动失败不推状态包（避免 ZMQ 上行卡住；状态仍在 state，可 get_status 读）。
-            return startup_result
         return startup_result
 
     def _resolve_base_url(self) -> str:
