@@ -111,7 +111,9 @@ class STS2AutoplayService:
         startup_result = {"connected": False, "companion_mode_enabled": False}
 
         try:
-            await self.health_check()
+            # 限时：mod 未起/网络慢时 health_check 的连接重试可能拖到 ~10s，撞 NEKO 启动超时被杀。
+            # 这里 3s 内失败即快速返回（mod 正常时 /health 一瞬即回）；断连状态记录在 state，按需读取。
+            await asyncio.wait_for(self.health_check(), timeout=3.0)
             # The plugin drives the catgirl's decision screens and commentary, so disable the mod's own LLM
             # and danmaku so it defers to this plugin instead of its own OpenAI-compatible LLM / in-game
             # danmaku overlay (the mod's /solver/plan stays on).
@@ -136,7 +138,7 @@ class STS2AutoplayService:
             self._state.transport_state = "disconnected"
             self._state.last_error = str(exc)
             self._state.consecutive_errors += 1
-            self._emit_status()
+            # 启动失败不推状态包（避免 ZMQ 上行卡住；状态仍在 state，可 get_status 读）。
             return startup_result
         return startup_result
 
