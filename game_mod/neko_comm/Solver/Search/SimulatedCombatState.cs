@@ -1618,7 +1618,7 @@ internal sealed partial class SimulatedCombatState
         {
             listeners.AddRange(creature.Powers);
             if (creature.Monster != null)
-                listeners.Add(creature.Monster);
+                listeners.AddRange(creature.Monster);
         }
         CombatPredictionState predictionState = _predictionState
             ?? throw new InvalidOperationException("Combat prediction state is not attached.");

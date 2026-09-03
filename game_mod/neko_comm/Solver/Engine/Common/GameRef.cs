@@ -31,7 +31,17 @@ internal static class GameRef
     }
 
     public static T Get<T>(object target, string memberName)
-        => (T)Get(target, memberName);
+    {
+        object value = Get(target, memberName);
+        if (value is T typed)
+            return typed;
+        // The game's private members are decimal-valued in places; vendored callers often read them via a
+        // narrower requested type (e.g. int for a decimal card value). Convert rather than throw, so a type
+        // mismatch never crashes the search. Integer-valued decimals convert exactly.
+        if (value == null)
+            return default!;
+        return (T)Convert.ChangeType(value, typeof(T));
+    }
 
     public static void Set(object target, string memberName, object? value)
     {
@@ -103,7 +113,14 @@ internal static class GameRef
     }
 
     public static T GetStatic<T>(Type declaringType, string memberName)
-        => (T)GetStatic(declaringType, memberName);
+    {
+        object value = GetStatic(declaringType, memberName);
+        if (value is T typed)
+            return typed;
+        if (value == null)
+            return default!;
+        return (T)Convert.ChangeType(value, typeof(T));
+    }
 
     // ---- method invocation (instance + static, incl. private) ----------------
     public static object? Invoke(object target, string methodName, params object?[] args)

@@ -54,9 +54,9 @@ internal static class ModifyBlockMultiplicativeMirrors
         MultiplayerScalingModel _,
         ModifyBlockMultiplicativeMirrorContext context)
     {
-        // Co-op: the engine only models a single player, but block cards still route through this
-        // multiplier mirror. Resolve as a solo ×1 instead of throwing so a co-op client can search its
-        // own hand. Plans are a single-player approximation (co-op-specific block scaling is ignored).
+        int playerCount = context.State.CombatState.Players.Count;
+        if (playerCount != 1)
+            throw new NotSupportedException($"CombatSolver only supports single-player combat, found {playerCount} players.");
         return 1m;
     }
 

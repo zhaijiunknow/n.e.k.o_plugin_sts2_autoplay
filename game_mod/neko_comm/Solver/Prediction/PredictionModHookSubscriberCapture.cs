@@ -5,6 +5,7 @@ using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
 using CombatSolver.Engine.Common;
+using STS2RitsuLib;
 
 namespace CombatSolver;
 
@@ -59,10 +60,9 @@ internal sealed class PredictionModHookSubscriberCapture
         Dictionary<Player, int> maxHandSizes = [];
         foreach (Player player in combat.Players)
         {
-            // No RitsuLib in the vendored build: the base game hand size is a fixed default (5).
-            int maxHandSize = 5;
+            int maxHandSize = RitsuLibFramework.GetMaxHandSize(player);
             if (maxHandSize < 0)
-                throw new InvalidOperationException($"Unexpected max hand size {maxHandSize}.");
+                throw new InvalidOperationException($"RitsuLib returned max hand size {maxHandSize}.");
             maxHandSizes.Add(player, maxHandSize);
         }
 

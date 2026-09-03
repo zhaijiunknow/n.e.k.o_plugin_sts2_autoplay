@@ -218,7 +218,7 @@ internal static class AfterCardDrawnMirrors
             var previewCard = (KinglyPunch)context.MutablePreviewCard;
             var damageIncrease = previewCard.DynamicVars[GameRef.GetStatic<string>(typeof(KinglyPunch), "_increaseKey")].BaseValue;
             previewCard.DynamicVars.Damage.BaseValue += damageIncrease;
-            GameRef.Set(previewCard, "ExtraDamage", GameRef.Get<int>(previewCard, "ExtraDamage") + damageIncrease);
+            GameRef.Set(previewCard, "ExtraDamage", GameRef.Get<decimal>(previewCard, "ExtraDamage") + damageIncrease);
         }
     }
 

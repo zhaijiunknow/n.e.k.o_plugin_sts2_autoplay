@@ -1,5 +1,4 @@
 using MegaCrit.Sts2.Core.Combat;
-using MegaCrit.Sts2.Core.Combat.History;
 using MegaCrit.Sts2.Core.Combat.History.Entries;
 using MegaCrit.Sts2.Core.Entities.Players;
 
@@ -28,8 +27,7 @@ internal static class BattleDamageTracker
         _combat = combat;
         _lastObservedHp = GetSinglePlayer(combat)?.Creature.CurrentHp;
         _potionHistoryCountAtStart = CountPotionHistoryEntries();
-        _historyEntryCountAtLastObservation = (CombatManager.Instance?.History?.Entries
-            ?? System.Linq.Enumerable.Empty<CombatHistoryEntry>()).Count();
+        _historyEntryCountAtLastObservation = CombatManager.Instance.History.Entries.Count();
         Entry.Logger.Info($"[CombatSolver/Test] BATTLE_DAMAGE_RESET start_hp={_lastObservedHp?.ToString() ?? "-"}");
     }
 
@@ -43,8 +41,7 @@ internal static class BattleDamageTracker
             return new BattleDamageSnapshot(_hpLostSoFar, _soldHpCommitted, PotionsUsedSoFar());
 
         int currentHp = player.Creature.CurrentHp;
-        var historyEntries = CombatManager.Instance?.History?.Entries
-            ?? System.Linq.Enumerable.Empty<CombatHistoryEntry>();
+        var historyEntries = CombatManager.Instance.History.Entries;
         int historyHpLost = historyEntries
             .Skip(_historyEntryCountAtLastObservation)
             .OfType<DamageReceivedEntry>()
@@ -102,8 +99,7 @@ internal static class BattleDamageTracker
         => Math.Max(0, CountPotionHistoryEntries() - _potionHistoryCountAtStart);
 
     private static int CountPotionHistoryEntries()
-        => (CombatManager.Instance?.History?.Entries
-            ?? System.Linq.Enumerable.Empty<CombatHistoryEntry>()).OfType<PotionUsedEntry>().Count();
+        => CombatManager.Instance.History.Entries.OfType<PotionUsedEntry>().Count();
 
     private static void ClearPlan()
     {

@@ -2,6 +2,7 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using CombatSolver.Engine.Common;
+using STS2RitsuLib.Cards.DynamicVars;
 
 namespace CombatSolver.Engine.InCombat.Simulation;
 
@@ -25,6 +26,8 @@ internal static class CombatPredictionDynamicVarExtensions
         {
             CalculatedVar calculatedVar =>
                 calculatedVar.InvokeCalculate(simulator, card, target),
+            IComputedDynamicVar computedDynamicVar =>
+                computedDynamicVar.InvokeCalculate(simulator, card, target),
             _ => dynamicVar.BaseValue
         };
     }
@@ -43,4 +46,16 @@ internal static class CombatPredictionDynamicVarExtensions
             $"Card {card.Preview.Id.Entry} has no branch-local calculated variable specification.");
     }
 
+    public static decimal InvokeCalculate(
+        this IComputedDynamicVar computedDynamicVar,
+        CombatPredictionSimulator simulator,
+        PredictedCard card,
+        Creature? target)
+    {
+        using var _ = simulator.PushActionSource(card.Original, PredictionActionKind.DynamicVariableCalculation);
+        simulator.History.RecordRisk(PredictionRiskReason.MethodMirrorIncomplete);
+        throw new PredictionUnsupportedException(
+            $"Card {card.Preview.Id.Entry} uses computed dynamic variable " +
+            $"{computedDynamicVar.GetType().FullName}, which has no branch-local calculation mirror.");
+    }
 }

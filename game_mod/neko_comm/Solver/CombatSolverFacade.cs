@@ -28,11 +28,28 @@ internal static class CombatSolverFacade
         CombatRootSnapshot root;
         SolverDisplayNames names;
         BattleDamageSnapshot damage;
+        bool includeTurnSetup;
         try
         {
-            root = CombatRootSnapshot.Capture(state);
-            if (!ReferenceEquals(root.PlayerIdentity, me))
-                return Failed("solver_failed", "捕获的玩家与本地玩家不一致。");
+            // Prefer the Start-phase snapshot captured at the last turn-start transition: searching there can use
+            // IncludeTurnSetup=true and reproduce the standalone solver's turn-setup-seeded killing line. Fall back
+            // to a live Play-phase capture (includeTurnSetup=false) when no valid Start snapshot is held — the
+            // latter keeps the pre-existing behaviour, so an absent/missed Start capture degrades gracefully.
+            CombatRootSnapshot? startRoot = TurnSetupRootHolder.TryGetStartSnapshot(me);
+            if (startRoot != null)
+            {
+                root = startRoot;
+                includeTurnSetup = true;
+                Entry.Logger?.Info(
+                    $"[CombatSolver/Test] SOLVED_FROM_START_SNAPSHOT turn={me.PlayerCombatState?.TurnNumber}");
+            }
+            else
+            {
+                root = CombatRootSnapshot.Capture(state);
+                includeTurnSetup = false;
+                if (!ReferenceEquals(root.PlayerIdentity, me))
+                    return Failed("solver_failed", "捕获的玩家与本地玩家不一致。");
+            }
             names = SolverDisplayNames.Capture(state);
             damage = BattleDamageTracker.Observe(state);
         }
@@ -41,23 +58,23 @@ internal static class CombatSolverFacade
             return Failed("capture_failed", $"CombatSolver 捕获真机状态失败: {ex.Message}\n{ex.StackTrace}");
         }
 
-        // Potion tolerance gate (production policy): search NO-potion FIRST. If the no-potion route's
-        // battle damage is within the effective tolerance (default 8, +6 when the player holds Burning
-        // Blood), lock the no-potion route. Otherwise ESCALATE by potion count (1 potion, then 2, ...),
-        // locking the FEWEST potions that bring damage within tolerance — never spend more potions than
-        // needed for the damage the run can absorb.
+        // Potion tolerance gate (production policy): solve with the engine's Smart policy (Disabled-first
+        // internally PLUS the supplemental audits — required/smart potion use, opening power) like the
+        // standalone solver. If the Smart route's battle damage is within the effective tolerance (default 8,
+        // +6 when the player holds Burning Blood), accept it. Otherwise ESCALATE by potion count (1, then 2, ...)
+        // and keep the fewest potions that bring damage within tolerance. A pure Disabled policy skipped the
+        // audits and returned a losing line; Smart lands on a 0-potion line where one exists.
         var tolerance = new SolverPotionTolerance(options.DamageThreshold, HasBurningBlood(me));
-        var potionFreePolicy = BuildPolicy(options, SolverPotionPolicy.Disabled);
+        var smartPolicy = BuildPolicy(options, SolverPotionPolicy.Smart, includeTurnSetup);
         SolverResult result;
         try
         {
-            var potionFree = await RunSolveAsync(root, names, damage, potionFreePolicy, cancellationToken);
-            if (tolerance.IsWithinTolerance(potionFree.Snapshot.CumulativePlayerHpLost))
-                return MapResult(potionFree, me, options, root);   // acceptable damage -> no potions
+            var first = await RunSolveAsync(root, names, damage, smartPolicy, cancellationToken);
+            if (tolerance.IsWithinTolerance(first.Snapshot.CumulativePlayerHpLost))
+                return MapResult(first, me, options, root);   // acceptable damage -> no potions
 
-            var smartPolicy = BuildPolicy(options, SolverPotionPolicy.Smart);
             int potionSlots = me.Potions.Count();
-            SolverResult best = potionFree;
+            SolverResult best = first;
             for (int n = 1; n <= potionSlots; n++)
             {
                 var bounded = await RunSolveAsync(
@@ -97,7 +114,7 @@ internal static class CombatSolverFacade
         => me.Relics.Any(relic =>
             string.Equals(relic.Id.Entry, "BURNING_BLOOD", StringComparison.OrdinalIgnoreCase));
 
-    private static SearchPolicySnapshot BuildPolicy(SolverFacadeOptions options, SolverPotionPolicy potionPolicy)
+    private static SearchPolicySnapshot BuildPolicy(SolverFacadeOptions options, SolverPotionPolicy potionPolicy, bool includeTurnSetup)
     {
         var shortProfile = options.ShortBudgetMilliseconds is int s
             ? SolverSearchProfile.Short with { SoftTimeBudgetMilliseconds = s }
@@ -123,9 +140,18 @@ internal static class CombatSolverFacade
             ForceShortOnly: options.ForceShortOnly,
             MeasurePhasePerformance: false,
             MaxDegreeOfParallelism: options.MaxDegreeOfParallelism,
-            ShortBudgetOverrideMilliseconds: options.ShortBudgetMilliseconds,
-            DeepBudgetOverrideMilliseconds: options.DeepBudgetMilliseconds,
-            IncludeTurnSetup: false,
+            // No budget override: the Short/Deep profile budgets (Medium preset) are authoritative, as in
+            // the engine's own auto-turn-search. Passing an override on top of the profile is redundant and,
+            // when set to 3s, hid the winning line.
+            ShortBudgetOverrideMilliseconds: null,
+            DeepBudgetOverrideMilliseconds: null,
+            // IncludeTurnSetup must match the captured root's phase: true only when solving from a Start-phase
+            // snapshot (TurnSetupRootHolder). The facade cannot use true on a live Play-phase root — CombatBeamSolver
+            // would throw — so this flag is false for the plain Play-phase capture fallback. The killing line here
+            // does not need turn-setup cards but does need the Start-phase seeding (enemy weak turns / retained
+            // attack / persistent buff / strength suppression) to model the boss's sleep window, which is what the
+            // Start snapshot provides.
+            IncludeTurnSetup: includeTurnSetup,
             TheftPolicy: null,
             ActTransitionBossHpStrategy: BossHpStrategy.ProgressionFirst,
             FinalBossHpStrategy: BossHpStrategy.ProgressionFirst,
@@ -228,6 +254,7 @@ internal static class CombatSolverFacade
             kind = kind,
             card_index = cardIndex,
             card_id = a.Kind == PlanActionKind.UsePotion ? a.PotionId : a.CardId,
+            card_name = a.Kind == PlanActionKind.UsePotion ? a.PotionTitle : a.CardTitle,
             target_index = a.TargetIndex >= 0 ? a.TargetIndex : null,
         };
     }
@@ -294,12 +321,16 @@ internal static class CombatSolverFacade
 
 internal sealed class SolverFacadeOptions
 {
+    // Defaults mirror the vendored engine's Medium performance preset (SolverSearchProfile.Short/Deep),
+    // so /solver/plan searches with the same authority as the engine's own auto-turn-search. The previous
+    // 3s / ForceShortOnly / single-thread defaults under-searched and could miss a killing line the engine
+    // itself finds. Deep is allowed but only triggers when Short does not resolve the route.
     public static SolverFacadeOptions Default { get; } = new()
     {
-        ForceShortOnly = true,
-        ShortBudgetMilliseconds = 3000,
-        DeepBudgetMilliseconds = 3000,
-        MaxDegreeOfParallelism = 1,
+        ForceShortOnly = false,
+        ShortBudgetMilliseconds = 8000,
+        DeepBudgetMilliseconds = 120000,
+        MaxDegreeOfParallelism = SolverWeights.DefaultSearchMaxDegreeOfParallelism,
         DamageThreshold = 8,
     };
     public bool ForceShortOnly { get; init; }

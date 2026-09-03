@@ -173,8 +173,8 @@ internal static class CardOnPlayMirrors
         registry.Register<DefendNecrobinder>(GeneralCardMirrors.GeneralBlockOnPlay);
         registry.Register<DefendDefect>(GeneralCardMirrors.GeneralBlockOnPlay);
 
-        // RitsuLib's HarmonyIl IL-inferrer is not vendored (no RitsuLib dependency). Unregistered behaviour
-        // cards remain unmodeled (reported as unsupported) rather than auto-inferred.
+        registry.RegisterStrictInferrer(CardOnPlayInferrer.InferStrict);
+        registry.RegisterInferrer(CardOnPlayInferrer.Infer);
 
         return registry;
     }

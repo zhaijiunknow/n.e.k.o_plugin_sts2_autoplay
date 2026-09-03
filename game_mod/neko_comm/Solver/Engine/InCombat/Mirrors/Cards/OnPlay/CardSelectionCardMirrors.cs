@@ -78,7 +78,6 @@ internal static class CardSelectionCardMirrors
         for (var i = 0; i < card.DynamicVars.Cards.IntValue; i++)
         {
             var drawPileCards = context.OwnerState.DrawPile.Cards;
-            var rngCounter = context.Rng?.Shuffle?.Counter() ?? -1;
             List<PredictedCard> eligibleCards = drawPileCards
                 .Where(predictedCard =>
                     !predictedCard.HasKeyword(context.State, CardKeyword.Unplayable))
@@ -95,14 +94,11 @@ internal static class CardSelectionCardMirrors
 
             if (selectedCard is null)
             {
-                Entry.Logger?.Info($"[CombatSolver/Diag] CatastropheOnPlay i={i} draw_pile_count={drawPileCards.Count} rng_counter={rngCounter} selected=null (no playable)");
                 break;
             }
 
-            Entry.Logger?.Info($"[CombatSolver/Diag] CatastropheOnPlay i={i} draw_pile_count={drawPileCards.Count} rng_counter={rngCounter} selected={(selectedCard.Preview?.Id?.Entry ?? "null")}");
             context.Simulator.History.CardsSelected([selectedCard]);
             context.Simulator.AutoPlay(selectedCard, nestedChoiceSourceId: card.Id.Entry);
-            Entry.Logger?.Info($"[CombatSolver/Diag] CatastropheOnPlay after_autoplay selected={(selectedCard.Preview?.Id?.Entry ?? "null")} pending_choice={context.Simulator.HasPendingChoice}");
             if (context.Simulator.HasPendingChoice)
             {
                 break;
