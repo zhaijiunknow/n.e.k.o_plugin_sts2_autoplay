@@ -180,6 +180,10 @@ class STS2HeuristicPlanner:
                 preferred_option = self._preferred_route_option(preferences)
                 kwargs = {"option_index": preferred_option} if preferred_option is not None else {"option_index": 0}
                 return PlannedOperation(action_type=action["type"], kwargs=kwargs, confidence=0.74, source="heuristic", reason="rest_preference_or_default")
+            # 休息点无可挑选项（rest.options 空 / 已休息）-> 直接 proceed 离开，继续到地图。
+            action = self._find_action(available_actions, "proceed")
+            if action is not None:
+                return PlannedOperation(action_type="proceed", kwargs={}, confidence=0.8, source="heuristic", reason="rest_proceed")
 
         if state_name == "chest":
             # 优先领取宝箱遗物（option_index=0），再 proceed 离开——否则会卡在"奖励未领"。
