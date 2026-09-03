@@ -182,6 +182,10 @@ class STS2HeuristicPlanner:
                 return PlannedOperation(action_type=action["type"], kwargs=kwargs, confidence=0.74, source="heuristic", reason="rest_preference_or_default")
 
         if state_name == "chest":
+            # 优先领取宝箱遗物（option_index=0），再 proceed 离开——否则会卡在"奖励未领"。
+            relic_action = self._find_action(available_actions, "choose_treasure_relic")
+            if relic_action is not None:
+                return PlannedOperation(action_type="choose_treasure_relic", kwargs={"option_index": 0}, confidence=0.85, source="heuristic", reason="chest_claim_relic")
             action = self._find_action(available_actions, "proceed")
             if action is not None:
                 return PlannedOperation(action_type=action["type"], kwargs={}, confidence=0.8, source="heuristic", reason="chest_default")
