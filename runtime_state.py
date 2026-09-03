@@ -33,6 +33,10 @@ class STS2RuntimeState:
     # 那张 card_id；在随后出现的选牌界面（combat_hand_select 等）据此选牌，避免卡住或用启发式乱猜。
     # 无选择动作为 None。承载的是"下一步选择"的选中牌，不限于消耗。
     pending_card_choice_id: str | None = None
+    # 战斗自动玩：当前回合缓存的 /solver/plan line[0].steps 里下一个要执行的步骤下标。
+    # 回合开始取一次计划后整回合复用；每执行一个战斗步（play_card/use_potion/end_turn）自增，
+    # 选牌子动作（select_deck_card）不步进；接近回合末尾/耗尽后重查下一回合并归零。
+    solver_step_index: int = 0
     latest_sync_packet: dict[str, Any] = field(default_factory=dict)
     latest_report_packet: dict[str, Any] = field(default_factory=dict)
     latest_snapshot_summary: dict[str, Any] = field(default_factory=dict)

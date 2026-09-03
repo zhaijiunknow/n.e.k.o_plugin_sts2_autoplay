@@ -123,8 +123,9 @@ class STS2AutoplayService:
             companion_enabled = bool(self._cfg.get("companion_mode_enabled", self._cfg.get("neko_commentary_enabled", True)))
             if companion_enabled:
                 self.set_companion_mode(True)
-                await self.refresh_state(trigger_sync=True)
                 startup_result["companion_mode_enabled"] = True
+                # 初次状态刷新交给后台事件循环（stream_ready 会 force refresh），避免启动同步等待
+                # /solver/plan 等慢查询——否则会撞 NEKO 的 10s 启动超时被强杀。
             else:
                 self._sync_background_polling()
                 await self.refresh_state(trigger_sync=True)
@@ -282,6 +283,9 @@ class STS2AutoplayService:
         if result.get("status") == "ok":
             self._state.touch_action()
             op = result.get("operation") if isinstance(result.get("operation"), dict) else {}
+            # 战斗整回合缓存：仅战斗步(出牌/用药/结束回合)推进 line[0].steps 索引；选牌子动作不推进。
+            if op.get("action_type") in {"play_card", "use_potion", "end_turn"}:
+                self._state.solver_step_index = (self._state.solver_step_index if isinstance(self._state.solver_step_index, int) else 0) + 1
             self._state.last_decision_source = str(op.get("source") or "")
             self._state.last_decision_reason = str(op.get("reason") or "")
             self._consume_guidance(op)
@@ -1348,11 +1352,15 @@ class STS2AutoplayService:
 
     def _emit_status(self) -> None:
         try:
+            snap = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
+            # 只推轻量摘要，不塞整包 /state（snapshot 里含完整 raw_state，几十 MB；塞进状态/IPC 会触发
+            # NEKO 端 ZMQ 反序列化错误 / 超时）。需要全量就单独走 refresh_state / get_snapshot。
+            light_keys = ("screen", "floor", "act", "in_combat", "run_id", "character", "turn", "available_action_count", "summary_kind", "state_signature")
             self._report_status({
                 "source": "sts2_autoplay",
                 "transport_state": self._state.transport_state,
                 "last_error": self._state.last_error,
-                "snapshot": self._state.snapshot,
+                "snapshot": {k: snap.get(k) for k in light_keys if k in snap},
                 "standby": self._state.standby,
                 "autoplay_state": self._state.autoplay_state,
                 "step_count": self._state.step_count,

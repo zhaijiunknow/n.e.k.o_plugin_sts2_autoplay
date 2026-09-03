@@ -83,11 +83,18 @@ class STS2LoopRunner:
         # call, so reuse the plan while the combat state (hand/energy/enemies/potions) is unchanged.
         solver_plan = None
         in_combat_decision = classification.get("state_name") == "combat" and mode_info.get("allows_planner")
+        step_index = self._service._state.solver_step_index if isinstance(self._service._state.solver_step_index, int) else 0
         if in_combat_decision:
             sig = _combat_plan_signature(snapshot)
-            if sig == self._solver_plan_sig:
+            if sig == self._solver_plan_sig and self._solver_plan_cached:
                 solver_plan = self._solver_plan_cached
+                # 当前回合的步骤已含最后一个 end_turn 且被取完 -> 视为进入新回合，触发重查。
+                steps = _current_turn_steps(solver_plan)
+                if steps is None or step_index >= len(steps):
+                    solver_plan = None
             else:
+                solver_plan = None
+            if solver_plan is None:
                 try:
                     fetched = await client.get_combat_plan()
                 except Exception:
@@ -97,23 +104,24 @@ class STS2LoopRunner:
                     solver_plan = fetched
                     self._solver_plan_sig = sig
                     self._solver_plan_cached = fetched
+                    self._service._state.solver_step_index = 0
                 else:
                     solver_plan = None
         else:
             # Not in a combat decision phase: drop the cache so re-entering combat refetches.
+            # 不清空 solver_step_index：中途可能出现选牌(combat_hand_select)等非决策态。
             self._solver_plan_sig = None
             self._solver_plan_cached = None
         # 若当前这步是需要"选一张牌"的动作（消耗/拉弃牌堆/生成到手/变换等），solver 已选好那张
-        # （choice_card_id）。只在战斗决策态设置；非战斗决策态（含选牌界面）不清空，让选牌分支拿到它。
-        if in_combat_decision:
+        # （choice_card_id）。按当前步进索引取，供随后的选牌界面据此选牌。
+        if in_combat_decision and solver_plan:
             pending_choice: str | None = None
-            line = solver_plan.get("line") if isinstance(solver_plan, dict) else None
-            if isinstance(line, list) and line and isinstance(line[0], dict):
-                steps = line[0].get("steps") if isinstance(line[0].get("steps"), list) else []
-                if steps and isinstance(steps[0], dict):
-                    step0 = steps[0]
-                    if step0.get("choice_card_id"):
-                        pending_choice = str(step0.get("choice_card_id"))
+            steps = _current_turn_steps(solver_plan)
+            if steps:
+                i = step_index if step_index < len(steps) else len(steps) - 1
+                step0 = steps[i]
+                if isinstance(step0, dict) and step0.get("choice_card_id"):
+                    pending_choice = str(step0.get("choice_card_id"))
             self._service._state.pending_card_choice_id = pending_choice
         # Event-room LLM advice (per-option scores) for heuristic fusion. plan() is sync and the LLM
         # is async, so fetch here (async tick) and inject into the contexts it reads. Cache by
@@ -227,6 +235,7 @@ class STS2LoopRunner:
             "event_llm_scores": event_llm_scores,
             "event_llm_weight": event_llm_weight,
             "pending_card_choice_id": self._service._state.pending_card_choice_id,
+            "solver_step_index": self._service._state.solver_step_index,
         }
         planned_operation = self._service._planner.plan(planning_context) if mode_info.get("allows_planner") else None
         planned_operation_dict = planned_operation.as_dict() if planned_operation is not None else None
@@ -517,18 +526,28 @@ def _event_plan_signature(summary_context: dict[str, Any]) -> str:
 
 
 def _combat_plan_signature(snapshot: dict[str, Any]) -> str:
-    """Stable fingerprint of the combat-relevant state the solver's plan depends on.
+    """Turn-stable fingerprint for WHOLE-TURN caching: 只按 回合(run_id+turn) 键。
 
-    GET /solver/plan re-runs the CombatSolver search every call; the plugin reuses the cached plan
-    while this signature is unchanged, so the mod does not recompute the same position repeatedly.
-    Only combat + potions feed the solver's plan, so non-combat metadata changes do not invalidate it.
+    GET /solver/plan 每次调用都会重跑 CombatSolver 搜索；插件现在"回合开始取一次、整回合复用"
+    （见 solver_step_index），所以签名在回合内不变，进入新回合才变化从而重查。
+    注意：不能把整局战斗状态放进签名——那每出一张牌就变，起不到缓存作用。
     """
     raw = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
-    combat = raw.get("combat") if isinstance(raw.get("combat"), dict) else {}
     run = raw.get("run") if isinstance(raw.get("run"), dict) else {}
-    payload = {"combat": combat, "potions": run.get("potions")}
-    frozen = json.dumps(payload, sort_keys=True, default=str)
-    return hashlib.sha256(frozen.encode("utf-8")).hexdigest()
+    run_id = str(raw.get("run_id") or run.get("run_id") or run.get("runId") or run.get("id") or "")
+    turn = raw.get("turn")
+    if turn is None:
+        combat = raw.get("combat") if isinstance(raw.get("combat"), dict) else {}
+        turn = combat.get("turn")
+    return hashlib.sha256(f"{run_id}|turn:{turn}".encode("utf-8")).hexdigest()
+
+
+def _current_turn_steps(solver_plan: dict[str, Any]) -> list[dict[str, Any]] | None:
+    line = solver_plan.get("line") if isinstance(solver_plan.get("line"), list) else None
+    if not line or not isinstance(line[0], dict):
+        return None
+    steps = line[0].get("steps") if isinstance(line[0].get("steps"), list) else None
+    return steps if isinstance(steps, list) else None
 
 
 __all__ = ["STS2LoopRunner"]

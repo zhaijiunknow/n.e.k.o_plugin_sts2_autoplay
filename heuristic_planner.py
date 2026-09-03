@@ -17,6 +17,23 @@ def _first_line_step(solver_plan: dict[str, Any]) -> dict[str, Any] | None:
     return steps[0]
 
 
+def _line_step_at(solver_plan: dict[str, Any], index: int | None) -> dict[str, Any] | None:
+    """Return line[0].steps[index] (当前回合第 index 步)，越界时夹到首/末步。整回合缓存时按步进取。"""
+    line = solver_plan.get("line") if isinstance(solver_plan.get("line"), list) else None
+    if not line or not isinstance(line[0], dict):
+        return None
+    steps = line[0].get("steps") if isinstance(line[0].get("steps"), list) else None
+    if not steps or not steps:
+        return None
+    i = index if isinstance(index, int) else 0
+    if i < 0:
+        i = 0
+    if i >= len(steps):
+        i = len(steps) - 1
+    step = steps[i]
+    return step if isinstance(step, dict) else None
+
+
 class STS2HeuristicPlanner:
     def __init__(self, logger: Any | None = None) -> None:
         self._logger = logger
@@ -171,7 +188,8 @@ class STS2HeuristicPlanner:
             # card_index/card_id/target_index/reason——line 是唯一来源。
             solver_plan = context.get("solver_plan") if isinstance(context.get("solver_plan"), dict) else None
             if solver_plan and solver_plan.get("in_combat"):
-                first_step = _first_line_step(solver_plan)
+                # 整回合缓存模式：按 solver_step_index 取当前回合第几步（循环逐个执行，不重查）。
+                first_step = _line_step_at(solver_plan, context.get("solver_step_index"))
                 solver_action = first_step.get("kind") if isinstance(first_step, dict) else None
                 solver_card_index = first_step.get("card_index") if isinstance(first_step, dict) else None
                 solver_card_id = first_step.get("card_id") if isinstance(first_step, dict) else None
