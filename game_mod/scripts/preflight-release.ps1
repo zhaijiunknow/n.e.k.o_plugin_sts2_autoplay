@@ -29,7 +29,7 @@ function Invoke-Step {
     Write-Host "[preflight] OK - $Name"
 }
 
-$modProject = Join-Path $ProjectRoot "neko_comm/neko_comm.csproj"
+$modProject = Join-Path $ProjectRoot "nekospire/nekospire.csproj"
 $buildScript = Join-Path $ProjectRoot "scripts/build-mod.ps1"
 $testScript = Join-Path $ProjectRoot "scripts/test-mod-load.ps1"
 $stateInvariantScript = Join-Path $ProjectRoot "scripts/test-state-invariants.ps1"

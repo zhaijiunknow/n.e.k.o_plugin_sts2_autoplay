@@ -257,6 +257,7 @@ class STS2SummaryContextBuilder:
             "current_hp": run.get("current_hp"),
             "max_hp": run.get("max_hp"),
             "gold": run.get("gold"),
+            "deck": raw_state.get("deck") if isinstance(raw_state.get("deck"), dict) else {},
             "shop": shop,
             "shop_cards": cards,
             "shop_card_names": [str(card.get("name") or card.get("card_id") or "?") for card in cards if isinstance(card, dict)],

@@ -18,8 +18,8 @@ internal static class CombatSolverRuntime
         {
             // Wire a real game logger so the search/mirror diagnostics write to godot.log.
             Entry.Logger ??= new MegaCrit.Sts2.Core.Logging.Logger(
-                "neko-comm-solver", MegaCrit.Sts2.Core.Logging.LogType.Generic);
-            var harmony = new Harmony("neko_comm_solver");
+                "nekospire-solver", MegaCrit.Sts2.Core.Logging.LogType.Generic);
+            var harmony = new Harmony("nekospire_solver");
             // PatchAll() scans the calling assembly for [HarmonyPatch] types — exactly our two isolation
             // patches (the vendored CombatSolver code contains no other [HarmonyPatch] types).
             harmony.PatchAll();

@@ -1,5 +1,5 @@
 [sts2]
-base_url = "http://127.0.0.1:8080"
+base_url = "http://127.0.0.1:18080"
 connect_timeout_seconds = 5
 request_timeout_seconds = 15
 poll_interval_idle_seconds = 3

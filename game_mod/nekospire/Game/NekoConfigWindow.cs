@@ -1,5 +1,5 @@
 // In-game LLM-config input window for the standalone NekoSpire build. Built purely in code (no .tscn —
-// neko_comm builds with Microsoft.NET.Sdk so a scene's C# lifecycle is not wired; built-in nodes + signal
+// nekospire builds with Microsoft.NET.Sdk so a scene's C# lifecycle is not wired; built-in nodes + signal
 // connection at runtime is the reliable pattern). Textures come from the mod's own assets (nekospire_ui/).
 using System;
 using System.Threading.Tasks;

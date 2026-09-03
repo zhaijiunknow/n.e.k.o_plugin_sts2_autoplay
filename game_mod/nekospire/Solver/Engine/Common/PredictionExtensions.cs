@@ -19,7 +19,7 @@ internal readonly record struct PredictionRngState(
 internal static class PredictionExtensions
 {
     // Vendored build must NOT touch the game's private RNG fields directly (no runtime publicization in
-    // neko_comm). The game exposes a public serialization round-trip (ToSerializable / Rng(SerializableRng))
+    // nekospire). The game exposes a public serialization round-trip (ToSerializable / Rng(SerializableRng))
     // that captures the counter + all four Xoshiro state words — faithful and zero private access.
     public static Rng Clone(this Rng rng)
         => new(rng.ToSerializable());

@@ -7,7 +7,7 @@ from typing import Any
 
 @dataclass(slots=True)
 class STS2RuntimeState:
-    base_url: str = "http://127.0.0.1:8080"
+    base_url: str = "http://127.0.0.1:18080"
     transport_state: str = "disconnected"
     last_error: str = ""
     snapshot: dict[str, Any] = field(default_factory=dict)

@@ -91,13 +91,13 @@ if (-not (Test-Path $GodotExe)) {
     throw "Godot executable not found: $GodotExe"
 }
 
-$modName = "neko_comm"
-$modProject = Join-Path $ProjectRoot "neko_comm/neko_comm.csproj"
-$buildOutputDir = Join-Path $ProjectRoot "neko_comm/bin/$Configuration/net9.0"
+$modName = "nekospire"
+$modProject = Join-Path $ProjectRoot "nekospire/nekospire.csproj"
+$buildOutputDir = Join-Path $ProjectRoot "nekospire/bin/$Configuration/net9.0"
 $stagingDir = Join-Path $ProjectRoot "build/mods/$modName"
 $modsDir = Join-Path $GameRoot "mods"
-$manifestSource = Join-Path $ProjectRoot "neko_comm/mod_manifest.json"
-$modIdManifestSource = Join-Path $ProjectRoot "neko_comm/mod_id.json"
+$manifestSource = Join-Path $ProjectRoot "nekospire/mod_manifest.json"
+$modIdManifestSource = Join-Path $ProjectRoot "nekospire/mod_id.json"
 $dllSource = Join-Path $buildOutputDir "$modName.dll"
 $pckOutput = Join-Path $stagingDir "$modName.pck"
 $dllTarget = Join-Path $stagingDir "$modName.dll"

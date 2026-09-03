@@ -181,11 +181,11 @@ namespace NekoComm.Game
 
         public static Texture2D? LoadUserTexture(string filename)
         {
-            // 1) Mod-packed asset (res://neko_comm/ui/<file> — when the .tscn/ui are packed into the mod's
+            // 1) Mod-packed asset (res://nekospire/ui/<file> — when the .tscn/ui are packed into the mod's
             //    pck, the author's textures ship with the mod and resolve here).
             try
             {
-                var packed = GD.Load<Texture2D>("res://neko_comm/ui/" + filename);
+                var packed = GD.Load<Texture2D>("res://nekospire/ui/" + filename);
                 if (packed != null)
                     return packed;
             }

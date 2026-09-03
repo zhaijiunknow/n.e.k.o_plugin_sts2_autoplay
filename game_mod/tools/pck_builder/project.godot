@@ -5,5 +5,5 @@ config_version=5
 
 [application]
 
-config/name="neko_commPckBuilder"
+config/name="nekospirePckBuilder"
 run/main_scene=""

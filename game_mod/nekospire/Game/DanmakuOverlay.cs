@@ -1,8 +1,8 @@
-// In-game scrolling catgirl danmaku overlay for neko_comm. Style modeled on the "弹幕尖塔 DanmakuSpire" mod:
+// In-game scrolling catgirl danmaku overlay for nekospire. Style modeled on the "弹幕尖塔 DanmakuSpire" mod:
 // each line is a horizontal "smoke" strip (rounded translucent panel tinted with the catgirl color) with the
 // character icon on the left and centered light text with a soft drop shadow — instead of bare pink text.
 //
-// neko_comm builds with Microsoft.NET.Sdk (not Godot.NET.Sdk) and the game data dir ships no
+// nekospire builds with Microsoft.NET.Sdk (not Godot.NET.Sdk) and the game data dir ships no
 // Godot.SourceGenerators, so a C# node subclass overriding _Process is NOT wired by Godot. We instead
 // use BUILT-IN nodes (CanvasLayer -> Control -> PanelContainer -> Label) attached to the SceneTree root and
 // drive the per-frame scroll with the SceneTree.ProcessFrame signal. All node creation/mutation happens on the

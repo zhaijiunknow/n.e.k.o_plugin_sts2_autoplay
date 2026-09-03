@@ -284,12 +284,14 @@ class STS2LoopRunner:
 
     def start_background(self) -> None:
         self._shutdown = False
-        if self._poll_task is None or self._task_done(self._poll_task):
+        # 事件流模式下完全靠 /events/stream 驱动刷新（真正的变化才拉 /state），不再另起一个定时
+        # 轮询循环——否则状态没变也每几秒重推一遍状态/通报，重复刷屏污染日志。轮询循环仅作为
+        # use_event_stream=false（无 SSE 的客户端）的兜底。
+        if not self._service._cfg_use_event_stream() and (
+            self._poll_task is None or self._task_done(self._poll_task)
+        ):
             self._ensure_owner_loop()
             self._poll_task = self._create_task(self._poll_loop(), name="sts2-poll-loop")
-        # When the mod exposes /events/stream, drive refresh from scene changes and keep the poll
-        # loop as a slow fallback. Uses hasattr() so a client that predates SSE just falls back to
-        # the timer-only behavior (event task never starts).
         if self._service._cfg_use_event_stream() and (
             self._event_task is None or self._task_done(self._event_task)
         ):

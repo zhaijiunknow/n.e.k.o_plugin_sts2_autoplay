@@ -1,7 +1,7 @@
-neko_comm/bin/
-neko_comm/obj/
-neko_comm/_scratch/
-neko_comm/local.props
+nekospire/bin/
+nekospire/obj/
+nekospire/_scratch/
+nekospire/local.props
 build/
 extraction/decompiled/
 .venv/

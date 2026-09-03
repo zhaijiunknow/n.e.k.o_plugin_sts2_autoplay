@@ -1,12 +1,12 @@
 {
-  "id": "neko_comm",
+  "id": "nekospire",
   "name": "猫娘尖塔 NekoSpire",
-  "author": "N.E.K.O Team",
+  "author": "ZhaiJiu",
   "description": "猫娘尖塔 NekoSpire：在杀戮尖塔 2 内提供战斗求解/co-op/局面对账，可独立运行（自配 LLM）或连接 NEKO 客户端。",
   "version": "0.1.0",
   "has_pck": true,
   "has_dll": true,
-  "dependencies": [
-    "STS2-RitsuLib"
-  ]
+  "dependencies": [],
+  "min_game_version": "0.107.1",
+  "affects_gameplay": true
 }

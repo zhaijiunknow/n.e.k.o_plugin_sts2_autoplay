@@ -64,13 +64,13 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Resolve-FullPath -PathValue $OutputRoot
 }
 
-$manifestPath = Join-Path $ProjectRoot "neko_comm/mod_manifest.json"
+$manifestPath = Join-Path $ProjectRoot "nekospire/mod_manifest.json"
 $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
 $version = $manifest.version
 $releaseBaseName = "sts2-ai-agent-v$version-windows"
 
 $buildScript = Join-Path $ProjectRoot "scripts/build-mod.ps1"
-$stagingModDir = Join-Path $ProjectRoot "build/mods/neko_comm"
+$stagingModDir = Join-Path $ProjectRoot "build/mods/nekospire"
 $releaseDir = Get-UniquePath -BasePath (Join-Path $OutputRoot $releaseBaseName)
 $zipPath = Get-UniquePath -BasePath (Join-Path $OutputRoot $releaseBaseName) -Extension ".zip"
 
@@ -100,8 +100,8 @@ New-Item -ItemType Directory -Force -Path $modOutputDir | Out-Null
 New-Item -ItemType Directory -Force -Path $scriptOutputDir | Out-Null
 New-Item -ItemType Directory -Force -Path $docsOutputDir | Out-Null
 
-Copy-Item -Path (Join-Path $stagingModDir "neko_comm.dll") -Destination (Join-Path $modOutputDir "neko_comm.dll") -Force
-Copy-Item -Path (Join-Path $stagingModDir "neko_comm.pck") -Destination (Join-Path $modOutputDir "neko_comm.pck") -Force
+Copy-Item -Path (Join-Path $stagingModDir "nekospire.dll") -Destination (Join-Path $modOutputDir "nekospire.dll") -Force
+Copy-Item -Path (Join-Path $stagingModDir "nekospire.pck") -Destination (Join-Path $modOutputDir "nekospire.pck") -Force
 Copy-Item -Path (Join-Path $stagingModDir "mod_id.json") -Destination (Join-Path $modOutputDir "mod_id.json") -Force
 
 Copy-Item -Path (Join-Path $ProjectRoot "README.md") -Destination (Join-Path $releaseDir "README.md") -Force

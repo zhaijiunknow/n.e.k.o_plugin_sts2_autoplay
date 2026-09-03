@@ -19,7 +19,7 @@ This Mod's combat solver depends on the third-party shared framework **[STS2-Rit
 
 ## Redeploying
 
-After editing code, rebuild and copy into the game — **quit the game first** (`neko_comm.dll` is locked by the running process, `Copy-Item` will fail). Use the repo script:
+After editing code, rebuild and copy into the game — **quit the game first** (`nekospire.dll` is locked by the running process, `Copy-Item` will fail). Use the repo script:
 ```
 game_mod/scripts/build-mod.ps1 -Configuration Release -GameRoot "D:/Steam/steamapps/common/Slay the Spire 2" -GodotExe <path>\Godot_v4.5.1-stable_win64_console.exe
 ```

@@ -113,12 +113,42 @@ class STS2HeuristicPlanner:
                 kwargs = {"option_index": preferred_option} if preferred_option is not None else {}
                 return PlannedOperation(action_type=action["type"], kwargs=kwargs, confidence=0.7, source="heuristic", reason="remove_preference_or_default")
 
+        # 商店：按策略 md 优先级「遗物 → 高价值单卡 → 药水 → 删牌(先诅咒/打击/防御) → 其他卡」。
+        # 先开库存才能看到可买项；每 tick 只出一步，买掉一件后状态自然推进到下一优先级。
         if state_name in {"shop", "shop_show"}:
-            action = self._find_action(available_actions, "buy_card") or self._find_action(available_actions, "open_shop_inventory")
-            if action is not None:
-                preferred_option = self._preferred_route_option(preferences)
-                kwargs = {"option_index": preferred_option} if preferred_option is not None and action["type"] == "buy_card" else {}
-                return PlannedOperation(action_type=action["type"], kwargs=kwargs, confidence=0.68, source="heuristic", reason="shop_preference_or_default")
+            if self._find_action(available_actions, "open_shop_inventory"):
+                return PlannedOperation(action_type="open_shop_inventory", kwargs={}, confidence=0.72, source="heuristic", reason="shop_open_inventory")
+
+            if self._find_action(available_actions, "buy_relic"):
+                shop_relic_index = self._preferred_shop_relic_index(summary_context, preferences)
+                if shop_relic_index is not None:
+                    return PlannedOperation(action_type="buy_relic", kwargs={"option_index": shop_relic_index}, confidence=0.72, source="heuristic", reason="shop_high_value_relic")
+
+            if self._find_action(available_actions, "buy_card"):
+                high_value_card_index = self._shop_best_card_index(summary_context, preferences, min_score=self._SHOP_HIGH_VALUE_SCORE)
+                if high_value_card_index is not None:
+                    return PlannedOperation(action_type="buy_card", kwargs={"option_index": high_value_card_index}, confidence=0.7, source="heuristic", reason="shop_high_value_card")
+
+            if self._find_action(available_actions, "buy_potion"):
+                shop_potion_index = self._preferred_shop_potion_index(summary_context, preferences)
+                if shop_potion_index is not None:
+                    return PlannedOperation(action_type="buy_potion", kwargs={"option_index": shop_potion_index}, confidence=0.66, source="heuristic", reason="shop_high_value_potion")
+
+            if self._find_action(available_actions, "remove_card_at_shop"):
+                # ExecuteRemoveCardAtShopAsync 不接 option_index；下一步 card_selection_remove 屏由
+                # 现有的 _preferred_remove_option 挑诅咒→打击/防御。
+                return PlannedOperation(action_type="remove_card_at_shop", kwargs={}, confidence=0.7, source="heuristic", reason="shop_remove_card")
+
+            if self._find_action(available_actions, "buy_card"):
+                other_card_index = self._shop_best_card_index(summary_context, preferences, min_score=self._SHOP_ANY_CARD_SCORE)
+                if other_card_index is not None:
+                    return PlannedOperation(action_type="buy_card", kwargs={"option_index": other_card_index}, confidence=0.6, source="heuristic", reason="shop_other_card")
+
+            if self._find_action(available_actions, "close_shop_inventory"):
+                return PlannedOperation(action_type="close_shop_inventory", kwargs={}, confidence=0.8, source="heuristic", reason="shop_close")
+            if self._find_action(available_actions, "proceed"):
+                return PlannedOperation(action_type="proceed", kwargs={}, confidence=0.8, source="heuristic", reason="shop_done")
+            return None
 
         if state_name == "rest":
             action = self._find_action(available_actions, "choose_rest_option")
@@ -144,18 +174,23 @@ class STS2HeuristicPlanner:
                 solver_card_index = first_step.get("card_index") if isinstance(first_step, dict) else None
                 solver_card_id = first_step.get("card_id") if isinstance(first_step, dict) else None
                 solver_target = first_step.get("target_index") if isinstance(first_step, dict) else None
-                if solver_action == "play_card" and solver_card_index is not None:
-                    kw = {"card_index": solver_card_index}
-                    if solver_target is not None:
-                        kw["target_index"] = solver_target
-                    self._debug("[sts2_combat_plan] mod_solver recommended=%s", solver_card_id)
-                    return PlannedOperation(
-                        action_type="play_card",
-                        kwargs=kw,
-                        confidence=0.9,
-                        source="mod_solver",
-                        reason="mod_combat_search",
-                    )
+                if solver_action == "play_card":
+                    # 用 card_id 重新匹配实机手牌（mod 的 NekoAutoplayDriver 同样如此）：solver 给的是
+                    # /solver/plan 捕获瞬间的位置卡号；捕获与执行之间手牌可能漂移，直接抽样会打在别的卡上。
+                    effective_card_index = self._resolve_solver_card_index(snapshot, solver_card_id, solver_card_index)
+                    if effective_card_index is not None:
+                        kw = {"card_index": effective_card_index}
+                        if solver_target is not None:
+                            kw["target_index"] = solver_target
+                        self._debug("[sts2_combat_plan] mod_solver recommended=%s hand_idx=%s", solver_card_id, effective_card_index)
+                        return PlannedOperation(
+                            action_type="play_card",
+                            kwargs=kw,
+                            confidence=0.9,
+                            source="mod_solver",
+                            reason="mod_combat_search",
+                        )
+                    # 实机手牌里没有这张卡 -> 落到启发式兜底
                 if solver_action == "use_potion":
                     potion_index = self._solver_potion_option_index(snapshot, solver_card_id)
                     if potion_index is not None:
@@ -474,6 +509,88 @@ class STS2HeuristicPlanner:
         if preferred is not None:
             return preferred
         return self._first_record_option(preferences)
+
+    # ---- 商店购买策略（遵循 strategies/*/shop.md 优先级）----
+    # _score_reward_card 分数越高越好（命中 deck 策略 +40、archetype +20、分支 +35~50，核心卡常 ≥40）。
+    _SHOP_HIGH_VALUE_SCORE = 25
+    _SHOP_ANY_CARD_SCORE = 1
+
+    def _resolve_solver_card_index(self, snapshot: dict[str, Any] | None, card_id: str | None, fallback_index: int | None) -> int | None:
+        """把 /solver/plan 推荐的卡（card_id）重新映射到实机手牌位置，避免位置索引漂移。
+
+        与 mod 的 NekoAutoplayDriver.DecideCombatAsync 一致：优先按 card_id 精确匹配且可打出；
+        匹配不到再退回 solver 给的位置索引（仅当该位置卡可打出）；都不行返回 None（交给启发式）。
+        """
+        hand: Any = []
+        if isinstance(snapshot, dict):
+            raw_state = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
+            combat = raw_state.get("combat") if isinstance(raw_state.get("combat"), dict) else {}
+            hand = combat.get("hand") if isinstance(combat.get("hand"), list) else []
+        if card_id:
+            for i, card in enumerate(hand):
+                if isinstance(card, dict) and str(card.get("card_id") or "") == str(card_id) and bool(card.get("playable", True)):
+                    return i
+        if fallback_index is not None and 0 <= fallback_index < len(hand):
+            card = hand[fallback_index]
+            if isinstance(card, dict) and bool(card.get("playable", True)):
+                return fallback_index
+        return None
+
+    def _shop_affordable_items(self, summary_context: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
+
+        def affordable(items: Any) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict) and item.get("is_stocked", True) and item.get("enough_gold", True):
+                    out.append(item)
+            return out
+
+        return (
+            affordable(payload.get("shop_cards")),
+            affordable(payload.get("shop_relics")),
+            affordable(payload.get("shop_potions")),
+        )
+
+    def _preferred_shop_relic_index(self, summary_context: dict[str, Any], preferences: dict[str, Any]) -> int | None:
+        # 只看买得起；偏好 record 的索引是通用 choice 语义（可能指向卡/其它项），不借此挑遗物。
+        _cards, relics, _potions = self._shop_affordable_items(summary_context)
+        for relic in relics:
+            index = self._safe_int(relic.get("index"))
+            if index is not None:
+                return index
+        return None
+
+    def _preferred_shop_potion_index(self, summary_context: dict[str, Any], preferences: dict[str, Any]) -> int | None:
+        _cards, _relics, potions = self._shop_affordable_items(summary_context)
+        for potion in potions:
+            index = self._safe_int(potion.get("index"))
+            if index is not None:
+                return index
+        return None
+
+    def _shop_best_card_index(self, summary_context: dict[str, Any], preferences: dict[str, Any], min_score: int) -> int | None:
+        cards, _relics, _potions = self._shop_affordable_items(summary_context)
+        if not cards:
+            return None
+        payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
+        deck = payload.get("deck") if isinstance(payload.get("deck"), dict) else {}
+        archetype_tags = [str(tag).strip().lower() for tag in self._infer_archetype_tags(deck)] if isinstance(deck, dict) else []
+        records = preferences.get("records") if isinstance(preferences.get("records"), list) else []
+        deck_policy = self._reward_deck_policy(records)
+        best: tuple[int, int] | None = None
+        for card in cards:
+            score = self._score_reward_card(card, deck_policy, archetype_tags)
+            if score < min_score:
+                continue
+            index = self._safe_int(card.get("index"))
+            if index is None:
+                index = self._safe_int(card.get("card_index"))
+            if index is None:
+                continue
+            if best is None or score > best[0]:
+                best = (score, index)
+        return best[1] if best else None
 
     def _preferred_map_index(self, summary_context: dict[str, Any], preferences: dict[str, Any]) -> int | None:
         payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}

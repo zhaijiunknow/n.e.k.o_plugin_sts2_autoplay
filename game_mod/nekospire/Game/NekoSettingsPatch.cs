@@ -16,7 +16,7 @@ namespace NekoComm.Game
     internal static class NekoSettingsPatch
     {
         private const string InfoContainerTypeName = "MegaCrit.Sts2.Core.Nodes.Screens.ModdingScreen.NModInfoContainer";
-        private const string ModId = "neko_comm";
+        private const string ModId = "nekospire";
         private const string ButtonName = "NekoSpireSettingsButton";
 
         public static MethodBase? TargetMethod()
