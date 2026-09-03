@@ -40,7 +40,7 @@ name = "尖塔2陪玩"
 description = "陪伴你在杀戮尖塔2（Slay the Spire 2）中游玩：自动出牌、局势点评与猫娘 LLM 实时解说（游戏内弹幕）。"
 short_description = "Slay the Spire 2 companion: autoplay, situation commentary, and live AI catgirl danmaku in-game."
 keywords = ["slay the spire", "杀戮尖塔", "陪玩", "autoplay", "companion", "sts2", "肉鸽", "卡牌"]
-version = "0.1.1"
+version = "0.2.0"
 entry = "plugin.plugins.sts2_autoplay:STS2AutoplayPlugin"
 
 [plugin.ui]

@@ -2,9 +2,47 @@
 
 **目录**：仓库根目录（Python 包），`plugin.toml` 声明入口 `STS2AutoplayPlugin`。
 
-- **入口** `__init__.py` actions：状态（`sts2_health_check`/`sts2_get_status`/`sts2_read_state`）、自动玩（`sts2_start/pause/resume/stop_autoplay`、`sts2_set_standby`）、陪玩（`sts2_enable/disable_companion_mode`）、co-op（`sts2_open_coop_room`）、策略（`sts2_apply_user_override`）、规划（`sts2_get/execute_planned_operation`）。
-- **核心模块**：`service.py`（总控）、`loop_runner.py`（轮询/SSE/自动玩循环）、`transport_client.py`（HTTP 通信）、`neko_interface.py`（SDK 接口）、`heuristic_planner.py`/`companion_evaluator.py`（决策）、`catgirl_llm.py`（`CatgirlCommentGenerator`/`EventAdviceGenerator`）、`dispatcher.py`、`strategy_repository.py`/`strategy_parser.py`。
-- **决策归属**：插件负责**决策与表达**——启发式出牌规划、局势评估、事件房 LLM 打分、弹幕/点评生成、用户策略偏好吸收。
+本插件负责**决策与表达**：给尖塔2的猫娘陪玩提供自动出牌/走图、局势点评、事件房 LLM 打分、游戏内弹幕，以及跨局记忆沉淀。它通过 Mod 的 HTTP API（`/state`、`/events/stream`、`/action`、`/solver/plan`、`/danmaku`）与游戏交互，自身**不读取** `strategies/` md——那是策略内容，交给 `strategy_repository` 解析。
+
+## 入口 actions（`__init__.py`）
+
+- **状态**：`sts2_health_check`、`sts2_get_status`、`sts2_read_state`
+- **自动玩**：`sts2_start_autoplay`、`sts2_pause_autoplay`、`sts2_resume_autoplay`、`sts2_stop_autoplay`、`sts2_set_standby`
+- **陪玩**：`sts2_enable_companion_mode`、`sts2_disable_companion_mode`
+- **co-op**：`sts2_open_coop_room`
+- **策略**：`sts2_apply_user_override`
+- **规划**：`sts2_get_planned_operation`、`sts2_execute_planned_operation`
+
+## 核心模块（按职责）
+
+| 模块 | 职责 |
+|---|---|
+| `service.py` | 总控：事件循环接线、决策/点评/记忆入口 |
+| `loop_runner.py` | 轮询 + SSE 事件流 + 自动玩循环；缓存 `/solver/plan`（整回合）、事件房 LLM |
+| `transport_client.py` | Mod HTTP 客户端（`/state`、`/action`、`/solver/plan`、`/danmaku`、SSE） |
+| `neko_interface.py` | NEKO SDK 接口（只读/控制 SD 工具入口） |
+| `heuristic_planner.py` / `companion_evaluator.py` | 决策：局面评估、出牌/选牌/路线启发式 + 点评触发器 |
+| `catgirl_llm.py` | LLM 生成：`CatgirlCommentGenerator`（弹幕/点评）、`EventAdviceGenerator`（事件排序分） |
+| `catgirl_memory.py` | 跨局记忆沉淀（见下节） |
+| `strategy_repository.py` / `strategy_parser.py` | 策略加载：`strategies/` 解析 + `strategy_directives` 组装 |
+| `dispatcher.py` | 状态反馈 / 陪玩通知的 NEKO 输出边界 |
+
+## 决策与表达
+
+- **决策**：地图/奖励/卡组/事件由启发式 +（事件房）LLM 评分融合决策；战斗出牌由 `/solver/plan` 权威决定，回退启发式。
+- **表达**：猫娘点评 + 游戏内弹幕。
+- **偏好吸收**：`sts2_apply_user_override` 把用户自然语言指点转成结构化偏好 / override。
+- **跨局记忆**：见下节。
+
+## 猫娘记忆成长（跨局教训 → 决策）
+
+每局结束（死亡/通关，`state_machine` 判为 `screen_class=terminal`）时，插件把本局 `recent_decision_memory` 总结成「教训 + 偏好」，写入 `catgirl_memory.py` 的 `CatgirlMemoryStore`，持久化到 `<LOCALAPPDATA>/N.E.K.O/sts2_autoplay/catgirl_memory.json`。下一局 `strategy_repository.build_context()` 会把最近几局的教训并入 `strategy_directives.avoid`、偏好并入 `prefer`（软约束），从而影响选牌/路线/战斗决策。总结引擎为**启发式打底 + LLM 可选**（`service._catgirl_llm.available` 时才叠加，失败静默回退）。
+
+## 弹幕/点评
+
+- 猫娘点评经插件 `_maybe_emit_catgirl_llm` → `_push_catgirl` → `POST /danmaku`（文本 + 头像）进游戏内渲染；评论不再走 NEKO 宿主 `push_message`。
+- 战斗时给 LLM 的 prompt 精简为「怪物血量 + 我方生命 + 当前层级」；仅 SSE `event_type == player_action_window_opened`（轮到玩家行动）才附当前回合出牌建议 line（`_build_combat_prompt`，复用 `loop_runner._solver_plan_cached`，签名命中不重复搜 `/solver/plan`）。
+- 弹幕只响应三个战斗事件：`combat_started` / `available_actions_changed` / `combat_turn_changed`，其中仅 `combat_turn_changed`（回合推进）带 line。
 
 ## 数据流
 
@@ -15,6 +53,7 @@
   → heuristic_planner / companion_evaluator 出决策
   → （可选）catgirl_llm 生成弹幕/点评
   → Mod /action 执行动作 → /danmaku 渲染弹幕
+  → （run 结束）catgirl_memory 总结教训/偏好 → 落盘 → 下一局注入 strategy_directives
 ```
 
 ## 使用教程
@@ -22,12 +61,12 @@
 ### 获取MOD
 
 1. 订阅并启用前置模组 **STS2-RitsuLib**（创意工坊 `3747602295`；`mod_id.json` 建议声明 `min_version`）。
-
+2. 订阅**猫娘尖塔 NekoSpire** [创意工坊](https://steamcommunity.com/sharedfiles/filedetails/?id=3794941932)。
 
 ### 启动插件
 
-3. 在 NEKO 里启用猫爪 + 本插件。插件连接时会通过 `POST /config` 关掉 Mod 自己的 LLM/弹幕，把解说交给 NEKO 侧猫娘。
-4. 用插件的 `sts2_start_autoplay` 等入口控制自动玩，`sts2_open_coop_room` 打开 co-op 房间。
+1. 在 NEKO 里启用猫爪 + 本插件。插件连接时会通过 `POST /config` 关掉 Mod 自己的 LLM/弹幕，把解说交给 NEKO 侧猫娘。
+2. 用插件的 `sts2_start_autoplay` 等入口控制自动玩，`sts2_open_coop_room` 打开 co-op 房间。
 
 
 # Mod 部分（C# · 游戏内 Godot Mod）
