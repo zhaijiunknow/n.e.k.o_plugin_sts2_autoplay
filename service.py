@@ -122,7 +122,7 @@ class STS2AutoplayService:
                     self.logger.debug(f"[sts2] disabling mod LLM/danmaku on connect failed (non-fatal): {_llm_exc}")
             companion_enabled = bool(self._cfg.get("companion_mode_enabled", self._cfg.get("neko_commentary_enabled", True)))
             if companion_enabled:
-                self.set_companion_mode(True)
+                self.set_companion_mode(True, emit_status=False)
                 startup_result["companion_mode_enabled"] = True
                 # 初次状态刷新交给后台事件循环（stream_ready 会 force refresh），避免启动同步等待
                 # /solver/plan 等慢查询——否则会撞 NEKO 的 10s 启动超时被强杀。
@@ -458,7 +458,7 @@ class STS2AutoplayService:
         normalized = self._apply_control_mode("standby" if standby else "program")
         return self._mode_controller.describe(normalized) | {"mode": normalized}
 
-    def set_companion_mode(self, enabled: bool) -> dict[str, Any]:
+    def set_companion_mode(self, enabled: bool, *, emit_status: bool = True) -> dict[str, Any]:
         if not enabled and self._loop_runner.is_polling() and not self._loop_runner.is_autoplaying() and hasattr(self.logger, "info"):
             try:
                 self.logger.info("[sts2_companion] disabling companion while polling active; keeping state refresh path quiet during teardown")
@@ -476,7 +476,8 @@ class STS2AutoplayService:
             self._state.last_companion_player_op_fingerprint = ""
             self._state.latest_sync_packet = {}
         message = self.t("companion.enabled", default="已开启陪玩模式。") if enabled else self.t("companion.disabled", default="已关闭陪玩模式。")
-        self._emit_status()
+        if emit_status:
+            self._emit_status()
         if enabled:
             self._sync_background_polling()
             self._push_companion_message()
