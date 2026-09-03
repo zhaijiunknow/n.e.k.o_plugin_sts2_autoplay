@@ -18,9 +18,10 @@ class STS2StrategyRepository:
         "REGENT": "regent",
     }
 
-    def __init__(self, logger: Any, preference_store: Any, *, default_strategy: str = "defect") -> None:
+    def __init__(self, logger: Any, preference_store: Any, *, catgirl_memory: Any = None, default_strategy: str = "defect") -> None:
         self.logger = logger
         self._preference_store = preference_store
+        self._catgirl_memory = catgirl_memory
         self._default_strategy = default_strategy
         self._parser = STS2StrategyParser(logger)
 
@@ -37,6 +38,7 @@ class STS2StrategyRepository:
         strategy_constraints = self._parser.load_constraints(strategy, scene_name)
         preferences = self._preferences_for_screen(screen, summary_context)
         strategy_directives = self._build_strategy_directives(screen, strategy_constraints, preferences)
+        self._inject_run_memory_directives(strategy_directives)
         override_text = self._override_text(event_override, enemy_override)
         if override_text:
             strategy_prompt = f"{strategy_prompt}\n\n## 用户指点覆盖\n{override_text}" if strategy_prompt else f"## 用户指点覆盖\n{override_text}"
@@ -79,6 +81,28 @@ class STS2StrategyRepository:
         if preferred_option_index is not None:
             directives["preferred_option_index"] = preferred_option_index
         return directives
+
+    def _inject_run_memory_directives(self, directives: dict[str, Any]) -> None:
+        """把猫娘跨局记忆注入到决策指令（只影响软约束 avoid/prefer，不碰 must）。
+
+        summarize_recent 已去重、只体现最近几局共性，所以此处追加是幂等的（每步重算结果一致），
+        不会随 build_context 反复调用而翻倍。
+        """
+        store = self._catgirl_memory
+        if store is None:
+            return
+        try:
+            memory = store.summarize_recent()
+        except Exception:
+            memory = {}
+        lessons = [str(x).strip() for x in memory.get("lessons", []) if str(x).strip()]
+        preferences = [str(x).strip() for x in memory.get("preferences", []) if str(x).strip()]
+        if lessons:
+            existing = [str(x).strip() for x in directives.get("avoid", []) if str(x).strip()]
+            directives["avoid"] = existing + [x for x in lessons if x not in existing]
+        if preferences:
+            existing = [str(x).strip() for x in directives.get("prefer", []) if str(x).strip()]
+            directives["prefer"] = existing + [x for x in preferences if x not in existing]
 
     def _preferred_option_index(self, preferences: dict[str, Any]) -> int | None:
         record = preferences.get("record") if isinstance(preferences.get("record"), dict) else None

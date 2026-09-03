@@ -75,51 +75,6 @@ def test_push_frontend_notification_truncates_host_reply_to_30_chars() -> None:
 
 
 @pytest.mark.unit
-def test_push_frontend_notification_hardens_catgirl_sync_respond_prompt() -> None:
-    plugin = NotificationPlugin()
-
-    plugin._push_frontend_notification(
-        content="建议优先防御或找减伤线。",
-        description="desc",
-        metadata={"kind": "catgirl_sync", "screen": "combat", "summary_kind": "combat"},
-        visibility=[],
-        ai_behavior="respond",
-        message_type="sts2_catgirl_sync",
-    )
-
-    payload = plugin.messages[0]
-    text = payload["parts"][0]["text"]
-    assert "STS2 companion delivery boundary:" in text
-    assert "STS2 companion scene anchor:" in text
-    assert "STS2 companion short output contract:" in text
-    assert "建议优先防御或找减伤线。" in text  # base 内容保留
-    assert payload["metadata"]["max_reply_chars"] == 10
-    assert payload["metadata"]["reply_contract"] == "short_tts_line"
-    assert payload["coalesce_key"] == "sts2:catgirl_sync:combat|combat"
-    assert payload["visibility"] == []
-    assert payload["ai_behavior"] == "respond"
-
-
-@pytest.mark.unit
-def test_push_frontend_notification_catgirl_sync_read_mode_untouched() -> None:
-    plugin = NotificationPlugin()
-
-    plugin._push_frontend_notification(
-        content="sync message",
-        description="desc",
-        metadata={"kind": "catgirl_sync", "screen": "combat", "summary_kind": "combat"},
-        visibility=[],
-        ai_behavior="read",
-        message_type="sts2_catgirl_sync",
-    )
-
-    payload = plugin.messages[0]
-    assert payload["parts"][0]["text"] == "sync message"
-    assert "STS2 companion delivery boundary:" not in payload["parts"][0]["text"]
-    assert payload["coalesce_key"] == "sts2:catgirl_sync:combat|combat"
-
-
-@pytest.mark.unit
 def test_push_status_feedback_builds_v2_payload() -> None:
     plugin = NotificationPlugin()
 

@@ -12,10 +12,11 @@ from .action_registry import STS2ActionRegistry
 from .candidate_generator import STS2CandidateGenerator
 from .catgirl_bridge import STS2CatgirlBridge
 from .catgirl_llm import CatgirlCommentGenerator, EventAdviceGenerator
+from .catgirl_memory import CatgirlMemoryStore, _default_memory_path
 from .companion_evaluator import STS2CompanionEvaluator
 from .heuristic_planner import STS2HeuristicPlanner
 from .instructions import normalize_guidance_instruction
-from .loop_runner import STS2LoopRunner
+from .loop_runner import STS2LoopRunner, _combat_plan_signature, _current_turn_steps
 from .mode_controller import STS2ModeController
 from .neko_interface import STS2NekoInterface
 from .preference_extractors import STS2PreferenceExtractor
@@ -41,12 +42,9 @@ class STS2AutoplayService:
         self._sdk_bus = sdk_bus
         self._sdk_ctx = sdk_ctx
         self._i18n = i18n
-        # 猫娘 LLM 点评生成（catgirl 弹幕真内容来源），节流状态
+        # 猫娘 LLM 点评生成（catgirl 弹幕真内容来源）
         self._catgirl_llm = CatgirlCommentGenerator(self.logger)
         self._catgirl_llm_enabled = True
-        self._catgirl_llm_inflight = False
-        self._last_catgirl_llm_at = 0.0
-        self._catgirl_llm_interval = 10.0
         # 猫娘头像(base64)缓存:从 N.E.K.O 主 server card-drop 拉一次,TTL 300s
         self._avatar_b64: str | None = None
         self._avatar_at: float = 0.0
@@ -64,9 +62,12 @@ class STS2AutoplayService:
         self._catgirl_bridge = STS2CatgirlBridge(i18n=self._i18n, source_id="sts2_autoplay")
         self._preference_store = STS2PreferenceStore()
         self._preference_extractor = STS2PreferenceExtractor()
+        # 猫娘跨局记忆：run 结束总结教训/偏好，落盘后注入 strategy_directives 影响下一局决策。
+        self._catgirl_memory = CatgirlMemoryStore(path=_default_memory_path(), logger=self.logger)
         self._strategy_repository = STS2StrategyRepository(
             logger,
             self._preference_store,
+            catgirl_memory=self._catgirl_memory,
             default_strategy="defect",
         )
         self._mode_controller = STS2ModeController("program")
@@ -88,12 +89,8 @@ class STS2AutoplayService:
         except Exception:
             pass
         self._cfg = dict(cfg)
-        # 猫娘 LLM 点评：开关 + 最小生成间隔（节流）
+        # 猫娘 LLM 点评：开关（生成间隔节流已不启用，防刷屏由外层 _should_deliver_sync 兜底）
         self._catgirl_llm_enabled = bool(self._cfg.get("catgirl_llm_enabled", True))
-        try:
-            self._catgirl_llm_interval = max(2.0, float(self._cfg.get("catgirl_llm_min_interval_seconds", 10.0) or 10.0))
-        except (TypeError, ValueError):
-            self._catgirl_llm_interval = 10.0
         # 事件房 LLM 建议：开关 + 融合权重（0=纯 heuristic，1=纯 LLM）
         self._event_llm_enabled = bool(self._cfg.get("event_llm_enabled", True))
         try:
@@ -959,6 +956,52 @@ class STS2AutoplayService:
             "act": snapshot.get("act"),
         }
         self._state.run_intent = run_intent
+        self._maybe_record_run_memory(snapshot)
+
+    def _maybe_record_run_memory(self, snapshot: dict[str, Any]) -> None:
+        """run 结束（死亡/通关）时，把本局决策痕迹总结成教训/偏好写进猫娘记忆。
+
+        terminal 屏会反复出现在快照里，因此只在 run_id 与上次写入不同时才总结（幂等）。
+        """
+        try:
+            classification = snapshot.get("classification") if isinstance(snapshot.get("classification"), dict) else {}
+            if classification.get("screen_class") != "terminal":
+                return
+            screen = str(snapshot.get("screen") or "").strip().lower()
+            # 仅认这三种终点屏；其余 modal 等误报 terminal 的跳过
+            if screen not in {"game_over", "victory", "defeat"}:
+                return
+            run_id = str(snapshot.get("run_id") or "")
+            if not run_id or run_id == self._state.last_memory_run_id:
+                return
+            self._state.last_memory_run_id = run_id
+            outcome = "victory" if screen == "victory" else "defeat"
+            raw_state = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
+            run = raw_state.get("run") if isinstance(raw_state.get("run"), dict) else {}
+            character = str(snapshot.get("character") or raw_state.get("character_id") or run.get("character_id") or "")
+            floor = int(snapshot.get("floor") or 0)
+            act = int(snapshot.get("act") or 0)
+            # LLM 可选：复用猫娘 LLM 做自然语言归纳；不可用则纯启发式。
+            llm = self._catgirl_llm if getattr(self._catgirl_llm, "available", False) else None
+            self._catgirl_memory.add_run(
+                run_id,
+                character=character,
+                outcome=outcome,
+                floor=floor,
+                act=act,
+                decision_memory=self._state.recent_decision_memory,
+                llm=llm,
+            )
+            self.logger.info(
+                "[sts2_memory] recorded run end run_id=%s outcome=%s floor=%s lesson_count=%s pref_count=%s",
+                run_id,
+                outcome,
+                floor,
+                len(self._catgirl_memory.runs[-1].get("lessons", [])) if self._catgirl_memory.runs else 0,
+                len(self._catgirl_memory.runs[-1].get("preferences", [])) if self._catgirl_memory.runs else 0,
+            )
+        except Exception as exc:
+            self.logger.info("[sts2_memory] record run end failed (non-fatal): %s", exc)
 
     def _remember_snapshot_metadata(self) -> None:
         snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
@@ -980,26 +1023,18 @@ class STS2AutoplayService:
         - 否则推启发式文本（保持即时性，避免无弹幕）
         """
         kind = str(payload.get("summary_kind") or "")
-        if not bool(companion_evaluation.get("should_comment", True)):
-            self.logger.info("[sts2_catgirl_llm] skip=should_comment_false kind=%s", kind)
-            return
+        # 弹幕高密度：不再用 should_comment / LLM 生成间隔节流拦截。防刷屏统一交给外层
+        # _deliver_catgirl_sync 里的 _should_deliver_sync（指纹+场景/间隔去重）。
         enabled = self._catgirl_llm_enabled
         llm_ok = self._catgirl_llm is not None and self._catgirl_llm.available
         if enabled and llm_ok:
-            now = time()
-            throttle_ok = (now - self._last_catgirl_llm_at) >= self._catgirl_llm_interval
-            if not self._catgirl_llm_inflight and throttle_ok:
-                self.logger.info("[sts2_catgirl_llm] schedule kind=%s screen=%s", kind, payload.get("screen"))
-                self._catgirl_llm_inflight = True
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    self._catgirl_llm_inflight = False
-                    self._push_catgirl_fallback(companion_evaluation, payload)
-                    return
-                loop.create_task(self._catgirl_llm_async(snapshot, payload))
+            self.logger.info("[sts2_catgirl_llm] schedule kind=%s screen=%s", kind, payload.get("screen"))
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._push_catgirl_fallback(companion_evaluation, payload)
                 return
-            self.logger.info("[sts2_catgirl_llm] skip inflight=%s throttle_ok=%s kind=%s", self._catgirl_llm_inflight, throttle_ok, kind)
+            loop.create_task(self._catgirl_llm_async(snapshot, payload))
             return
         self.logger.info("[sts2_catgirl_llm] fallback enabled=%s llm_ok=%s kind=%s", enabled, llm_ok, kind)
         self._push_catgirl_fallback(companion_evaluation, payload)
@@ -1030,8 +1065,9 @@ class STS2AutoplayService:
             async with httpx.AsyncClient(timeout=3.0) as client:
                 resp = await client.get(url)
             payload = resp.json()
-            data = payload.get("data") if isinstance(payload, dict) else {}
-            avatar = data.get("avatar") if isinstance(data, dict) else None
+            # 48911 card-drop 顶层直接返回 {name, dataUrl}；头像在 dataUrl 字段（可能带 data:...;base64, 前缀），
+            # 不是 data 包装里的 avatar。Mod 端 DecodeAvatar.StripDataPrefix 会去掉前缀，直接传即可。
+            avatar = payload.get("dataUrl") if isinstance(payload, dict) else None
             if avatar:
                 self._avatar_b64 = str(avatar)
                 self._avatar_at = now
@@ -1052,11 +1088,17 @@ class STS2AutoplayService:
             self.logger.info("[sts2_catgirl_llm] push failed: %s", exc)
 
     async def _catgirl_llm_async(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> None:
-        """异步生成猫娘点评并推 catgirl 弹幕；失败静默（兜底留给下一次）。"""
+        """异步生成猫娘点评并推 catgirl 弹幕；失败静默（兜底留给下一次）。
+
+        战斗时给 LLM 的 prompt 精简为三样：当前回合完整 line + 怪物行动意图 + 我方生命，
+        其余界面保持原 summary_text（太长会导致 LLM 抓不住重点、输出变唠叨）。
+        """
         kind = str(payload.get("summary_kind") or "")
         try:
             situation = snapshot.get("situation_summary") if isinstance(snapshot.get("situation_summary"), dict) else {}
             summary_text = str(payload.get("message") or situation.get("text") or "").strip()
+            if kind == "combat":
+                summary_text = await self._build_combat_prompt(snapshot, payload)
             self.logger.info("[sts2_catgirl_llm] generate kind=%s text=%s", kind, summary_text[:80])
             text = await self._catgirl_llm.generate(
                 summary_text=summary_text,
@@ -1071,9 +1113,100 @@ class STS2AutoplayService:
                 await self._push_catgirl(text)
         except Exception as exc:
             self.logger.info("[sts2_catgirl_llm] exception %s kind=%s", exc, kind)
-        finally:
-            self._catgirl_llm_inflight = False
-            self._last_catgirl_llm_at = time()
+
+    async def _build_combat_prompt(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> str:
+        """战斗 prompt：怪物行动意图 + 我方生命 + 当前层级；仅 combat_turn_changed 再加当前回合完整 line。
+
+        - 弹幕只响应 combat_started / available_actions_changed / combat_turn_changed 三个战斗事件；
+          只有 combat_turn_changed（回合推进，轮到玩家出牌）才带 line，其余两个只报基础三样，
+          避免 line 生成延迟或行动窗口未开时提示错误打法。其余事件（screen_changed 等）不触发。
+        - line 优先复用 loop_runner 的整回合缓存（_solver_plan_cached，按 run_id+turn 签名），
+          命中则不重复跑 /solver/plan 搜索；未命中/无战斗才回退调用 get_combat_plan()。
+          格式与 Mod 独立版 NekoDanmakuDriver.SolverHintAsync 一致。
+        """
+        steps_text = ""
+        try:
+            if str(payload.get("event_type") or "") == "combat_turn_changed":
+                plan: dict[str, Any] | None = None
+                loop_runner = getattr(self, "_loop_runner", None)
+                if loop_runner is not None:
+                    cache = getattr(loop_runner, "_solver_plan_cached", None)
+                    cache_sig = getattr(loop_runner, "_solver_plan_sig", None)
+                    if cache and cache_sig == _combat_plan_signature(snapshot):
+                        plan = cache
+                if plan is None and self._client is not None:
+                    fetched = await self._client.get_combat_plan()
+                    if fetched and fetched.get("in_combat"):
+                        plan = fetched
+                steps_text = self._format_plan_line(plan)
+        except Exception:
+            steps_text = ""
+        # 怪物血量+意图 + 我方生命 + 当前层级。敌人带当前血量：payload["enemies"] 只有 name/intent，
+        # 血量要从 snapshot.situation_summary.payload.enemies 取。
+        enemies_pool = payload.get("enemies") if isinstance(payload.get("enemies"), list) else []
+        situation = snapshot.get("situation_summary") if isinstance(snapshot.get("situation_summary"), dict) else {}
+        sum_payload = situation.get("payload") if isinstance(situation.get("payload"), dict) else {}
+        full_enemies = sum_payload.get("enemies") if isinstance(sum_payload.get("enemies"), list) else []
+        enemy_bits = []
+        for idx in range(min(len(enemies_pool), 3)):
+            base_e = enemies_pool[idx]
+            if not isinstance(base_e, dict):
+                continue
+            name = str(base_e.get("name") or "敌人")
+            intent = str(base_e.get("intent") or "")
+            full = full_enemies[idx] if idx < len(full_enemies) and isinstance(full_enemies[idx], dict) else {}
+            chp = full.get("current_hp") if full.get("current_hp") is not None else base_e.get("hp")
+            mhp = full.get("max_hp")
+            hp_text = ""
+            if isinstance(chp, (int, float)):
+                hp_text = f"{int(chp)}/{int(mhp or 0)}"
+            enemy_bits.append(f"{name}({hp_text}，意图:{intent})" if hp_text else (f"{name}(意图:{intent})" if intent else name))
+        player = payload.get("player") if isinstance(payload.get("player"), dict) else {}
+        hp = ""
+        if isinstance(player.get("current_hp"), (int, float)):
+            hp = f" 我方生命{int(player['current_hp'])}/{int(player.get('max_hp') or 0)}"
+        floor = ""
+        try:
+            fl = self._safe_int(snapshot.get("floor"))
+            if fl:
+                floor = f" 层级{fl}"
+        except Exception:
+            floor = ""
+        enemies_text = " 敌人:" + "、".join(enemy_bits) if enemy_bits else ""
+        base = steps_text or ""
+        return f"本轮: {base}{enemies_text}{hp}{floor}".strip()
+
+    @staticmethod
+    def _format_plan_line(plan: dict[str, Any] | None) -> str:
+        """把 /solver/plan 的当前回合 line（line[0].steps）拼成一句人类可读指令。
+
+        每个动作一步：打<卡名>[→目标N] / 用药水<名> / 结束回合。取不到返回 ""。
+        """
+        if not plan:
+            return ""
+        try:
+            steps = _current_turn_steps(plan)
+        except Exception:
+            return ""
+        if not steps:
+            return ""
+        parts: list[str] = []
+        for s in steps:
+            if not isinstance(s, dict):
+                continue
+            k = str(s.get("kind") or "")
+            if k == "play_card":
+                name = str(s.get("card_name") or s.get("card_id") or "打牌")
+                target = ""
+                ti = s.get("target_index")
+                if isinstance(ti, int):
+                    target = f"→{ti + 1}"
+                parts.append(f"打{name}{target}")
+            elif k == "use_potion":
+                parts.append(f"用药水{str(s.get('card_name') or s.get('card_id') or '')}")
+            elif k == "end_turn":
+                parts.append("结束回合")
+        return "；".join(parts)
 
     def _push_catgirl_fallback(self, companion_evaluation: dict[str, Any], payload: dict[str, Any]) -> None:
         """兜底：推启发式 primary_message 到游戏内弹幕（原 catgirl 轨道文本来源）。"""

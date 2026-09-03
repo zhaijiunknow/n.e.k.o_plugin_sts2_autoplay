@@ -601,7 +601,12 @@ class STS2CompanionEvaluator:
         if trigger == "scene_entry" and scene_key:
             return scene_key != getattr(runtime_state, "last_companion_scene_key", "")
         if trigger == "player_operation" and player_operation_observation:
-            return False
+            # 弹幕模式：玩家操作也值得点评，不再一律拦。上游 _should_emit_player_operation 已按
+            # fingerprint 去重 + 节流，这里只对同指纹的重复操作再挡一次，防止同一操作连发。
+            fingerprint = str(player_operation_observation.get("fingerprint") or "")
+            if fingerprint:
+                return fingerprint != getattr(runtime_state, "last_companion_player_op_fingerprint", "")
+            return True
         return True
 
     def _with_card_cost(self, text: str, *, payload: dict[str, Any]) -> str:

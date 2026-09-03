@@ -20,6 +20,9 @@ class STS2LoopRunner:
         "combat_turn_changed", "player_action_window_opened", "player_action_window_closed",
         "route_decision_required", "reward_decision_required", "event_state_changed", "session_started",
     })
+    # 猫娘战斗弹幕只响应这三个战斗事件；仅 combat_turn_changed（回合推进）带 out 牌建议 line，
+    # 其余两个（combat_started / available_actions_changed）只报基础。见 _build_combat_prompt。
+    _COMBAT_DANMAKU_EVENTS = frozenset({"combat_started", "available_actions_changed", "combat_turn_changed"})
     # Coalesce a burst of SSE events into at most one /state fetch per this window.
     _EVENT_FETCH_MIN_INTERVAL_SECONDS = 0.5
 
@@ -35,6 +38,10 @@ class STS2LoopRunner:
         # recomputed on every tick while the combat position is unchanged. See _combat_plan_signature.
         self._solver_plan_sig: Any = None
         self._solver_plan_cached: dict[str, Any] | None = None
+        # 最近一次 SSE 事件类型（combat_started / player_action_window_opened 等）。随
+        # /events/stream 更新，供 catgirl 战斗 prompt 判断"该不该带 line"：仅轮到玩家行动的
+        # player_action_window_opened 才带，其余战斗事件只报基础（怪物血/我方血/层级）。
+        self._current_event_type: str = ""
         # Cache the event-room LLM advice against the event-state signature (see _event_plan_signature)
         # so the LLM is not re-consulted every tick while the event options are unchanged.
         self._event_llm_sig: Any = None
@@ -262,6 +269,9 @@ class STS2LoopRunner:
             },
             standby=self._service._state.standby,
         )
+        # 带上触发这次点评的 SSE 事件类型：仅 player_action_window_opened（轮到玩家行动）时
+        # catgirl 战斗 prompt 才带 line，其余战斗事件只报基础（怪物血/我方血/层级）。
+        catgirl_sync["payload"]["event_type"] = self._current_event_type
         catgirl_sync["payload"]["agent_summary"] = {
             "standby": self._service._state.standby,
             "text": str(situation_summary.get("text") or ""),
@@ -436,6 +446,9 @@ class STS2LoopRunner:
                             pass
                         continue
                     if event_type in self._RELEVANT_EVENT_TYPES:
+                        # 战斗弹幕只认三个战斗事件（见 _COMBAT_DANMAKU_EVENTS）；非战斗事件清空，
+                        # 避免 _current_event_type 把上一场战斗的事件类型串进当前画面。
+                        self._current_event_type = event_type if event_type in self._COMBAT_DANMAKU_EVENTS else ""
                         await self._maybe_event_refresh(force=False)
                     # heartbeat / unknown events -> ignore.
             except Exception as exc:

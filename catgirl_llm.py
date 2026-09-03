@@ -235,19 +235,36 @@ class CatgirlCommentGenerator(_ChatLLMBase):
             return ""
 
     def _build_messages(self, *, summary_text: str, summary_kind: str, payload: dict[str, Any]) -> list[dict[str, str]]:
+        scene = str(summary_kind or "general")
+        context = str(summary_text or "").strip()[:_MAX_PROMPT_CHARS]
+        if scene == "combat":
+            # 战斗：prompt 里已带"本轮: 打<卡>→N；结束回合"这类出牌建议（line），要 LLM 用猫娘口吻
+            # 把建议转述出来（先打X再补Y/躲Z），而不是只卖萌噤声。放宽字数，但保留弹幕感。
+            base = (
+                "基于你的人设，用一句短小、猫娘口吻的弹幕点评当前战斗，并自然带出下面的出牌建议。"
+                "要求：把给出的『本轮』建议用猫娘话讲清楚（比如：先打痛击再补冷光，躲开诅咒喵！），"
+                "让人一听就知道该打哪张牌、注意敌人什么；一句话 10~25 字；像直播间弹幕一样活泼、有情绪；"
+                "不要逐字复述卡名编号堆砌，不要用『按X策略』模板；"
+                "句末或句首带你的口癖收尾，简短有力。"
+            )
+            persona = self._persona_system()
+            system = persona + "\n\n" + base if persona else "你是《杀戮尖塔 2》的直播间陪玩猫娘。\n" + base
+            user = f"当前场景：{scene}\n当前战斗局面与出牌建议：{context}"
+            return [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]
         base = (
             "基于你的人设，用一句短小、猫娘口吻的弹幕表达对当前局面的即时反应"
             "（吐槽/加油/紧张/得意都可以）。"
             "要求：一句话不超过 10 字；像直播间弹幕一样自然活泼、有情绪起伏；"
             "不要写建议式长篇，不要用『按X策略』模板，不要复述术语堆砌。"
-            "按场景带不同情绪：战斗→紧张或兴奋；选牌/奖励→期待或挑剔；"
+            "按场景带不同情绪：选牌/奖励→期待或挑剔；"
             "商店→心动或精打细算；火堆→放松或鼓励；事件→好奇或惊讶。"
             "句末或句首带你的口癖收尾，简短有力。"
         )
         persona = self._persona_system()
         system = persona + "\n\n" + base if persona else "你是《杀戮尖塔 2》的直播间陪玩猫娘。\n" + base
-        context = str(summary_text or "").strip()[:_MAX_PROMPT_CHARS]
-        scene = str(summary_kind or "general")
         user = f"当前场景：{scene}\n当前局面：{context}"
         return [
             {"role": "system", "content": system},

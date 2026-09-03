@@ -72,6 +72,8 @@ class STS2RuntimeState:
     last_push_step_count: int = -1
     last_push_at: float = 0.0
     sync_repeat_count: int = 0
+    # 上次已把哪一局写入猫娘记忆（避免 terminal 屏反复触发时重复总结同一局）。
+    last_memory_run_id: str = ""
 
     @property
     def standby(self) -> bool:

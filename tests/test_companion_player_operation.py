@@ -200,6 +200,7 @@ def test_player_operation_allows_follow_up_in_same_turn_once() -> None:
     service = STS2AutoplayService(DummyLogger(), lambda payload: None)
     service._state.last_companion_turn_key = "3:combat:2"
 
+    # 首次 player_operation：fps 与已记录的 last_companion_player_op_fingerprint 不同 → 放行点评。
     allowed_follow_up = service._companion_evaluator._should_comment(
         trigger="player_operation",
         turn_key="3:combat:3",
@@ -208,6 +209,10 @@ def test_player_operation_allows_follow_up_in_same_turn_once() -> None:
         runtime_state=service._state,
         player_operation_observation={"fingerprint": "obs-1", "should_comment": True},
     )
+    assert allowed_follow_up is True
+
+    # 同 fingerprint 的重复操作 → 拦截（防止同一操作连发）。
+    service._state.last_companion_player_op_fingerprint = "obs-1"
     blocked_repeat = service._companion_evaluator._should_comment(
         trigger="player_operation",
         turn_key="3:combat:3",
@@ -216,9 +221,6 @@ def test_player_operation_allows_follow_up_in_same_turn_once() -> None:
         runtime_state=service._state,
         player_operation_observation={"fingerprint": "obs-1", "should_comment": True},
     )
-
-    assert allowed_follow_up is False
-    assert service._state.last_companion_player_op_fingerprint == ""
     assert blocked_repeat is False
 
 
