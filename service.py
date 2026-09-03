@@ -1119,7 +1119,6 @@ class STS2AutoplayService:
         if not payload:
             return
         self._state.latest_sync_packet = dict(payload)
-        notifier = self._frontend_notifier
         if not bool(catgirl_sync.get("should_sync")):
             if str(companion_evaluation.get("trigger") or payload.get("trigger") or "") == "combat_turn":
                 try:
@@ -1226,46 +1225,9 @@ class STS2AutoplayService:
             except Exception:
                 pass
             return
-        if notifier is None:
-            if str(companion_evaluation.get("trigger") or payload.get("trigger") or "") == "combat_turn":
-                try:
-                    self.logger.info(
-                        "[sts2_combat_turn_path] return=frontend_notifier_missing turn_key=%s last_turn_key=%s",
-                        companion_evaluation.get("turn_key"),
-                        self._state.last_companion_turn_key,
-                    )
-                except Exception:
-                    pass
-            print("[sts2_companion_sync:skip] reason=frontend_notifier_missing")
-            try:
-                self.logger.info("[sts2_push_debug] deliver_catgirl_sync skipped: frontend_notifier missing")
-            except Exception:
-                pass
-            return
-        ai_behavior = str(payload.get("ai_behavior") or "respond")
-        if self._companion_mode_active() and ai_behavior == "read":
-            ai_behavior = "respond"
+        # 点评改走游戏内弹幕（上方 _maybe_emit_catgirl_llm -> mod /danmaku，文本+头像），不再经 push_message 发 NEKO。
         push_scene_key = f"{payload.get('screen')}|{payload.get('summary_kind')}|{payload.get('trigger')}"
         push_reason = str(catgirl_sync.get("reason") or "")
-        notifier(
-            content=self._host_reply_text(str(payload.get("message") or payload.get("summary") or self.t("sync.default", default="尖塔局势已同步。"))),
-            description="STS2 catgirl sync",
-            metadata={
-                "kind": "catgirl_sync",
-                "screen": payload.get("screen"),
-                "summary_kind": payload.get("summary_kind"),
-                "trigger": payload.get("trigger"),
-                "strategy": dict(payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}),
-                "player_operation": dict(payload.get("player_operation") if isinstance(payload.get("player_operation"), dict) else {}),
-                "player": dict(payload.get("player") if isinstance(payload.get("player"), dict) else {}),
-                "enemies": list(payload.get("enemies") if isinstance(payload.get("enemies"), list) else []),
-                "cards": list(payload.get("cards") if isinstance(payload.get("cards"), list) else []),
-            },
-            priority=4,
-            message_type="sts2_catgirl_sync",
-            visibility=[],
-            ai_behavior=ai_behavior,
-        )
         trigger = str(companion_evaluation.get("trigger") or payload.get("trigger") or "")
         turn_key = str(companion_evaluation.get("turn_key") or "")
         scene_key = str(companion_evaluation.get("scene_key") or "")
