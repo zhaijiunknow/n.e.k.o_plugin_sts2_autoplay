@@ -179,6 +179,19 @@ class STS2AutoplayService:
         message = self.t("status.connected", default="STS2-Agent 已连接: {base_url}", base_url=self._state.base_url)
         return {"status": "connected", "message": message, "summary": message, "health": health}
 
+    async def open_coop_room(self, host: bool = True) -> dict[str, Any]:
+        """Open the co-op room: enter the multiplayer scene and create (host) / join the lobby.
+
+        Sends the mod's co-op actions (open_multiplayer_menu -> host|join_multiplayer_lobby). The catgirl's
+        character select + ready are handled by the autoplay driver / the lobby screen logic.
+        """
+        client = self._require_client()
+        await client.execute_action("open_multiplayer_menu")
+        lobby_action = "host_multiplayer_lobby" if host else "join_multiplayer_lobby"
+        await client.execute_action(lobby_action)
+        self.logger.info(f"[sts2] opened co-op room ({lobby_action})")
+        return {"status": "opened", "host": host, "action": lobby_action}
+
     async def refresh_state(self, *, trigger_sync: bool = False) -> dict[str, Any]:
         previous_snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
         tick_result = await self._loop_runner.tick()

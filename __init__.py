@@ -229,6 +229,21 @@ class STS2AutoplayPlugin(NekoPluginBase):
         return await self._run_entry(self._service.neko.stop_autoplay, finish=True)
 
     @plugin_entry(
+        id="sts2_open_coop_room",
+        name=tr("entries.sts2_open_coop_room.name", default="打开 co-op 房间"),
+        description=tr("entries.sts2_open_coop_room.description", default="进多人测试场景并创建/加入 co-op 大厅（catgirl 选角 + ready 由自动游玩处理）。"),
+        llm_result_fields=["summary"],
+        input_schema={
+            "type": "object",
+            "properties": {"host": {"type": "boolean"}},
+            "required": [],
+        },
+        metadata={"agent_auto": False},
+    )
+    async def sts2_open_coop_room(self, host: bool = True, **_: Any):
+        return await self._run_entry(lambda: self._service.open_coop_room(host=host))
+
+    @plugin_entry(
         id="sts2_enable_companion_mode",
         name=tr("entries.sts2_enable_companion_mode.name", default="打开陪玩模式"),
         description=tr("entries.sts2_enable_companion_mode.description", default="让它开始陪你看局面，并适时给点评和提醒。"),
