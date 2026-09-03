@@ -19,7 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # 状态模型（从快照解析）
 # ---------------------------------------------------------------------------
@@ -268,7 +267,6 @@ def search_best_sequence(state: CombatState, *, beam_width: int = 12, max_depth:
                 # 没牌可打/没能量 → 结束回合
                 results.append((list(node.played), _state_score(s)))
                 continue
-            expanded_any = False
             for card in playable:
                 targets = card.targets if card.target_index_space == "enemies" else [None]
                 if not targets:
@@ -281,7 +279,6 @@ def search_best_sequence(state: CombatState, *, beam_width: int = 12, max_depth:
                     new_node = SearchNode(nxt, node.played + [Played(card.index, tgt, card.name)],
                                           node.damage_dealt + dmg, node.block_gained + blk)
                     next_frontier.append(new_node)
-                    expanded_any = True
             # 也可以在任意时刻结束回合
             results.append((list(node.played), _state_score(s)))
         # beam：保留分最高的 N 个继续

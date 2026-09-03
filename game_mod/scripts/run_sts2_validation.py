@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import os
 import signal
@@ -1585,7 +1584,7 @@ def suite_new_run_lifecycle(args: argparse.Namespace) -> dict[str, Any]:
     )
     client.request("GET", "/health")
 
-    state = client.wait_for_state(
+    client.wait_for_state(
         "active-run MAIN_MENU",
         lambda current: current.get("screen") == "MAIN_MENU" and "abandon_run" in list(current.get("available_actions") or []),
         attempts=args.poll_attempts,
