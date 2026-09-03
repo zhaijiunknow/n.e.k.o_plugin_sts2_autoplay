@@ -22,6 +22,10 @@ namespace NekoComm.Game
         // used when no base64 avatar is supplied (the N.E.K.O client). Icon shows none if missing.
         public string danmaku_avatar { get; set; } = "catgirl.png";
         public bool llm_enabled { get; set; } = true;
+        // Danmaku (catgirl commentary) is decoupled from llm_enabled (which gates the autoplay LLM decisions
+        // for MAP/reward/event/deck). Turn this off to suppress commentary while keeping decision-LLM on.
+        // The catgirl (co-op autoplay client) process also skips danmaku automatically.
+        public bool danmaku_enabled { get; set; } = true;
         public string llm_base_url { get; set; } = "https://api.openai.com/v1";
         public string llm_api_key { get; set; } = "";
         public string llm_model { get; set; } = "";

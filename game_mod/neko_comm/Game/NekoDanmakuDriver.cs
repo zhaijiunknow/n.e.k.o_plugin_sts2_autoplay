@@ -29,6 +29,15 @@ namespace NekoComm.Game
             {
                 if (_started)
                     return;
+                // Danmaku (catgirl commentary) is decoupled from the autoplay decision-LLM (llm_enabled).
+                // The catgirl (co-op autoplay client) process runs headless and must not generate
+                // commentary, so it is suppressed here regardless of llm_enabled. danmaku_enabled is the
+                // explicit global toggle.
+                if (!NekoConfig.Current.danmaku_enabled || NekoAutoplayDriver.IsCatgirlProcess())
+                {
+                    _started = true;   // marked started so the event loop never spins up
+                    return;
+                }
                 _started = true;
             }
             _ = Task.Run(EventLoopAsync);

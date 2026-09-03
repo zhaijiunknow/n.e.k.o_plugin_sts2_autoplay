@@ -213,6 +213,7 @@ internal static class Router
                     {
                         coop_enabled = cfg.coop_enabled,
                         llm_enabled = cfg.llm_enabled,
+                        danmaku_enabled = cfg.danmaku_enabled,
                         llm_base_url = cfg.llm_base_url,
                         llm_model = cfg.llm_model,
                         llm_max_tokens = cfg.llm_max_tokens,

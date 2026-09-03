@@ -197,6 +197,10 @@ namespace NekoComm.Game
         private static bool IsSteamJoinMode() =>
             !string.IsNullOrWhiteSpace(System.Environment.GetEnvironmentVariable("STS2_CONNECT_LOBBY"));
 
+        // Shared role detection: true when this process is the catgirl (co-op autoplay client). Other
+        // subsystems (e.g. the danmaku driver) call this to skip work a human-facing instance should own.
+        internal static bool IsCatgirlProcess() => IsSteamJoinMode() || IsClientByPort();
+
         private static int ResolveOwnPort()
         {
             var raw = System.Environment.GetEnvironmentVariable("STS2_API_PORT");

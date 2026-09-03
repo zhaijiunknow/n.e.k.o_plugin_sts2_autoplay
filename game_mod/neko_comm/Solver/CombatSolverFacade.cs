@@ -174,12 +174,14 @@ internal static class CombatSolverFacade
                 potions = result.PotionCount,
                 risk = result.Snapshot.HasRisk || !result.Forecast.IsExactForModeledDamage,
             },
-            win_prob = null,
+            win_prob = ProbeWinProbability(result.Snapshot),
             search_status = MapStatus(result),
             budget_ms = (long)result.Elapsed.TotalMilliseconds,
             nodes_expanded = result.ExpandedNodes,
-            rollouts_total = null,
-            confidence = null,
+            // The 0.27 engine is a beam search (no Monte-Carlo rollouts), so rollouts_total is reported as
+            // the number of expanded search nodes — the beam-search analog of search effort.
+            rollouts_total = result.ExpandedNodes,
+            confidence = ProbeConfidence(result),
             policy_explanation = BuildPolicyText(first),
         };
     }
@@ -192,6 +194,28 @@ internal static class CombatSolverFacade
                 System.Security.Cryptography.SHA256.HashData(
                     System.Text.Encoding.UTF8.GetBytes(root.ContinuationStamp.StateText)))
             [..16];
+
+    // The 0.27 engine is a heuristic beam search, not a Monte-Carlo P(victory) estimator. The values below
+    // are derived, defensible proxies (documented per field) rather than fabricated guarantees.
+    private static double ProbeConfidence(SolverResult result)
+    {
+        bool unsupported = result.Forecast.HasUnsupportedIntent
+            || result.Snapshot.PredictionGaps.Any(gap => !gap.Compensated);
+        if (unsupported)
+            return 0.3;
+        return result.Forecast.IsExactForModeledDamage ? 0.9 : 0.7;
+    }
+
+    private static double ProbeWinProbability(SolverSnapshot snapshot)
+    {
+        if (snapshot.AllEnemiesDead)
+            return 1.0;
+        if (snapshot.PlayerDead)
+            return 0.0;
+        // Crude terminal-state proxy: survival margin of player HP vs remaining enemy HP, centered at 0.5.
+        double margin = snapshot.PlayerHp - snapshot.EnemyHp;
+        return Math.Clamp(0.5 + Math.Tanh(margin / 40.0) * 0.5, 0.0, 1.0);
+    }
 
     private static SolverLineStep MapStep(PlanAction a, Player me)
     {
