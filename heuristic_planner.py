@@ -100,10 +100,12 @@ class STS2HeuristicPlanner:
                 kwargs = self._reward_kwargs(summary_context, action, preferred_option)
                 return PlannedOperation(action_type=action["type"], kwargs=kwargs, confidence=0.72, source="heuristic", reason="reward_preference_or_default")
 
-        if state_name in {"card_selection_unusefull", "card_selection_delet", "card_selection_transform", "card_selection_remove"}:
+        # plain "card_selection" 覆盖战斗内选牌（如「坚毅」烧牌 / combat_hand_select）与菜单卡牌选择；
+        # reward 类走上面的 reward 分支（那里找 choose_reward_card/claim_reward，这里没有才落到 select_deck_card）。
+        if state_name in {"card_selection", "card_selection_unusefull", "card_selection_delet", "card_selection_transform", "card_selection_remove"}:
             action = self._find_action(available_actions, "select_deck_card")
             if action is not None:
-                preferred_option = self._preferred_remove_option(summary_context, preferences)
+                preferred_option = self._preferred_exhaust_option(summary_context, preferences, context)
                 self._debug(
                     "[sts2_remove_plan] cards=%s chosen=%s payload=%s",
                     summary_context.get("payload", {}).get("selection_cards") if isinstance(summary_context.get("payload"), dict) else [],
@@ -535,6 +537,19 @@ class STS2HeuristicPlanner:
             if isinstance(card, dict) and bool(card.get("playable", True)):
                 return fallback_index
         return None
+
+    def _preferred_exhaust_option(self, summary_context: dict[str, Any], preferences: dict[str, Any], context: dict[str, Any]) -> int | None:
+        """选牌消耗（combat_hand_select）：优先用 /solver/plan 的 exhaust_card_id（solver 已优化该烧哪张），
+        命中不到（或非消耗）再走删牌启发式。避免卡死在选牌消耗上。"""
+        pending = context.get("pending_card_exhaust_id") if isinstance(context, dict) else None
+        if pending:
+            payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
+            cards = payload.get("selection_cards") if isinstance(payload.get("selection_cards"), list) else []
+            for i, card in enumerate(cards):
+                if isinstance(card, dict) and str(card.get("card_id") or "") == str(pending):
+                    idx = self._safe_int(card.get("index"))
+                    return idx if idx is not None else i
+        return self._preferred_remove_option(summary_context, preferences)
 
     def _shop_affordable_items(self, summary_context: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}

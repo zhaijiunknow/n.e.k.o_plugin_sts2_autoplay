@@ -29,6 +29,9 @@ class STS2RuntimeState:
     last_decision_source: str = ""
     last_decision_reason: str = ""
     last_planner_type: str = ""
+    # /solver/plan 当前一步若是"选牌消耗"卡的出牌，solver 选定的那张 card_id；在随后的
+    # combat_hand_select(选牌)里据此选牌，避免卡住或用启发式乱猜。非消耗出牌为 None。
+    pending_card_exhaust_id: str | None = None
     latest_sync_packet: dict[str, Any] = field(default_factory=dict)
     latest_report_packet: dict[str, Any] = field(default_factory=dict)
     latest_snapshot_summary: dict[str, Any] = field(default_factory=dict)

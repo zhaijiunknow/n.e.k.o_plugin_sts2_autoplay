@@ -206,6 +206,11 @@ class STS2SummaryContextBuilder:
         player = combat.get("player") if isinstance(combat.get("player"), dict) else {}
         hand = combat.get("hand") if isinstance(combat.get("hand"), list) else []
         enemies = combat.get("enemies") if isinstance(combat.get("enemies"), list) else []
+        # 战斗内待选牌（如「坚毅」烧牌的 combat_hand_select）：把候选牌带进 combat 上下文，供
+        # planner 出 select_deck_card 时选要消耗/处理的那张。summary_kind=combat 走本分支，所以
+        # 不能只依赖 _build_selection_context。
+        selection = raw_state.get("selection") if isinstance(raw_state.get("selection"), dict) else {}
+        selection_cards = selection.get("cards") if isinstance(selection.get("cards"), list) else []
         return {
             "turn": raw_state.get("turn") if raw_state.get("turn") is not None else combat.get("turn"),
             "floor": snapshot.get("floor") if snapshot.get("floor") is not None else raw_state.get("run", {}).get("floor"),
@@ -224,6 +229,8 @@ class STS2SummaryContextBuilder:
             "deck": raw_state.get("deck") if isinstance(raw_state.get("deck"), dict) else {},
             "relics": raw_state.get("relics") if isinstance(raw_state.get("relics"), list) else [],
             "potions": raw_state.get("potions") if isinstance(raw_state.get("potions"), list) else [],
+            "selection": selection,
+            "selection_cards": selection_cards,
             "available_actions": self._available_action_names(snapshot),
         }
 
