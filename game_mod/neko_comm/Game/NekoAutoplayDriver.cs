@@ -310,7 +310,7 @@ namespace NekoComm.Game
                 return null;
             if (!lobby.has_lobby && Has(s, "join_multiplayer_lobby"))
                 return Req("join_multiplayer_lobby");
-            if (!string.Equals(lobby.selected_character_id, "DEFECT", StringComparison.OrdinalIgnoreCase) &&
+            if (!string.Equals(lobby.selected_character_id, "IRONCLAD", StringComparison.OrdinalIgnoreCase) &&
                 Has(s, "select_character"))
                 return Req("select_character", option: ResolveClientCharacterIndex(s));
             if (!lobby.local_ready && Has(s, "ready_multiplayer_lobby"))
@@ -320,7 +320,7 @@ namespace NekoComm.Game
 
         private ActionRequest? DecideCharacterSelect(GameStatePayload s)
         {
-            if (!string.Equals(s.character_select?.selected_character_id, "DEFECT", StringComparison.OrdinalIgnoreCase) &&
+            if (!string.Equals(s.character_select?.selected_character_id, "IRONCLAD", StringComparison.OrdinalIgnoreCase) &&
                 Has(s, "select_character"))
                 return Req("select_character", option: ResolveClientCharacterIndex(s));
             // Ready up to start the co-op run once the catgirl's character is selected (production UI).
@@ -762,11 +762,12 @@ namespace NekoComm.Game
             {
                 for (var i = 0; i < chars.Length; i++)
                 {
-                    if (string.Equals(chars[i].character_id, "DEFECT", StringComparison.OrdinalIgnoreCase) && !chars[i].is_locked)
+                    if (string.Equals(chars[i].character_id, "IRONCLAD", StringComparison.OrdinalIgnoreCase) && !chars[i].is_locked)
                         return i;
                 }
             }
-            return 4; // DEFECT is roster position 4 in the default character lineup (see Start-NekoCoop.ps1).
+            // IRONCLAD (Warrior) is roster position 0 in the default character lineup (see Start-NekoCoop.ps1).
+            return 0;
         }
     }
 }
