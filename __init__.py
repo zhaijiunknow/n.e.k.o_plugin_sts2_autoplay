@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import sys
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
+
+# Windows 上 asyncio 默认 Proactor 事件循环与 ZeroMQ 不兼容（zmq 无法 add_reader，回退到 tornado
+# selector 线程，可能让上行 recv 读到截断的 pickle -> "unpickling stack underflow"）。
+# 尽早把循环策略切成 Selector，让 NEKO 插件进程的 ZMQ 上行更稳。
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except AttributeError:
+        pass
 
 from plugin.sdk.plugin import Err, NekoPluginBase, Ok, SdkError, lifecycle, llm_tool, neko_plugin, plugin_entry, tr
 
