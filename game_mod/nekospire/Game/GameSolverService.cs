@@ -93,10 +93,6 @@ namespace NekoComm.Game
         // name is what the LLM / UI should surface.
         public string? card_name { get; init; }
         public int? target_index { get; init; }
-        // 当这步是打出"要求从手牌选一张消耗"的卡（如升级版坚毅/TrueGrit）时，solver 选定的那张牌；
-        // 插件在随之弹出的 combat_hand_select 里按它选。普通出牌为 null。
-        public string? exhaust_card_id { get; init; }
-        public string? exhaust_card_name { get; init; }
         // 任意计划的卡牌选择（消耗 / 拉弃牌堆 / 生成到手 / 变换 / 弃牌 等）：solver 在这步选定的那张牌。
         // 插件在随后的选牌界面（combat_hand_select / card_select）里按它选。无选择为 null。
         public string? choice_card_id { get; init; }
