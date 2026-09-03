@@ -11,6 +11,8 @@ class STS2StateMachine:
         "card_selection",
         "card_selection_unusefull",
         "card_selection_reward",
+        "card_selection_transform",
+        "card_selection_remove",
         "card_selection_delet",
     }
     _TERMINAL_SCREENS = {"game_over", "victory", "defeat"}

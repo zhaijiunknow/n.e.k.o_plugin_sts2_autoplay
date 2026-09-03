@@ -237,7 +237,11 @@ namespace NekoComm.Game
                     return await DecideCombatAsync(s);
                 case "REWARD":
                     return await BranchLlmAsync(s, DecideReward);
+                case "CARD_SELECTION_REWARD":
+                    return await BranchLlmAsync(s, DecideReward);
                 case "CARD_SELECTION":
+                case "CARD_SELECTION_TRANSFORM":
+                case "CARD_SELECTION_REMOVE":
                     return await BranchLlmAsync(s, DecideCardSelection);
                 case "EVENT":
                     return await BranchLlmAsync(s, DecideEvent);
@@ -363,11 +367,30 @@ namespace NekoComm.Game
                 if (plan is { in_combat: true, line: { Length: > 0 } turns } && turns[0].steps is { Length: > 0 } turnSteps)
                     firstStep = turnSteps[0];
 
-                if (firstStep is { kind: "play_card", card_index: int idx }
-                    && idx >= 0 && idx < hand.Length && hand[idx].playable)
+                if (firstStep?.kind == "play_card")
                 {
-                    _combatSolverFails = 0;
-                    return PlayCard(hand[idx], idx, firstStep.target_index);
+                    // Prefer the plan's EXACT card in the live hand (card_id match + playable). If a boss (e.g.
+                    // Soul Fysh) drifts the hand composition between the sim and the live game, the plan's
+                    // positional index could point at a different card — so never play the sim's index; only
+                    // act on a card the live hand actually holds, else fall to the degraded fallback.
+                    int idx = -1;
+                    if (!string.IsNullOrEmpty(firstStep.card_id))
+                    {
+                        for (var i = 0; i < hand.Length; i++)
+                        {
+                            if (string.Equals(hand[i].card_id, firstStep.card_id, StringComparison.Ordinal)
+                                && hand[i].playable)
+                            {
+                                idx = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (idx >= 0)
+                    {
+                        _combatSolverFails = 0;
+                        return PlayCard(hand[idx], idx, firstStep.target_index);
+                    }
                 }
 
                 // A solver end_turn recommendation is honored (do not play a card against it).
@@ -696,7 +719,11 @@ namespace NekoComm.Game
                 "MAP" => action == "choose_map_node",
                 "REWARD" => action is "resolve_rewards" or "collect_rewards_and_proceed" or "claim_reward"
                     or "choose_reward_card" or "skip_reward_cards" or "proceed",
+                "CARD_SELECTION_REWARD" => action is "choose_reward_card" or "skip_reward_cards"
+                    or "resolve_rewards" or "claim_reward" or "collect_rewards_and_proceed" or "proceed",
                 "CARD_SELECTION" => action is "select_deck_card" or "confirm_selection" or "proceed" or "close_cards_view",
+                "CARD_SELECTION_TRANSFORM" or "CARD_SELECTION_REMOVE" =>
+                    action is "select_deck_card" or "confirm_selection" or "proceed" or "close_cards_view",
                 "EVENT" => action is "choose_event_option" or "proceed",
                 _ => false,
             };

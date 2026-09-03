@@ -89,6 +89,9 @@ namespace NekoComm.Game
         public string kind { get; init; } = "play_card";
         public int? card_index { get; init; }
         public string? card_id { get; init; }
+        // Human-readable name for the card (or potion) — the engine's id (card_id) is the model key; the
+        // name is what the LLM / UI should surface.
+        public string? card_name { get; init; }
         public int? target_index { get; init; }
     }
 

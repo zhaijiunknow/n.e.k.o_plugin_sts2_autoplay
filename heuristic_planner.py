@@ -100,7 +100,7 @@ class STS2HeuristicPlanner:
                 kwargs = self._reward_kwargs(summary_context, action, preferred_option)
                 return PlannedOperation(action_type=action["type"], kwargs=kwargs, confidence=0.72, source="heuristic", reason="reward_preference_or_default")
 
-        if state_name in {"card_selection_unusefull", "card_selection_delet"}:
+        if state_name in {"card_selection_unusefull", "card_selection_delet", "card_selection_transform", "card_selection_remove"}:
             action = self._find_action(available_actions, "select_deck_card")
             if action is not None:
                 preferred_option = self._preferred_remove_option(summary_context, preferences)

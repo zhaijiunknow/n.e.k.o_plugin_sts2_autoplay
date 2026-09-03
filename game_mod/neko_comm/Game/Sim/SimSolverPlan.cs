@@ -61,15 +61,20 @@ namespace NekoComm.Game
             foreach (var a in line)
             {
                 string? id = null;
+                string? name = null;
                 if (a.Kind == SimActionKind.PlayCard)
                 {
                     if (resolved && a.CardIndex >= 0 && a.CardIndex < run.Hand.Count)
+                    {
                         id = run.Hand[a.CardIndex].Id;
+                        name = run.Hand[a.CardIndex].Name;
+                    }
                     if (resolved) SimResolver.PlayCard(run, a.CardIndex, a.TargetIndex);   // apply real effect
                 }
                 if (a.Kind == SimActionKind.EndTurn)
                 {
                     id = null;
+                    name = null;
                     resolved = false;   // next turn's hand is unknown
                     SimResolver.EndPlayerTurn(run);
                 }
@@ -79,6 +84,7 @@ namespace NekoComm.Game
                         : a.Kind == SimActionKind.EndTurn ? "end_turn" : "use_potion",
                     card_index = a.CardIndex >= 0 ? a.CardIndex : null,
                     card_id = id,
+                    card_name = name,
                     target_index = a.TargetIndex,
                 });
                 if (a.Kind == SimActionKind.EndTurn)

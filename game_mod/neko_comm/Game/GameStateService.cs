@@ -5439,8 +5439,14 @@ internal static class GameStateService
             return "CARDS_VIEW";
         }
 
+        // Generic grid-holder screens collapse to CARD_SELECTION, but the reward / transform / remove
+        // card choosers must NOT be swallowed here — fall through to the switch so they get a specific
+        // scene (CARD_SELECTION_REWARD / _TRANSFORM / _REMOVE) for MCP consumers.
         if (currentScreen is Node rootNode &&
             currentScreen is not NChooseABundleSelectionScreen &&
+            currentScreen is not NCardRewardSelectionScreen &&
+            currentScreen is not NDeckTransformSelectScreen &&
+            currentScreen is not NDeckCardSelectScreen &&
             GetVisibleGridCardHolders(rootNode).Count > 0)
         {
             return "CARD_SELECTION";
@@ -5454,9 +5460,11 @@ internal static class GameStateService
         return currentScreen switch
         {
             NGameOverScreen => "GAME_OVER",
-            NCardRewardSelectionScreen => "REWARD",
+            NCardRewardSelectionScreen => "CARD_SELECTION_REWARD",
             NChooseACardSelectionScreen => "CARD_SELECTION",
-            NDeckCardSelectScreen or NDeckUpgradeSelectScreen or NDeckTransformSelectScreen or NDeckEnchantSelectScreen => "CARD_SELECTION",
+            NDeckCardSelectScreen => "CARD_SELECTION_REMOVE",
+            NDeckTransformSelectScreen => "CARD_SELECTION_TRANSFORM",
+            NDeckUpgradeSelectScreen or NDeckEnchantSelectScreen => "CARD_SELECTION",
             NCardGridSelectionScreen => "CARD_SELECTION",
             NRewardsScreen => "REWARD",
             NTreasureRoom or NTreasureRoomRelicCollection => "CHEST",

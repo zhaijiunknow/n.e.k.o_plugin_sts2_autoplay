@@ -18,6 +18,7 @@ namespace NekoComm.Game
         private LineEdit? _apiKey;
         private LineEdit? _model;
         private CheckButton? _llmEnabled;
+        private CheckButton? _danmakuEnabled;
 
         public static async Task OpenAsync()
         {
@@ -85,9 +86,13 @@ namespace NekoComm.Game
             _apiKey = AddRow(fields, "API Key", cfg.llm_api_key);
             _model = AddRow(fields, "Model", cfg.llm_model);
 
-            _llmEnabled = new CheckButton { Text = "启用 LLM 弹幕（直接调用该 LLM 生成,给出猫娘建议）", ButtonPressed = cfg.llm_enabled };
+            _llmEnabled = new CheckButton { Text = "启用 LLM 决策（地图/奖励/事件/卡组由 LLM 决定）", ButtonPressed = cfg.llm_enabled };
             NekoUi.ApplyFont(_llmEnabled, 18);
             fields.AddChild(_llmEnabled);
+
+            _danmakuEnabled = new CheckButton { Text = "启用猫娘弹幕点评（仅面向玩家进程生效;猫娘自动玩进程自动关闭）", ButtonPressed = cfg.danmaku_enabled };
+            NekoUi.ApplyFont(_danmakuEnabled, 18);
+            fields.AddChild(_danmakuEnabled);
 
             // One-click host-side co-op start (replaces the old coop_enabled checkbox): enable coop so the
             // catgirl autoplay activates, then open an ENet multiplayer room. Requires being at the main menu.
@@ -137,13 +142,14 @@ namespace NekoComm.Game
 
         private void OnSave()
         {
-            if (_baseUrl == null || _apiKey == null || _model == null || _llmEnabled == null)
+            if (_baseUrl == null || _apiKey == null || _model == null || _llmEnabled == null || _danmakuEnabled == null)
                 return;
             var cfg = NekoConfig.Current;
             cfg.llm_base_url = _baseUrl.Text.Trim();
             cfg.llm_api_key = _apiKey.Text.Trim();
             cfg.llm_model = _model.Text.Trim();
             cfg.llm_enabled = _llmEnabled.ButtonPressed;
+            cfg.danmaku_enabled = _danmakuEnabled.ButtonPressed;
             cfg.Save();
             Close();
         }

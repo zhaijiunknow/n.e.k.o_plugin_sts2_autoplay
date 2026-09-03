@@ -389,7 +389,7 @@ internal sealed class GameEventService
                                    actionSet.Contains("end_turn") ||
                                    actionSet.Contains("confirm_selection");
             var routeDecisionRequired = actionSet.Contains("choose_map_node");
-            var rewardDecisionRequired = state.screen == "REWARD" ||
+            var rewardDecisionRequired = state.screen is "REWARD" or "CARD_SELECTION_REWARD" ||
                                          actionSet.Contains("collect_rewards_and_proceed") ||
                                          actionSet.Contains("claim_reward") ||
                                          actionSet.Contains("choose_reward_card");
