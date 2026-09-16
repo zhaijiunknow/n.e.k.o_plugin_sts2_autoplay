@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.transport_client import STS2TransportClient
 
 

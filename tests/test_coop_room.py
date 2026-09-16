@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 from plugin.plugins.sts2_autoplay.transport_client import STS2TransportError
 
