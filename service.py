@@ -23,10 +23,11 @@ from .preference_extractors import STS2PreferenceExtractor
 from .preference_store import STS2PreferenceStore
 from .runtime_state import STS2RuntimeState
 from .situation_summary_engine import STS2SituationSummaryEngine
+from .snapshot_normalizer import normalize_actions
 from .state_machine import STS2StateMachine
 from .strategy_repository import STS2StrategyRepository
 from .summary_context_builder import STS2SummaryContextBuilder
-from .transport_client import STS2TransportClient
+from .transport_client import STS2TransportClient, STS2TransportError
 
 # 「当前游戏信息状态」面板：状态推送最小间隔（防刷爆 SSE 有界队列）/ 心跳间隔（空闲时也定期刷新）
 STATUS_PUSH_MIN_INTERVAL = 2.0
@@ -174,18 +175,140 @@ class STS2AutoplayService:
         message = self.t("status.connected", default="STS2-Agent 已连接: {base_url}", base_url=self._state.base_url)
         return {"status": "connected", "message": message, "summary": message, "health": health}
 
-    async def open_coop_room(self, host: bool = True) -> dict[str, Any]:
-        """Open the co-op room: enter the multiplayer scene and create (host) / join the lobby.
+    # 正式联机流程（与 mod 自身一致）：
+    #   host  → mod 的 start_coop_session 一步做完（coop_enabled 落盘 -> 关主菜单子菜单 ->
+    #           open_multiplayer_menu -> start_multiplayer_host(ENet 33771) -> 拉起猫娘进程）。
+    #   join  → open_multiplayer_menu（仅 currentScreen 就是 NMainMenu 时可用）-> join_multiplayer_direct。
+    # 不要用调试场景那套 host_multiplayer_lobby / join_multiplayer_lobby：它们要求当前场景是
+    # NMultiplayerTest，且 mod 明确记录该路径会让装了第三方 mod 的第二个游戏实例崩溃
+    # （见 game_mod/nekospire/Game/NekoAutoplayDriver.cs 的 DecideMainMenu 注释）。
+    COOP_SESSION_ACTION = "start_coop_session"
+    COOP_MENU_ACTION = "open_multiplayer_menu"
+    COOP_CLOSE_SUBMENU_ACTION = "close_main_menu_submenu"
+    COOP_JOIN_ACTION = "join_multiplayer_direct"
 
-        Sends the mod's co-op actions (open_multiplayer_menu -> host|join_multiplayer_lobby). The catgirl's
-        character select + ready are handled by the autoplay driver / the lobby screen logic.
+    async def open_coop_room(self, host: bool = True) -> dict[str, Any]:
+        """打开联机房间。
+
+        host=True 只发一个 start_coop_session，整套编排交给 mod —— 包括拉起猫娘进程，那正是插件
+        够不着的部分（LaunchCatgirlProcess 是私有的，只暴露在这一个动作后面）。插件因此不再自己拼
+        动作序列，也不再自己写 coop_enabled：mod 那个动作内部会落盘。
+
+        host=False 是加入别人的房间，没有猫娘要拉，仍自己走 open_multiplayer_menu ->
+        join_multiplayer_direct（连 host 的 127.0.0.1:33771）。
         """
         client = self._require_client()
-        await client.execute_action("open_multiplayer_menu")
-        lobby_action = "host_multiplayer_lobby" if host else "join_multiplayer_lobby"
-        await client.execute_action(lobby_action)
-        self.logger.info(f"[sts2] opened co-op room ({lobby_action})")
-        return {"status": "opened", "host": host, "action": lobby_action}
+        if host:
+            screen, available = await self._coop_probe(client)
+            self._require_coop_action(
+                self.COOP_SESSION_ACTION,
+                screen=screen,
+                available=available,
+                key="coop.session_unavailable",
+                default="{action} 不可用（screen={screen}，可用动作: {actions}）—— mod 可能没重启到含该动作的版本。",
+            )
+            await client.execute_action(self.COOP_SESSION_ACTION)
+            action = self.COOP_SESSION_ACTION
+        else:
+            action = await self._join_coop_room(client)
+
+        self.logger.info(f"[sts2] opened co-op room ({action})")
+        return await self._coop_opened_result(host=host, action=action)
+
+    async def _join_coop_room(self, client: STS2TransportClient) -> str:
+        """加入方路径：必要时先回主菜单，再开多人菜单并直连 host。返回实际发出的动作名。"""
+        screen, available = await self._coop_probe(client)
+
+        # 子菜单已经开着（上一轮留下的、或 mods 子菜单）时不用再开菜单，直接发第二步。
+        if self.COOP_JOIN_ACTION not in available:
+            # open_multiplayer_menu 要求 currentScreen 就是 NMainMenu，主菜单上开着任何子菜单都会 409，
+            # 所以先按 mod 自己的做法（NekoConfigWindow.CloseMainMenuSubmenusAsync）把子菜单收干净。
+            await self._close_main_menu_submenus(client)
+            screen, available = await self._coop_probe(client)
+            self._require_coop_action(
+                self.COOP_MENU_ACTION,
+                screen=screen,
+                available=available,
+                key="coop.menu_unavailable",
+                default="当前界面无法打开多人菜单（screen={screen}，可用动作: {actions}）。",
+            )
+            await client.execute_action(self.COOP_MENU_ACTION)
+            screen, available = await self._coop_probe(client)
+
+        # open_multiplayer_menu 返回 200 不代表 NMultiplayerSubmenu 真的留在栈上，所以发第二步前
+        # 校验一次；否则这里会退化成 mod 那句无法定位的 "Action is not available in the current state."。
+        self._require_coop_action(
+            self.COOP_JOIN_ACTION,
+            screen=screen,
+            available=available,
+            key="coop.lobby_action_unavailable",
+            default="多人菜单没有打开，{action} 不可用（screen={screen}，可用动作: {actions}）。",
+        )
+        await client.execute_action(self.COOP_JOIN_ACTION)
+        return self.COOP_JOIN_ACTION
+
+    def _require_coop_action(
+        self,
+        action: str,
+        *,
+        screen: str,
+        available: set[str],
+        key: str,
+        default: str,
+    ) -> None:
+        """动作不在 /actions/available 里就抛带 screen 与可用动作的错，而不是发出去等 mod 回 409。"""
+        if action in available:
+            return
+        raise STS2TransportError(
+            self.t(
+                key,
+                default=default,
+                action=action,
+                screen=screen,
+                actions=", ".join(sorted(available)) or "无",
+            )
+        )
+
+    async def _coop_opened_result(self, *, host: bool, action: str) -> dict[str, Any]:
+        """刷新状态后组装返回值；screen 与可用动作都取动作之后的状态，跟调用方看到的一致。"""
+        await self.refresh_state()
+        snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
+        screen = str(snapshot.get("screen") or "unknown")
+        available = sorted(
+            str(item.get("type"))
+            for item in (snapshot.get("available_actions") or [])
+            if isinstance(item, dict) and item.get("type")
+        )
+        message = self.t(
+            "coop.opened",
+            default="已打开联机房间：{action}，当前界面 {screen}。",
+            action=action,
+            screen=screen,
+        )
+        return {
+            "status": "opened",
+            "host": host,
+            "action": action,
+            "screen": screen,
+            "available_actions": available,
+            "message": message,
+            "summary": message,
+        }
+
+    async def _coop_probe(self, client: STS2TransportClient) -> tuple[str, set[str]]:
+        """读 /actions/available：返回 (screen, 动作名集合)。"""
+        payload = await client.get_available_actions()
+        names = {str(item.get("type")) for item in normalize_actions(payload) if item.get("type")}
+        return str(payload.get("screen") or "unknown"), names
+
+    async def _close_main_menu_submenus(self, client: STS2TransportClient) -> None:
+        """把主菜单子菜单栈收回 NMainMenu（同 NekoConfigWindow.CloseMainMenuSubmenusAsync，防嵌套）。"""
+        for _ in range(6):
+            _, available = await self._coop_probe(client)
+            if self.COOP_CLOSE_SUBMENU_ACTION not in available:
+                return
+            await client.execute_action(self.COOP_CLOSE_SUBMENU_ACTION)
+            await asyncio.sleep(0.15)
 
     async def refresh_state(self, *, trigger_sync: bool = False) -> dict[str, Any]:
         previous_snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}

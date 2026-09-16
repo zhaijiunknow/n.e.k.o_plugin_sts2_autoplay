@@ -242,7 +242,7 @@ class STS2AutoplayPlugin(NekoPluginBase):
     @plugin_entry(
         id="sts2_open_coop_room",
         name=tr("entries.sts2_open_coop_room.name", default="打开 co-op 房间"),
-        description=tr("entries.sts2_open_coop_room.description", default="进多人测试场景并创建/加入 co-op 大厅（catgirl 选角 + ready 由自动游玩处理）。"),
+        description=tr("entries.sts2_open_coop_room.description", default="打开联机房间（host 建房 / 非 host 加入本机 127.0.0.1:33771），猫娘选角 + ready 由自动游玩处理。"),
         llm_result_fields=["summary"],
         input_schema={
             "type": "object",

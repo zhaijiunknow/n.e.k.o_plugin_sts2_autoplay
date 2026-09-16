@@ -203,7 +203,9 @@ namespace NekoComm.Game
             }
         }
 
-        private static void LaunchCatgirlProcess()
+        // Internal so the HTTP path can reuse it: GameActionService's start_coop_session action spawns the
+        // second game instance through here — there is no other way to reach it from outside the UI.
+        internal static void LaunchCatgirlProcess()
         {
             try
             {

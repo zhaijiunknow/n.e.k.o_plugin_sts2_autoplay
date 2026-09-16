@@ -579,6 +579,48 @@ internal static class GameStateService
             });
         }
 
+        // Production co-op path (same-machine ENet): open_multiplayer_menu -> start_multiplayer_host /
+        // join_multiplayer_direct, the same three actions NekoAutoplayDriver.DecideMainMenu uses. Keep these
+        // in sync with BuildAvailableActionNames below: this endpoint used to advertise only the debug
+        // "multiplayer test" scene actions (host/join/ready_multiplayer_lobby) and omit these three, so any
+        // client reading /actions/available could not see the path that actually works.
+        if (CanOpenMultiplayerMenu(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor
+            {
+                name = "open_multiplayer_menu",
+                requires_target = false,
+                requires_index = false
+            });
+        }
+
+        if (IsMultiplayerSubmenu(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor
+            {
+                name = "start_multiplayer_host",
+                requires_target = false,
+                requires_index = false
+            });
+
+            descriptors.Add(new ActionDescriptor
+            {
+                name = "join_multiplayer_direct",
+                requires_target = false,
+                requires_index = false
+            });
+        }
+
+        if (CanStartCoopSession(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor
+            {
+                name = "start_coop_session",
+                requires_target = false,
+                requires_index = false
+            });
+        }
+
         if (CanJoinMultiplayerLobby(currentScreen))
         {
             descriptors.Add(new ActionDescriptor
@@ -1155,6 +1197,16 @@ internal static class GameStateService
     public static bool CanOpenMultiplayerMenu(IScreenContext? currentScreen)
     {
         return currentScreen is NMainMenu;
+    }
+
+    /// <summary>
+    /// Host-side one-shot co-op bootstrap (GameActionService.ExecuteStartCoopSessionAsync). Unlike
+    /// open_multiplayer_menu it pops back to the main menu itself, so it is offered anywhere around the main
+    /// menu, including from inside one of its submenus.
+    /// </summary>
+    public static bool CanStartCoopSession(IScreenContext? currentScreen)
+    {
+        return currentScreen is NMainMenu or NSubmenu;
     }
 
     public static bool IsMultiplayerSubmenu(IScreenContext? currentScreen)
@@ -2231,6 +2283,11 @@ internal static class GameStateService
         {
             names.Add("start_multiplayer_host");
             names.Add("join_multiplayer_direct");
+        }
+
+        if (CanStartCoopSession(currentScreen))
+        {
+            names.Add("start_coop_session");
         }
 
         if (CanJoinMultiplayerLobby(currentScreen))

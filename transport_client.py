@@ -128,6 +128,26 @@ class STS2TransportClient:
             payload[key] = value
         return payload
 
+    @staticmethod
+    def _describe_error(payload: Dict[str, Any], status_code: int) -> str:
+        """把 mod 的 error 包渲染成一句可诊断的文本。
+
+        mod 端多个动作共用同一句 message（例如 "Action is not available in the current state."
+        同时来自 open_multiplayer_menu / host_multiplayer_lobby / ...），只取 message 分不出是哪个
+        动作挂的；error.details 里的 action / screen / code 才是有用信息，一并带上。
+        """
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return f"STS2-Agent 请求失败: HTTP {status_code}"
+
+        message = str(error.get("message") or error.get("code") or f"HTTP {status_code}")
+        details = error.get("details") if isinstance(error.get("details"), dict) else {}
+        bits = [f"{key}={details[key]}" for key in ("action", "screen") if details.get(key) not in (None, "")]
+        code = str(error.get("code") or "")
+        if code and code not in message:
+            bits.insert(0, f"code={code}")
+        return f"{message} ({', '.join(bits)})" if bits else message
+
     async def _request(self, method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
         timeout = httpx.Timeout(
@@ -155,10 +175,7 @@ class STS2TransportClient:
             raise STS2TransportError(f"STS2-Agent 返回了非对象 JSON: {url}")
 
         if response.status_code >= 400 or payload.get("ok") is False:
-            error = payload.get("error")
-            if isinstance(error, dict):
-                raise STS2TransportError(str(error.get("message") or error.get("code") or f"HTTP {response.status_code}"))
-            raise STS2TransportError(f"STS2-Agent 请求失败: HTTP {response.status_code}")
+            raise STS2TransportError(self._describe_error(payload, response.status_code))
 
         data = payload.get("data")
         return data if isinstance(data, dict) else {"value": data}

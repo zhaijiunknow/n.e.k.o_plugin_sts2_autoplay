@@ -137,6 +137,7 @@ internal static class GameActionService
             "host_multiplayer_lobby" => ExecuteHostMultiplayerLobbyAsync(),
             "open_multiplayer_menu" => ExecuteOpenMultiplayerMenuAsync(),
             "start_multiplayer_host" => ExecuteStartMultiplayerHostAsync(),
+            "start_coop_session" => ExecuteStartCoopSessionAsync(),
             "join_multiplayer_direct" => ExecuteJoinMultiplayerDirectAsync(),
             "join_multiplayer_lobby" => ExecuteJoinMultiplayerLobbyAsync(),
             "ready_multiplayer_lobby" => ExecuteReadyMultiplayerLobbyAsync(),
@@ -3415,6 +3416,65 @@ internal static class GameActionService
             message = stable ? "Action completed." : "Action queued but state is still transitioning.",
             state = GameStateService.BuildStatePayload()
         };
+    }
+
+    /// <summary>
+    /// One-shot host-side co-op bootstrap, mirroring the config window's "start co-op room" button
+    /// (NekoConfigWindow.StartCoopSessionAsync): enable coop, pop back to the real main menu, open the
+    /// multiplayer submenu, start the ENet host on 33771, then launch the catgirl game process.
+    ///
+    /// The HTTP surface previously had no way to reach that button, so a remote caller could open a room but
+    /// never get the second player — spawning the catgirl process is the half that was missing.
+    ///
+    /// Composing the executors directly (rather than going back through ExecuteAsync) is safe: Router already
+    /// dispatches actions through GameThread.InvokeAsync, and GameThread.InvokeAsync runs inline when it is
+    /// re-entered from the game thread, so there is no nested post and no deadlock.
+    /// </summary>
+    private static async Task<ActionResponsePayload> ExecuteStartCoopSessionAsync()
+    {
+        // The catgirl process reads the same settings.json and gates its autoplay on this flag
+        // (NekoAutoplayDriver.IsClientByPort -> NekoConfig.Current.coop_enabled), so it must be persisted
+        // before the process is spawned or the catgirl will sit idle.
+        var cfg = NekoConfig.Current;
+        cfg.coop_enabled = true;
+        cfg.Save();
+
+        await CloseMainMenuSubmenusAsync();
+
+        var openResult = await ExecuteOpenMultiplayerMenuAsync();
+        var hostResult = await ExecuteStartMultiplayerHostAsync();
+
+        NekoConfigWindow.LaunchCatgirlProcess();
+
+        var stable = openResult.stable && hostResult.stable;
+        return new ActionResponsePayload
+        {
+            action = "start_coop_session",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable
+                ? "Co-op room opened and the catgirl process launched."
+                : "Co-op room opened but the game is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
+    /// <summary>
+    /// Pop the main-menu submenu stack back to NMainMenu before open_multiplayer_menu, which only works when
+    /// currentScreen is NMainMenu (any open submenu makes it 409). Loops defensively for nested submenus.
+    /// </summary>
+    private static async Task CloseMainMenuSubmenusAsync()
+    {
+        for (var i = 0; i < 6; i++)
+        {
+            if (!GameStateService.CanCloseMainMenuSubmenu(ActiveScreenContext.Instance.GetCurrentScreen()))
+            {
+                return;
+            }
+
+            await ExecuteCloseMainMenuSubmenuAsync();
+            await Task.Delay(150);
+        }
     }
 
     private static async Task<ActionResponsePayload> ExecuteJoinMultiplayerDirectAsync()
