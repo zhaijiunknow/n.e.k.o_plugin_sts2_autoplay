@@ -716,12 +716,51 @@ class STS2HeuristicPlanner:
                 if isinstance(card, dict):
                     names.append(str(card.get("name") or card.get("card_id") or "?"))
         hand_key = ",".join(names[:9])
+        # ★ t44：把 `turn` 与 `run` 追加到行尾，使**跨 mod 按回合对齐**成为可能。
+        #
+        #   为什么必须加（实测，2026-10-20）：做「插件实打 vs 上游 CombatSolver 路线」对照时，
+        #   上游一条路线覆盖 turn T..T+8（35~46 个动作），而它在 turn T 开始时搜索、耗时中位
+        #   2.5 秒，我们出牌间隔中位 1.0 秒 ⇒ 搜索期间我们已打掉 turn T 的前 1~3 张。
+        #   只有 turn T 的开头被污染，**turn T+1 之后完全可比**
+        #   ⇒ 正确的对齐单位是**回合**，不是整条路线。
+        #   但本行原本不带回合信息，只能靠 `[sts2_combat_turn_*]` 的 `turn_key` 反推，
+        #   而 `turn_key` 主要来自点评/推送路径，纯 autoplay 下会漏 ⇒ 实测出现
+        #   「turn 4 我们 6 张 = 上游 3 张逐字重复两遍」这种"相邻两回合被合并"的结果。
+        #   ★ 更早的教训（`loop_runner.py:862` 已记录）：「turn_key 跨 run 会撞值
+        #     （实测 132/175=75%，0:2:combat:1 出现在 20 个 run）」
+        #     ⇒ 除了 turn **必须同时带 run**，否则同名回合跨局合并（我实测踩了两次：
+        #       先只用 turn → "turn 2 出 207 张"；再加 (act,floor,turn) → "turn 2 出 24 张"）。
+        #
+        #   ★ 兼容性：新字段追加在 `手牌=%s` **之后**，既有解析器的正则
+        #     （锚 `一致=是|否` 与 `手牌=[...]`）逐字不受影响。
+        #   取值沿用 `loop_runner.py:1112-1118` 的既有惯例，不另造路径。
+        raw_state = (
+            snapshot.get("raw_state")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("raw_state"), dict)
+            else {}
+        )
+        run_obj = raw_state.get("run") if isinstance(raw_state.get("run"), dict) else {}
+        turn_val = raw_state.get("turn")
+        if turn_val is None:
+            combat_obj = (
+                raw_state.get("combat") if isinstance(raw_state.get("combat"), dict) else {}
+            )
+            turn_val = combat_obj.get("turn")
+        run_val = (
+            raw_state.get("run_id")
+            or run_obj.get("run_id")
+            or run_obj.get("runId")
+            or run_obj.get("id")
+            or ""
+        )
         # ★ 去重键 = 求解器建议 + 实际执行 + 手牌 + 原因。
         #   见 `_combat_log` 上方关于「限流器永久静默」的说明：这里按**内容**去重，
         #   于是同一局面反复重试（实测同一动作重复 8~20 次）只留一行，
         #   而局面一变就会立刻出新行 —— 长局也能看全，不再有"打满就瞎"。
+        #   ★ t44 刻意**不**把 turn/run 加进去：那会改变限流密度（每回合强制出新行），
+        #     而本次目标只是"能读出回合"，不是改留痕密度。
         self._combat_log(
-            "[sts2_combat_follow] 求解器=%s/%s(target=%s) -> 执行=%s%s 一致=%s%s 手牌=%s",
+            "[sts2_combat_follow] 求解器=%s/%s(target=%s) -> 执行=%s%s 一致=%s%s 手牌=%s turn=%s run=%s",
             solver_kind,
             solver_card_id,
             solver_target,
@@ -732,6 +771,8 @@ class STS2HeuristicPlanner:
             "是" if matched else "否",
             ("  原因=" + fallback_reason) if fallback_reason else "",
             names[:9],
+            turn_val if turn_val is not None else "?",
+            run_val if run_val else "?",
             dedup_key="|".join(
                 (
                     str(solver_kind),
@@ -1434,7 +1475,9 @@ class STS2HeuristicPlanner:
                 if solver_action == "play_card":
                     # 用 card_id 重新匹配实机手牌（mod 的 NekoAutoplayDriver 同样如此）：solver 给的是
                     # /solver/plan 捕获瞬间的位置卡号；捕获与执行之间手牌可能漂移，直接抽样会打在别的卡上。
-                    effective_card_index = self._resolve_solver_card_index(snapshot, solver_card_id, solver_card_index)
+                    effective_card_index, resolve_reason = self._resolve_solver_card_index(
+                        snapshot, solver_card_id, solver_card_index
+                    )
                     if effective_card_index is not None:
                         kw = {"card_index": effective_card_index}
                         if solver_target is not None:
@@ -1462,7 +1505,13 @@ class STS2HeuristicPlanner:
                     #   纯求解器语义：**不发启发式动作**，丢弃本计划、让下一 tick 重算。
                     #   实测根因（`.dsh-artifacts/ROOTCAUSE-solver-adherence.md`）：
                     #   求解器搜索要 ~1 秒，期间上一步动作已让手牌变化 ⇒ 计划天然过期。
-                    solver_skip_reason = f"求解器建议 {solver_card_id} 但实机手牌里没有这张卡（手牌漂移）"
+                    # ★ t43：改用 `_resolve_solver_card_index` 带回的**可区分原因**，
+                    #   不再一律写成"手牌漂移"。两种成因（不在手牌 / 在手但 playable=false）
+                    #   在统计与后续修法上完全不同，混在一起会让 1681 次重算无法归因。
+                    solver_skip_reason = (
+                        resolve_reason
+                        or f"求解器建议 {solver_card_id} 但实机手牌里没有这张卡（手牌漂移）"
+                    )
                 if solver_action == "use_potion":
                     potion_index = self._solver_potion_option_index(snapshot, solver_card_id)
                     if potion_index is not None:
@@ -2942,11 +2991,16 @@ class STS2HeuristicPlanner:
     #: 前方有精英时，从选路那一步起向前看几层找精英（规格：「复用它判断"前方有精英"」）。
     _SHOP_ELITE_LOOKAHEAD_ROWS = 4
 
-    def _resolve_solver_card_index(self, snapshot: dict[str, Any] | None, card_id: str | None, fallback_index: int | None) -> int | None:
+    def _resolve_solver_card_index(
+        self,
+        snapshot: dict[str, Any] | None,
+        card_id: str | None,
+        fallback_index: int | None,
+    ) -> tuple[int | None, str]:
         """把 /solver/plan 推荐的卡（card_id）重新映射到实机手牌位置，避免位置索引漂移。
 
         与 mod 的 NekoAutoplayDriver.DecideCombatAsync 一致：优先按 card_id 精确匹配且可打出；
-        匹配不到再退回 solver 给的位置索引（仅当该位置卡可打出）；都不行返回 None（交给启发式）。
+        匹配不到再退回 solver 给的位置索引（仅当该位置卡可打出）；都不行返回 (None, reason)。
 
         ★★ 2026-10-18 修（`_test_stale_index.py` 复现的**真实缺陷**）：
           旧实现只要 `fallback_index` 落在手牌范围内**且那张牌可打出**就直接返回它，
@@ -2959,26 +3013,47 @@ class STS2HeuristicPlanner:
           修法：区分"mod 没给 card_id"（可安全回退位置）与"给了 card_id 但当前手牌里
           没有它"（**必须放弃**，交给启发式重算）。判据是 `card_id` 是否为空，
           而不是"能不能找到一个可打出的位置"。
+
+        ★★ t43（2026-10-20）：返回值从 `int | None` 改为 `(index, reason)`。
+          旧版匹配不到只返回 None，调用方只能写一句
+          「求解器建议 X 但实机手牌里没有这张卡（手牌漂移）」，把两种成因压在一起：
+            ① 卡**真的不在手牌**（已打出/弃掉/消耗）⇒ 计划过期，重算正确；
+            ② 卡**在手牌里但 `playable=false`**（能量不够等）⇒ 计划没错，只是暂不可执行。
+          实测当天 `[sts2_plan]` 重算 4548 次里 **1681 次（37%）** 报这一句而无法归因，
+          且漂移 Top 全是最基础的打击/防御 ⇒ 必须先拆开才能判断是不是模拟器能量模型的问题。
+          `reason` 为空串 ⇒ 成功取到 index。原因文本由 `loop_runner._explain_hand_card_state`
+          统一生成（两处共用同一实现，避免再次漂移）。
         """
         hand: Any = []
+        player: Any = {}
         if isinstance(snapshot, dict):
             raw_state = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
             combat = raw_state.get("combat") if isinstance(raw_state.get("combat"), dict) else {}
             hand = combat.get("hand") if isinstance(combat.get("hand"), list) else []
+            player = combat.get("player") if isinstance(combat.get("player"), dict) else {}
+        # ★ 惰性导入（模块级导入会与 loop_runner 形成循环依赖；本文件已有同样先例，见 :1746/:2067）
+        from .loop_runner import _explain_hand_card_state
+
         if card_id:
             for i, card in enumerate(hand):
                 if isinstance(card, dict) and str(card.get("card_id") or "") == str(card_id) and bool(card.get("playable", True)):
-                    return i
+                    return i, ""
             # ★ mod 明确给了 card_id，但当前手牌里找不到（或不可打出）⇒ 位置索引已不可信，
             #   绝不能拿陈旧下标去蒙一张牌。交给启发式按当前局面重算。
-            return None
+            return None, _explain_hand_card_state(str(card_id), hand, player)
         # mod 没给 card_id（旧版 /solver/plan 或该步本来就只有位置）：位置索引是唯一线索，
         # 只要落点可打出就沿用。
         if fallback_index is not None and 0 <= fallback_index < len(hand):
             card = hand[fallback_index]
             if isinstance(card, dict) and bool(card.get("playable", True)):
-                return fallback_index
-        return None
+                return fallback_index, ""
+            energy = player.get("energy") if isinstance(player, dict) else None
+            return None, (
+                f"求解器给的手牌下标 {fallback_index} 当前不可打出（playable=false，"
+                f"energy_cost={card.get('energy_cost', '?') if isinstance(card, dict) else '?'}，"
+                f"当前能量={energy if energy is not None else '?'}）"
+            )
+        return None, ""
 
     def _shop_visit_signature(self, summary_context: dict[str, Any]) -> str:
         """这一次逛的是哪家店：换店（楼层变 / 货品集合变）就重新算"没看过"。

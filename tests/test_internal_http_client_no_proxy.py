@@ -279,9 +279,27 @@ def test_shared_client_is_not_closed_by_a_request(monkeypatch: pytest.MonkeyPatc
         closed = ref.is_closed
 
         # ④ 并且它必须真的还能用。
+        #
+        # ★★ 2026-10-20 修（t43 副产物，队长实测定位）：这里原本硬编码请求
+        #    `http://127.0.0.1:18080/health` —— 那是**游戏 mod 服务的真实端口**。
+        #    后果：这条"单元"测试在**游戏没开**时必然失败（连接被拒 ⇒ err 非 None
+        #    ⇒ 下面 :296 的断言挂），而在游戏开着时通过。
+        #    实测时间线完全吻合：
+        #      15:45 全量 ⇒ 1352 passed / 0 failed（当时游戏在跑）
+        #      16:03 之后游戏关闭 ⇒ 此后每次全量/单独跑都在这条上失败
+        #    我一开始误判成"顺序依赖"，是错的 —— 真相是 **non-hermetic：依赖外部进程**。
+        #    （同类缺陷：t21「反思测试读实时记忆库」；判据：单元测试不得依赖本机以外的状态。）
+        #    ⇒ 修法：改用本进程内的一次性 stub server。**断言强度不变**（仍要求
+        #      `ref` 在被生产请求用过之后依然可用），但不再依赖游戏是否运行。
         err: Exception | None = None
         try:
-            await ref.get("http://127.0.0.1:18080/health", timeout=5.0)
+            base_url2, server2, finished2 = await _serve_once()
+            try:
+                await ref.get(f"{base_url2}/health", timeout=5.0)
+                await asyncio.wait_for(finished2.wait(), timeout=5.0)
+            finally:
+                server2.close()
+                await server2.wait_closed()
         except Exception as exc:  # noqa: BLE001 - 故意捕获以断言"不该抛"
             err = exc
         return closed, err

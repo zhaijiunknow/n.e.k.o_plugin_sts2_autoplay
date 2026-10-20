@@ -1165,6 +1165,57 @@ def _reusable_plan(
     return cached, ""
 
 
+def _explain_hand_card_state(card_id: str, hand: list[Any], player: Any) -> str:
+    """★ t43：把「这一步的这张牌打不出去」拆成**两类可区分**的原因。
+
+    旧实现只有一句话 —— `手牌里已没有可打出的 {card_id}` —— 把两种完全不同的成因压在一起：
+
+      ① 这张卡**真的不在手牌**（已打出 / 被弃 / 被消耗）
+         ⇒ 计划确实过期，丢弃重算是**正确**行为；
+      ② 这张卡**在手牌里，但当前 `playable=false`**（能量不够 / 有前置条件）
+         ⇒ 计划本身没错，只是**这一步暂不可执行**。
+
+    两者的统计含义与后续修法完全不同：若 ② 占多，说明**模拟器的能量模型与实机不一致**。
+
+    ★ 为什么必须拆（实测数据，2026-10-20）：
+      当天 `[sts2_plan]` 重算 4548 次，其中 **1681 次（37.0%）** 报的就是这一句，
+      而漂移 Top 全是**最基础的卡**（`DEFEND_IRONCLAD` 221 / `STRIKE_IRONCLAD` 206 /
+      `SHRUG_IT_OFF` 85 / `BASH` 82）—— 最基础的打击/防御"手牌里没有"本身就反常。
+      在拆开之前，这 1681 次**无法归因**，也就无法判断该不该修能量模型。
+
+    ★ 本函数放在 `loop_runner` 而不是各写一份：`heuristic_planner._resolve_solver_card_index`
+      有同一套判据（`card_id` 精确相等 + `playable`），两份实现必然漂移
+      —— 这正是 `_combat_deadlock_signature` 当初被提取到这里的同一条理由。
+
+    参数与 `/state` 的字段对应（`raw_state.combat.{hand,player}`）：
+      hand[i]  = {card_id, playable, energy_cost, star_cost, costs_x, ...}
+      player   = {energy, ...}
+
+    返回值**只描述"为什么打不出"**；能打出的情况不调用本函数。
+    """
+    same_id = [
+        c for c in (hand if isinstance(hand, list) else [])
+        if isinstance(c, dict) and str(c.get("card_id") or "") == card_id
+    ]
+    total = len(hand) if isinstance(hand, list) else 0
+    if not same_id:
+        return f"手牌里已没有 {card_id}（不在手牌，共 {total} 张）"
+    energy = player.get("energy") if isinstance(player, dict) else None
+    # 同名多张时只列前 3 张，避免日志爆长
+    detail = " ".join(
+        "[idx=%s energy_cost=%s star_cost=%s costs_x=%s]" % (
+            c.get("index", "?"), c.get("energy_cost", "?"),
+            c.get("star_cost", "?"), bool(c.get("costs_x")),
+        )
+        for c in same_id[:3]
+    )
+    return (
+        f"手牌里有 {card_id} 但当前不可打出"
+        f"（playable=false，同名 {len(same_id)} 张，"
+        f"当前能量={energy if energy is not None else '?'}） {detail}"
+    )
+
+
 def _plan_step_is_executable(step: dict[str, Any], snapshot: dict[str, Any]) -> tuple[bool, str]:
     """快照里的这一步，在**当前局面**下还能照做吗？
 
@@ -1190,6 +1241,7 @@ def _plan_step_is_executable(step: dict[str, Any], snapshot: dict[str, Any]) -> 
     combat = raw_state.get("combat") if isinstance(raw_state.get("combat"), dict) else {}
     if kind == "play_card":
         hand = [card for card in (combat.get("hand") if isinstance(combat.get("hand"), list) else []) if isinstance(card, dict)]
+        player = combat.get("player") if isinstance(combat.get("player"), dict) else {}
         card_id = str(step.get("card_id") or "")
         target = step.get("target_index")
         if card_id:
@@ -1198,14 +1250,23 @@ def _plan_step_is_executable(step: dict[str, Any], snapshot: dict[str, Any]) -> 
                 None,
             )
             if card is None:
-                return False, f"手牌里已没有可打出的 {card_id}"
+                # ★ t43：不再用一句「已没有可打出的」掩盖两种成因。
+                #   详见 `_explain_hand_card_state`：① 不在手牌 ② 在手但 playable=false。
+                return False, _explain_hand_card_state(card_id, hand, player)
         else:
             index = step.get("card_index")
             if isinstance(index, int) and not isinstance(index, bool):
                 if not (0 <= index < len(hand)):
                     return False, f"手牌下标 {index} 越界（现在 {len(hand)} 张）"
                 if not bool(hand[index].get("playable", True)):
-                    return False, f"手牌[{index}] 当前不可打出"
+                    # ★ t43：这一支同样带上能量实况，与 card_id 支保持同一种诊断口径。
+                    energy = player.get("energy") if isinstance(player, dict) else None
+                    return False, (
+                        f"手牌[{index}] 当前不可打出（playable=false，"
+                        f"card_id={hand[index].get('card_id', '?')}，"
+                        f"energy_cost={hand[index].get('energy_cost', '?')}，"
+                        f"当前能量={energy if energy is not None else '?'}）"
+                    )
                 card = hand[index]
             else:
                 card = None
