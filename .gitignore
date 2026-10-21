@@ -15,7 +15,10 @@ store.db
 .codegraph/
 
 # agent/team local state and analysis artifacts (166MB+)
-.dsh-artifacts/
+.dsh-artifacts/*
+# 例外：度量脚手架是 t10 交付物，也是 t11/t13 前后对照的唯一判据来源，
+# 必须进版本库 —— 否则 `test_reflection_metrics_contract` 在 CI 上永远无解。
+!.dsh-artifacts/reflection_metrics.py
 .agent-teams/
 plugin.toml.lock
 

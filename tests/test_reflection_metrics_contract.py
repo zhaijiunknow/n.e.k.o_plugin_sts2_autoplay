@@ -986,11 +986,14 @@ def test_ranking_layer_is_not_the_decision_layer() -> None:
     # ⚠️ 位置探测要跨副本工作：测试可能从 installed 或 builtin 副本运行，
     #    而 `.dsh-artifacts/` 只存在于仓库根 `D:\NekoClaw\n.e.k.o_plugin_sts2_autoplay`。
     #    这里按优先级探测，找不到就**失败**而不是 skip —— 否则这条契约在副本里静默失效。
-    here = os.path.dirname(os.path.abspath(__file__))
+    # ★ 不能把"向上 N 层"或某个绝对路径写死：
+    #   本地（仓库/临时 shim）与 CI（repo/neko/plugin/plugins/sts2_autoplay/tests）
+    #   的相对层级不同，写死必有一边找不到。改成从真实路径逐级向上找。
+    #   用 realpath 是为了让临时目录里的 junction/符号链接副本也能回溯到真实仓库。
+    _here = Path(os.path.realpath(__file__)).resolve()
     candidates = [
-        os.path.normpath(os.path.join(here, "..", "..", "..", "..", ".dsh-artifacts",
-                                      "reflection_metrics.py")),
-        r"D:\NekoClaw\n.e.k.o_plugin_sts2_autoplay\.dsh-artifacts\reflection_metrics.py",
+        str(parent / ".dsh-artifacts" / "reflection_metrics.py")
+        for parent in _here.parents
     ]
     metrics_path = next((path for path in candidates if os.path.exists(path)), None)
     assert metrics_path, (
