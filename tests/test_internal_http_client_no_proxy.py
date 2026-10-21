@@ -32,8 +32,7 @@ import json
 import os
 
 import pytest
-
-from transport_client import STS2TransportClient
+from plugin.plugins.sts2_autoplay.transport_client import STS2TransportClient
 
 # 必然连不通的代理：端口 1 上没有任何服务在听。
 # 用它当"坏代理"，只要客户端**真的**走了代理就必然失败 —— 这样断言"仍成功"
