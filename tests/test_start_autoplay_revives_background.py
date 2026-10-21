@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from plugin.plugins.sts2_autoplay import loop_runner as lr
 
 

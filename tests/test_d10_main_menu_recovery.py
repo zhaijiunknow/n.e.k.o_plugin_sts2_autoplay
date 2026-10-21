@@ -166,6 +166,8 @@ def test_actions_payload_plain_form_still_parsed() -> None:
 def test_actions_payload_string_list_supported() -> None:
     """★ `/state` 的 `available_actions` 是**字符串列表** ⇒ 也必须能归一化。"""
     got = normalize_actions({"available_actions": ["end_turn", "play_card"]})
+    assert isinstance(got, list), "available_actions 归一化必须返回 list"
+    assert isinstance(got, list), "available_actions 归一化必须返回 list"
     # 注意：本函数读的是 'actions' 系列，'available_actions' 由 normalize_snapshot 的
     #       state 侧负责；这里只钉字符串列表这种 item 形态本身可用。
     got2 = normalize_actions({"actions": ["end_turn", "play_card"]})

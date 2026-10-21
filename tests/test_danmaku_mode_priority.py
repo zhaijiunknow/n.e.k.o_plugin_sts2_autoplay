@@ -19,10 +19,7 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-
-import pytest
 
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 
@@ -168,7 +165,7 @@ def test_priority_table_is_exhaustive() -> None:
             companion=companion,
             autoplay="running" if running else "idle",
             coop=coop,
-            danmaku=not (want_enabled is True),  # 初值取反，确保会真的发生变更
+            danmaku=want_enabled is not True,  # 初值取反，确保会真的发生变更
         )
         out = svc._apply_mode_danmaku_policy()
         assert out["reason"] == want_reason, (companion, running, coop, out)

@@ -19,8 +19,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import pytest
-
 from plugin.plugins.sts2_autoplay import loop_runner as lr
 from plugin.plugins.sts2_autoplay.runtime_state import STS2RuntimeState
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService

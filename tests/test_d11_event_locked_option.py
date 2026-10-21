@@ -41,7 +41,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.heuristic_planner import STS2HeuristicPlanner
 from plugin.plugins.sts2_autoplay.transport_client import (
     STS2ActionRejected,

@@ -42,7 +42,6 @@ import pathlib
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 
 #: 实机抓到的类名（逐字）

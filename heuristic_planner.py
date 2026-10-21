@@ -1096,7 +1096,6 @@ class STS2HeuristicPlanner:
         state_name = str(classification.get("state_name") or snapshot.get("screen") or "").strip().lower()
         available_actions = snapshot.get("available_actions") if isinstance(snapshot.get("available_actions"), list) else []
         preferences = strategy_context.get("preferences") if isinstance(strategy_context.get("preferences"), dict) else {}
-        guidance_override = self._guidance_override(context)
 
         if state_name == "main_menu":
             # 主菜单优先级：**先「继续」**。原来 open_character_select 排在前面，而主菜单只要单人按钮可用
@@ -1208,10 +1207,6 @@ class STS2HeuristicPlanner:
                 )
 
         if state_name in {"reward", "card_selection_reward", "card_selection"}:
-            payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
-            reward = payload.get("reward") if isinstance(payload.get("reward"), dict) else {}
-            reward_list = reward.get("rewards") if isinstance(reward.get("rewards"), list) else []
-            card_options = reward.get("card_options") if isinstance(reward.get("card_options"), list) else []
             # 两段是**分开**的，动作清单天然区分：
             #   领奖励段：claim_reward 在册（另有 resolve_rewards / collect_rewards_and_proceed）
             #   选卡段  ：领出一张卡奖励后 claim_reward 消失，换成 choose_reward_card / skip_reward_cards
@@ -2833,14 +2828,14 @@ class STS2HeuristicPlanner:
             return False
         # ★增益语义优先排除（实机：「获得 11 点最大生命值。」）
         #   「提高」「变成」等也要算增益 —— 例如「你的生命上限提高了」。
-        gain = re.search(r"(获得|得到|增加|提升|提高|回复|gain|increase|\+\s*\d)", t) is not None
         # 损失语义：扣/失去/减少/负号
         loss = re.search(r"(失去|扣|减少|降低|lose|reduce|-\s*\d)", t) is not None
         # ★增益与损失都有时，**以损失为准**：`"Lose 5 Max HP, gain a relic"` 必须判为损失
         #   （先扣永久上限再给遗物，净收益远不足以抵消）。
-        #   注：此处**不需要**额外写 `if gain and not loss: return False` ——
+#   注：此处**不需要**额外判断「有增益就放行」——
         #   那种情况下 `loss` 本身已是 False，`return loss` 结果完全相同
-        #   （实测确认该分支与 `return loss` 等价，属冗余代码，已删除）。
+#   （实测确认「有增益就放行」与 return loss 等价，属冗余代码已删除；
+        #   故本函数只计算 loss，不再保留 gain 变量。）
         return loss
 
     @staticmethod
@@ -3081,7 +3076,6 @@ class STS2HeuristicPlanner:
         if signals.get("self_damage", 0) > 0 and self._reward_dynamic_value(card, "HpLoss") > 0:
             bonus -= 20
         return bonus
-        return self._first_record_option(preferences)
 
     def _reward_claim_signature(self, summary_context: dict[str, Any]) -> str:
         rewards = self._reward_claimable_list(summary_context)

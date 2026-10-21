@@ -35,11 +35,11 @@ import pytest
 from plugin.plugins.sts2_autoplay.action_registry import STS2ActionRegistry
 from plugin.plugins.sts2_autoplay.mode_controller import STS2ModeController
 from plugin.plugins.sts2_autoplay.play_style import (
+    PERTURBATION_PROBABILITY,
     PLAY_STYLE_MISCHIEVOUS,
     PLAY_STYLE_SERIOUS,
     PLAY_STYLE_SILLY,
     PLAY_STYLES,
-    PERTURBATION_PROBABILITY,
     choose_candidate,
     normalize_play_style,
     perturbation_probability,

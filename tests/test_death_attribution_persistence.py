@@ -31,8 +31,6 @@ import sys
 import types
 from pathlib import Path
 
-import pytest
-
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(_PLUGIN_ROOT.parent.parent.parent) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT.parent.parent.parent))

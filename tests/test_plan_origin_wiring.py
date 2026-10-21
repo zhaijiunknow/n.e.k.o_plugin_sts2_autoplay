@@ -25,7 +25,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.loop_runner import STS2LoopRunner
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 

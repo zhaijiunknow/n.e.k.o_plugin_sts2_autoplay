@@ -24,11 +24,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.heuristic_planner import STS2HeuristicPlanner
 from plugin.plugins.sts2_autoplay.loop_runner import (
     GATE_ACT,
-    GATE_CANNOT_ACT,
     GATE_WAITING,
     SOLVER_SEARCH_STATUSES,
     STS2LoopRunner,

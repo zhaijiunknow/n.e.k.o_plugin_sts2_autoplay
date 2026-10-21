@@ -19,10 +19,9 @@
 from __future__ import annotations
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.heuristic_planner import (
-    STS2HeuristicPlanner,
     _MAP_NODE_TYPE_ALIASES,
+    STS2HeuristicPlanner,
 )
 
 # Mod 真实下发的枚举名 → 期望的规范短键。

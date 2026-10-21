@@ -13,9 +13,8 @@ from .candidate_generator import STS2CandidateGenerator
 from .catgirl_bridge import STS2CatgirlBridge
 from .catgirl_llm import CatgirlCommentGenerator
 from .catgirl_memory import CatgirlMemoryStore, _default_memory_path
-from .encounter_memory import EncounterMemory, _default_encounter_db_path
 from .companion_evaluator import STS2CompanionEvaluator, _enemy_intent_label
-from .history_view import write_history_view
+from .encounter_memory import EncounterMemory, _default_encounter_db_path
 from .heuristic_planner import (
     MAP_POLICY_AUTO,
     MAP_POLICY_FOLLOW,
@@ -23,6 +22,7 @@ from .heuristic_planner import (
     STS2HeuristicPlanner,
     normalize_map_policy,
 )
+from .history_view import write_history_view
 from .instructions import normalize_guidance_instruction
 from .loop_runner import STS2LoopRunner, _combat_plan_signature, _current_turn_steps
 from .mode_controller import STS2ModeController

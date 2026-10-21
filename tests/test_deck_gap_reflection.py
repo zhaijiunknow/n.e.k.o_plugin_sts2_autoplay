@@ -261,8 +261,12 @@ def test_every_death_kind_maps_to_at_least_one_dimension() -> None:
     ⇒ 等于死因**没有参与反思**（静默退化，不会报错，最危险）。
     """
     from plugin.plugins.sts2_autoplay.death_attribution import (
-        DEATH_KIND_AOE, DEATH_KIND_ATTRITION, DEATH_KIND_BOSS, DEATH_KIND_BURST,
-        DEATH_KIND_ELITE, DEATH_KIND_UNKNOWN,
+        DEATH_KIND_AOE,
+        DEATH_KIND_ATTRITION,
+        DEATH_KIND_BOSS,
+        DEATH_KIND_BURST,
+        DEATH_KIND_ELITE,
+        DEATH_KIND_UNKNOWN,
     )
 
     for kind in (DEATH_KIND_AOE, DEATH_KIND_ATTRITION, DEATH_KIND_BOSS,

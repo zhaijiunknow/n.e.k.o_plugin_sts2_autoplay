@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.heuristic_planner import STS2HeuristicPlanner
 
 CURSE = {"index": 0, "name": "诅咒", "type": "CURSE"}

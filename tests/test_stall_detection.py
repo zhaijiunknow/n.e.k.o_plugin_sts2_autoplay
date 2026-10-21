@@ -26,8 +26,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import pytest
-
 from plugin.plugins.sts2_autoplay.runtime_state import (
     STALL_DOMINANCE_RATIO,
     STALL_MIN_SAMPLES,
@@ -456,7 +454,7 @@ def test_too_few_samples_does_not_warn() -> None:
     state = STS2RuntimeState()
     state.note_turn_key_sample("0:14:combat:5", heartbeat=0, now=1000.0)
     # 只在窗口末尾喂 2 个样本（远少于 STALL_MIN_SAMPLES）
-    v = state.note_turn_key_sample("0:14:combat:5", heartbeat=1, now=1000.0 + WINDOW + 1)
+    state.note_turn_key_sample("0:14:combat:5", heartbeat=1, now=1000.0 + WINDOW + 1)
     v2 = state.note_turn_key_sample("0:14:combat:5", heartbeat=2, now=1000.0 + WINDOW + 30)
     assert v2["samples"] < STALL_MIN_SAMPLES
     assert v2["stalled"] is False

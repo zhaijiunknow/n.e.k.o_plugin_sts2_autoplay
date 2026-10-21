@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from time import time
 from typing import Any
 
-
 # ★★★ t25/§13.2 空转检测（**纯可观测性，不改变任何决策行为**）
 #
 # 为什么需要它（实机证据，2026-10-19，见 CANON §13）：

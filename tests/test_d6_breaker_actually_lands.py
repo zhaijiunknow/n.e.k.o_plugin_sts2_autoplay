@@ -64,7 +64,6 @@ t17 修好 mod 侧后 `use_potion(AllEnemies)` 会变成 `completed`，那时破
 
 from __future__ import annotations
 
-import os
 import sys
 
 import pytest

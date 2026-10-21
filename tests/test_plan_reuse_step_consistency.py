@@ -30,10 +30,7 @@ t37 之前它们各自手写 dict，键不一致：① 缺 `solver_step_index`�
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
-
 from plugin.plugins.sts2_autoplay.heuristic_planner import _line_step_at
 from plugin.plugins.sts2_autoplay.loop_runner import STS2LoopRunner
 

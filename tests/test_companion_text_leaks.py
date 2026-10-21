@@ -19,12 +19,12 @@ from __future__ import annotations
 import pytest
 from plugin.plugins.sts2_autoplay.companion_evaluator import (
     _MAP_NODE_TYPE_LABELS,
+    STS2CompanionEvaluator,
     _clean_preference,
     _display_name,
     _display_node_type,
     _enemy_intent_label,
     _trim_trailing_punct,
-    STS2CompanionEvaluator,
 )
 from plugin.plugins.sts2_autoplay.heuristic_planner import _MAP_NODE_TYPE_ALIASES
 

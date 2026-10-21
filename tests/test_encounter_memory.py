@@ -11,13 +11,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import pathlib
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.encounter_memory import (
     ENCOUNTER_CAP,
     REASON_INTENT_INCOMPLETE,

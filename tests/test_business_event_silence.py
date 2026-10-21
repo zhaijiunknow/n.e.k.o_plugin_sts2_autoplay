@@ -23,8 +23,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import pytest
-
 from plugin.plugins.sts2_autoplay import loop_runner as lr
 from plugin.plugins.sts2_autoplay.transport_client import STS2TransportClient
 
@@ -85,7 +83,6 @@ def test_heartbeat_lines_never_refresh_the_business_event_clock(monkeypatch) -> 
       直接驱动真实的 SSE 解析，喂入"仅心跳"的流，断言时钟**不被刷新**；
       再喂入"含一个业务事件"的流，断言时钟**被刷新**。
     """
-    import httpx
 
     frames = [
         b": heartbeat\n\n",
