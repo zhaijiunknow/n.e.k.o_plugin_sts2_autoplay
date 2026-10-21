@@ -865,7 +865,11 @@ def test_enemy_index_rebuildable_from_encounters(tmp_path: Any) -> None:
         m.observe(plain_state("MAP", floor=floor))
     before = json.loads(json.dumps(m.enemy_index, default=str))
     rebuilt = m.rebuild_index()
-    slim = lambda d: {k: {kk: vv for kk, vv in v.items() if not kk.startswith("_") and kk != "_recompute"} for k, v in d.items()}  # noqa: E731
+    def slim(d: dict) -> dict:
+        return {
+            key: {kk: vv for kk, vv in val.items() if not kk.startswith("_") and kk != "_recompute"}
+            for key, val in d.items()
+        }
     assert slim(rebuilt) == slim(before), "★ 派生表必须能由原始完全重建"
 
 

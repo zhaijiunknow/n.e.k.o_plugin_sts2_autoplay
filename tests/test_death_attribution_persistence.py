@@ -31,11 +31,7 @@ import sys
 import types
 from pathlib import Path
 
-_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-if str(_PLUGIN_ROOT.parent.parent.parent) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_ROOT.parent.parent.parent))
-
-from plugin.plugins.sts2_autoplay.death_attribution import (  # noqa: E402
+from plugin.plugins.sts2_autoplay.death_attribution import (
     ATTRIBUTION_VERSION,
     DEATH_KIND_AOE,
     DEATH_KIND_ATTRITION,
@@ -47,6 +43,8 @@ from plugin.plugins.sts2_autoplay.death_attribution import (  # noqa: E402
     read_death_record,
     summarize_kinds,
 )
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 _MODULE_PATH = os.path.join(str(_PLUGIN_ROOT), "death_attribution.py")
 

@@ -60,7 +60,8 @@ def _mk(svc: _Svc, clock: dict[str, float]) -> Any:
     runner._fallback_last_step_count = -1
     runner._fallback_last_progress_at = 0.0
     runner._fallback_refresh_count = 0
-    monkey = lambda: clock["t"]  # noqa: E731
+    def monkey() -> float:
+        return clock["t"]
     lr.time = monkey  # type: ignore[assignment]
     return runner
 

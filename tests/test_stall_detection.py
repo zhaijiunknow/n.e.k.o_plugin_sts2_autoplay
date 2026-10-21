@@ -23,7 +23,12 @@
 """
 from __future__ import annotations
 
+import ast
+import io
 import logging
+import os
+import sys
+import types
 from typing import Any
 
 from plugin.plugins.sts2_autoplay.runtime_state import (
@@ -36,7 +41,6 @@ from plugin.plugins.sts2_autoplay.runtime_state import (
 # 与 CANON §13.2 一致的默认阈值：连续 10 分钟。
 WINDOW = STALL_WINDOW_SECONDS
 assert WINDOW == 600.0, "★ 契约：默认阈值必须是 10 分钟（CANON §13.2）"
-
 
 def _feed(
     state: STS2RuntimeState,
@@ -60,7 +64,6 @@ def _feed(
         hb += 1
         t += step
     return out
-
 
 def _feed_cyclic_real_cadence(
     state: STS2RuntimeState,
@@ -92,7 +95,6 @@ def _feed_cyclic_real_cadence(
         t += step
     return last
 
-
 # ── 1. 「新 key 计数」这一领域量确实被计 ──────────────────────────────────────
 
 def test_a_turn_key_is_counted_as_new_only_once() -> None:
@@ -109,13 +111,11 @@ def test_a_turn_key_is_counted_as_new_only_once() -> None:
     assert second["new_key"] is True, "新 key（回合前进）必须计入"
     assert state.stall_new_key_count == 2
 
-
 def test_an_empty_turn_key_is_not_a_new_key() -> None:
     """取不到 turn_key（非战斗屏）⇒ 不计入、也不重置窗口（它不是局面推进）。"""
     state = STS2RuntimeState()
     state.note_turn_key_sample("", heartbeat=1, now=100.0)
     assert state.stall_new_key_count == 0
-
 
 # ── 2. 达到阈值 ⇒ 判空转并告警 ────────────────────────────────────────────────
 
@@ -133,7 +133,6 @@ def test_stall_is_flagged_after_the_window_with_a_clear_warning(caplog) -> None:
     assert verdicts[-1]["heartbeat_growing"] is True
     assert verdicts[-1]["should_warn"] is True, "★ 必须产生一次告警"
     assert sum(1 for v in verdicts if v["should_warn"]) == 1, "同一窗口只告警一次（不刷屏）"
-
 
 def test_the_warning_is_emitted_by_the_caller_with_a_readable_message(caplog) -> None:
     """判据把 `should_warn` 交出来，调用方据此打**明确**日志。
@@ -160,7 +159,6 @@ def test_the_warning_is_emitted_by_the_caller_with_a_readable_message(caplog) ->
     assert hits, "★ 判空转必须留下明确告警（而非静默）"
     assert "反复重算" in hits[0].getMessage()
 
-
 def test_a_new_turn_key_resets_the_window() -> None:
     """★ 见到新局面 ⇒ 窗口重置、且之后能再次告警（不自锁）。"""
     state = STS2RuntimeState()
@@ -174,7 +172,6 @@ def test_a_new_turn_key_resets_the_window() -> None:
     # 再空转一整个窗口 ⇒ 必须能再次告警
     again = _feed(state, key="0:14:combat:6", seconds=WINDOW, heartbeat=100, start=1700.0)
     assert again[-1]["should_warn"] is True, "★ 第二次空转必须还能报（不得只报一次就哑）"
-
 
 # ── 2b. ★★★ 跨 run 撞值（t27 / 队长发现）：turn_key 不含 run_id ─────────────
 
@@ -198,7 +195,6 @@ def test_turn_key_format_carries_no_run_id_so_cross_run_collision_is_real() -> N
         assert not re.search(r"[A-Z0-9]{12}", sample), (
             "★ turn_key 不含 run_id —— 这是跨 run 撞值的根因；若此断言失败说明格式已改"
         )
-
 
 def test_cross_run_collision_no_longer_causes_a_false_stall() -> None:
     """★★ 核心回归：同一 floor 反复换局（撞值）**不得**产生假空转。
@@ -242,7 +238,6 @@ def test_cross_run_collision_no_longer_causes_a_false_stall() -> None:
         "★ 同 floor 换局撞值 / 跑图期多局面交替【不得】产生假空转"
     )
 
-
 def test_run_id_resets_the_seen_set_so_a_repeated_floor_still_counts_as_new() -> None:
     """★ run_id 变化 ⇒ "已见集合"必须重置（否则同 floor 换局会假卡死）。"""
     state = STS2RuntimeState()
@@ -254,7 +249,6 @@ def test_run_id_resets_the_seen_set_so_a_repeated_floor_still_counts_as_new() ->
     # 换 run：同一 key 必须重新算"新"
     state.note_turn_key_sample("0:5:combat:1", heartbeat=3, now=1002.0, run_id="RUN_B")
     assert state.stall_new_key_count == 2, "★ 换 run 后同 key 必须重新算新（否则假卡死）"
-
 
 def test_new_key_is_not_a_necessary_condition_by_default() -> None:
     """★★ 判据【不】要求"无新 key"：占比维单独就足以判空转。
@@ -280,7 +274,6 @@ def test_new_key_is_not_a_necessary_condition_by_default() -> None:
         "★ 该维已按 §11.7 删净，不得再出现在 conditions 里"
     )
 
-
 def test_no_dead_parameter_is_left_on_note_turn_key_sample() -> None:
     """★★ 回归门：钉死队长在 :429 发现的那类缺陷 —— 「看起来实现了、实则恒真」的形参。
 
@@ -304,7 +297,6 @@ def test_no_dead_parameter_is_left_on_note_turn_key_sample() -> None:
     # 现存形参都应是有意义的口径旋钮（可传、且被回报）
     for name in ("dominance_ratio", "window_seconds", "min_samples", "run_id"):
         assert name in sig.parameters, "口径旋钮 %s 必须保留（可调、可归因）" % name
-
 
 def test_every_condition_key_actually_participates_in_stalled() -> None:
     """★★ 回归门：conditions 里回报的**每一条**都必须真的参与 stalled 判定。
@@ -357,7 +349,6 @@ def test_every_condition_key_actually_participates_in_stalled() -> None:
             "说明它是被别名顶替的死分项（与队长发现的 require_no_new_key 同类）" % target
         )
 
-
 # ── 3. ★ 不误伤：活跃期的慢窗口不得告警 ───────────────────────────────────────
 
 def test_an_active_slow_window_with_many_distinct_keys_does_not_warn() -> None:
@@ -379,7 +370,6 @@ def test_an_active_slow_window_with_many_distinct_keys_does_not_warn() -> None:
     )
     assert last["should_warn"] is False
 
-
 def test_measured_active_window_shape_matches_the_real_log() -> None:
     """把实测的活跃期窗口形状（17~37 种 key，top1 占比 0.05~0.11）钉进测试。
 
@@ -395,7 +385,6 @@ def test_measured_active_window_shape_matches_the_real_log() -> None:
     assert last["distinct_keys"] == len(keys), "17 种 key 在 10 分钟窗内交替（实测口径）"
     assert last["top_key_share"] <= 0.2, "实测活跃期最高频占比 ≤0.11（本构造 ≈1/17，远低于 0.9）"
     assert last["stalled"] is False
-
 
 def test_a_real_stall_shape_is_flagged() -> None:
     """真卡死形状（单一 key 反复重算，占比 1.00）在同一阈值下必须被判出。
@@ -415,7 +404,6 @@ def test_a_real_stall_shape_is_flagged() -> None:
         t += 1.0
     assert last["distinct_keys"] == 1 and last["top_key_share"] == 1.0
     assert last["stalled"] is True
-
 
 # ── 4. ★ 不得与「进程死亡」混淆 ──────────────────────────────────────────────
 
@@ -438,7 +426,6 @@ def test_a_flat_heartbeat_is_death_not_stall(caplog) -> None:
     assert last["stalled"] is False, "★ heartbeat 不涨 ⇒ 不得判空转（否则与进程死亡混淆）"
     assert not any(v["should_warn"] for v in verdicts), "★ 死亡场景不得打空转告警"
 
-
 def test_heartbeat_absent_is_treated_as_unknown_and_does_not_warn() -> None:
     """拿不到 heartbeat（None）⇒ 视为"未知"，保守不判空转（宁漏报不误报）。"""
     state = STS2RuntimeState()
@@ -447,7 +434,6 @@ def test_heartbeat_absent_is_treated_as_unknown_and_does_not_warn() -> None:
         v = state.note_turn_key_sample("0:14:combat:5", heartbeat=None, now=float(t))
     assert v["heartbeat_growing"] is False
     assert v["stalled"] is False
-
 
 def test_too_few_samples_does_not_warn() -> None:
     """采样太少（不足以判定）⇒ 不告警（避免日志刚滚动/reload 后误报）。"""
@@ -458,7 +444,6 @@ def test_too_few_samples_does_not_warn() -> None:
     v2 = state.note_turn_key_sample("0:14:combat:5", heartbeat=2, now=1000.0 + WINDOW + 30)
     assert v2["samples"] < STALL_MIN_SAMPLES
     assert v2["stalled"] is False
-
 
 # ── 5. 纯观测：不碰任何决策状态 ──────────────────────────────────────────────
 
@@ -481,13 +466,11 @@ def test_the_detector_touches_no_decision_state() -> None:
     after = {name: getattr(state, name) for name in guarded}
     assert before == after, "空转判据必须只读，不得顺带改动作选择状态"
 
-
 def test_thresholds_match_the_contract_defaults() -> None:
     """阈值口径写死：10 分钟窗口（CANON §13.2）+ 占比门（实测判别力）。"""
     assert STALL_WINDOW_SECONDS == 600.0
     assert STALL_DOMINANCE_RATIO == 0.9
     assert STALL_MIN_SAMPLES >= 1
-
 
 def test_each_dimension_is_individually_visible_in_the_verdict() -> None:
     """★ 修正后的 §13.2 是【三维 + 样本量下限】—— 每条都必须能逐条查到。
@@ -543,7 +526,6 @@ def test_each_dimension_is_individually_visible_in_the_verdict() -> None:
     assert alast["conditions"]["dominance"] is False, "17 种 key 交替 ⇒ 占比维必须否决"
     assert alast["stalled"] is False
 
-
 # ── 口径纪律：滑动窗参数必须显式可传，避免"口径不同 → 数字不同"不可归因 ──────
 
 def test_sliding_window_caliber_is_explicit_and_overridable() -> None:
@@ -574,7 +556,6 @@ def test_sliding_window_caliber_is_explicit_and_overridable() -> None:
     )
     assert relaxed["conditions"]["dominance"] is True
 
-
 # ── 6. ★ 变异测试：故意改坏 ⇒ 必须转红 ───────────────────────────────────────
 #
 # 说明（CANON §9.9：变异测试框架自身会伪造"转红"）：
@@ -582,15 +563,8 @@ def test_sliding_window_caliber_is_explicit_and_overridable() -> None:
 # 变异方式 = 对 runtime_state.py 源码做最小字符串替换后 exec 成一个独立模块，
 # 再用同一组断言检查 —— 不触碰磁盘上的产品代码。
 
-import ast  # noqa: E402
-import io  # noqa: E402
-import os  # noqa: E402
-import sys  # noqa: E402
-import types  # noqa: E402
-
 _PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _RUNTIME_STATE_PATH = os.path.join(_PLUGIN_DIR, "runtime_state.py")
-
 
 def _mutant(source_patch, *, path: str | None = None, module_name: str = "runtime_state_mutant") -> types.ModuleType:
     """把 `path`（默认 runtime_state.py）按 `source_patch` 改名后编译成独立模块。
@@ -618,7 +592,6 @@ def _mutant(source_patch, *, path: str | None = None, module_name: str = "runtim
     exec(compile(mutated, "<mutant>", "exec"), module.__dict__)
     return module
 
-
 def _stall_with(module: types.ModuleType, *, keys, seconds, heartbeat_seq) -> list[dict[str, Any]]:
     """用变异模块的 STS2RuntimeState 喂同一组样本，返回判定序列。"""
     state = module.STS2RuntimeState()
@@ -633,7 +606,6 @@ def _stall_with(module: types.ModuleType, *, keys, seconds, heartbeat_seq) -> li
         i += 1
         t += step
     return out
-
 
 def test_mutation_a_removing_the_heartbeat_condition_turns_red() -> None:
     """★ 变异 (a)：把「且 heartbeat 在涨」从判据里去掉 ⇒ 必须有测试转红。
@@ -679,7 +651,6 @@ def test_mutation_a_removing_the_heartbeat_condition_turns_red() -> None:
         "若这里不红，说明第 4 条验收的测试【没有真正约束 heartbeat 条件】"
     )
 
-
 def test_mutation_b_zeroing_the_dominance_gate_turns_red() -> None:
     """★ 变异 (b)：把【占比维】改成永远成立（永远认为"局面在动"）⇒ 必须有测试转红。
 
@@ -723,7 +694,6 @@ def test_mutation_b_zeroing_the_dominance_gate_turns_red() -> None:
         "若这里不红，说明第 2/3 条验收的测试【没有真正约束占比维】"
     )
 
-
 def test_mutation_b2_zeroing_the_new_key_counter_does_not_break_the_gate() -> None:
     """★ 阴性对照（证明设计意图）：把"新 key 记账"改坏，判据**仍应**工作。
 
@@ -757,7 +727,6 @@ def test_mutation_b2_zeroing_the_new_key_counter_does_not_break_the_gate() -> No
         "★ 判据**不应**依赖'新 key'（跨 run 撞值 75%）⇒ 改坏它仍应能判出真卡死"
     )
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # t29：把判据**接线**到 loop_runner._autoplay_loop（此前无调用点 = 等于未实装）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -778,13 +747,11 @@ def test_mutation_b2_zeroing_the_new_key_counter_does_not_break_the_gate() -> No
 
 _LOOP_RUNNER_PATH = os.path.join(_PLUGIN_DIR, "loop_runner.py")
 
-
 def _load_loop_runner_module():
     """导入真实模块（不 exec 源码副本）—— 接线门要打在**生产模块**上。"""
     import importlib
 
     return importlib.import_module("plugin.plugins.sts2_autoplay.loop_runner")
-
 
 class _RecordingLogger:
     """只记录 warning —— `[sts2_stall]` 是我们唯一要断言的输出。"""
@@ -801,7 +768,6 @@ class _RecordingLogger:
 
     def stall_lines(self) -> list[str]:
         return [tpl % tup for tpl, tup in self.warnings if "[sts2_stall]" in tpl]
-
 
 def _make_wired_runner(
     *,
@@ -845,7 +811,6 @@ def _make_wired_runner(
     runner._service = _FakeService()
     return runner, runner._service
 
-
 class _FrozenTime:
     """可推进的假时钟 —— `runtime_state.time` 默认取真实时钟，测试必须能控时。"""
 
@@ -854,7 +819,6 @@ class _FrozenTime:
 
     def __call__(self) -> float:
         return self.now
-
 
 def test_the_wiring_point_really_has_tick_and_turn_key() -> None:
     """★ 验收 1：接线点必须**同时**具备真 heartbeat(tick) 与可用 turn_key。
@@ -882,7 +846,6 @@ def test_the_wiring_point_really_has_tick_and_turn_key() -> None:
         "★ _combat_turn_key 不再是含 run_id 的形态"
     )
 
-
 def test_the_wiring_actually_samples_the_detector_and_calls_the_log() -> None:
     """★ 验收 2：接线确实调用了 note_turn_key_sample 并在 should_warn 时打 [sts2_stall]。"""
     module = _load_loop_runner_module()
@@ -892,7 +855,6 @@ def test_the_wiring_actually_samples_the_detector_and_calls_the_log() -> None:
     assert "            self._note_stall_sample(tick)\n" in src, (
         "★ _autoplay_loop 里没有调用 _note_stall_sample(tick) ⇒ 判据仍无调用点"
     )
-
 
 def test_stall_warning_is_emitted_on_a_real_stall_shape() -> None:
     """★ 集成的正例：同一局面持续 > 窗口长 ⇒ 恰好打 1 条 [sts2_stall]。"""
@@ -913,7 +875,6 @@ def test_stall_warning_is_emitted_on_a_real_stall_shape() -> None:
     assert "RUNX|14|combat|5" in lines[0], "★ 告警须带上是哪个局面"
     assert "占比 1.00" in lines[0]
     assert "种类 1" in lines[0]
-
 
 def test_wiring_does_not_warn_on_active_play() -> None:
     """★ 集成的反例：活跃期（多局面交替、占比低）不得告警。"""
@@ -944,7 +905,6 @@ def test_wiring_does_not_warn_on_active_play() -> None:
     )
     # 反证：这轮确实喂进去了，只是没告警（否则"没告警"可能只是因为没跑）
     assert svc._state.stall_sample_counts, "★ 没喂到样本 ⇒ 上面的'不告警'是空断言"
-
 
 def test_wiring_touches_no_decision_state() -> None:
     """★★ 验收 8：接线**不得改变任何决策行为** —— 锁住关键决策字段前后相等。
@@ -1001,7 +961,6 @@ def test_wiring_touches_no_decision_state() -> None:
     assert st.stall_sample_counts, "★ 判据没被真正喂到样本 ⇒ 上面'没变'是空断言"
     assert svc.logger.stall_lines(), "★ 这轮本该告警 ⇒ 判据确实被驱动过"
 
-
 def test_wiring_swallows_exceptions_so_it_cannot_break_the_loop() -> None:
     """可观测性纪律：接线出任何异常都必须被吞掉，绝不打断游玩链路。"""
     clock = _FrozenTime()
@@ -1020,7 +979,6 @@ def test_wiring_swallows_exceptions_so_it_cannot_break_the_loop() -> None:
     finally:
         rs.time = orig
     assert svc.logger.stall_lines() == []
-
 
 # ── 变异测试（t29 契约两条）───────────────────────────────────────────────────
 

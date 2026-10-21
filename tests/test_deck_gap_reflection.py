@@ -23,17 +23,8 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_REPO_ROOT = _PLUGIN_ROOT.parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from plugin.plugins.sts2_autoplay.deck_gap_reflection import (  # noqa: E402
+from plugin.plugins.sts2_autoplay.deck_gap_reflection import (
     DEATH_KIND_TO_DIMS,
     DIM_CEILINGS,
     DIM_LESSON_TEMPLATES,
@@ -42,7 +33,7 @@ from plugin.plugins.sts2_autoplay.deck_gap_reflection import (  # noqa: E402
     NOTABLE_RATIO,
     build_gap_lessons,
 )
-from plugin.plugins.sts2_autoplay.heuristic_planner import (  # noqa: E402
+from plugin.plugins.sts2_autoplay.heuristic_planner import (
     STS2HeuristicPlanner,
 )
 
