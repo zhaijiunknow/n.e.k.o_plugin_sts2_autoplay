@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from plugin.plugins.sts2_autoplay.candidate_generator import STS2CandidateGenerator
 from plugin.plugins.sts2_autoplay.heuristic_planner import STS2HeuristicPlanner
+from plugin.plugins.sts2_autoplay.loop_runner import _combat_deadlock_signature
 
 
 def test_candidate_generator_prefers_planned_operation_then_registry_actions() -> None:
@@ -113,11 +114,26 @@ def _combat_context(*, solver_plan=None, hand=None, energy=2, block=0, enemies=N
     }
     if solver_plan is not None:
         ctx["solver_plan"] = solver_plan
+        # ★▼ t45：准入门槛（`loop_runner.solver_play_gate`）新增两条硬条件 ——
+        #   「搜索已算出结果（search_status ∈ MapStatus 值域）」与「这份计划基于**当前**局面」。
+        #   本文件的计划是**当场按当前局面造的**，语义上等价于生产的 `refetched` 分支，
+        #   所以把 loop_runner 在那一分支里记录的来源与取回指纹一并填上。
+        #   不填的后果不是"测试挂了"，而是这些用例**测的是一条已经被闸门封死的路径**。
+        ctx["plan_origin"] = "refetched"
+        ctx["plan_fetch_signature"] = _combat_deadlock_signature(ctx["snapshot"])
     return ctx
 
 
 def _plan(*steps) -> dict:
-    return {"in_combat": True, "line": [{"turn": 1, "steps": list(steps)}]}
+    # ★ t45：`search_status` 是准入门槛的判据之一（合法值域见
+    #   loop_runner.SOLVER_SEARCH_STATUSES，依据 CombatSolverFacade.cs:409-412）。
+    #   "complete" ⇔ SearchBoundaryReason.None（搜索自然穷尽）。
+    return {
+        "in_combat": True,
+        "search_status": "complete",
+        "state_fingerprint": "TESTFP0000000000",
+        "line": [{"turn": 1, "steps": list(steps)}],
+    }
 
 
 def test_combat_obeys_solver_play_card() -> None:

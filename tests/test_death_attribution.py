@@ -141,14 +141,47 @@ def test_boss_takes_priority_over_attrition() -> None:
 
 
 def test_elite_is_recognized_by_known_id() -> None:
-    """精英敌人在游戏里的 `enemy_id` 常**不含** "elite" ⇒ 必须靠白名单。"""
-    for room in ("MAWLER", "VINE_SHAMBLER", "BYRDONIS"):
+    """精英敌人在游戏里的 `enemy_id` 常**不含** "elite" ⇒ 必须靠白名单。
+
+    ⚠️ 这里刻意**只用**仍然留在 `_KNOWN_ELITES` 里的名字。
+       `MAWLER` / `VINE_SHAMBLER` / `BYRDONIS` 之类原先也在名单里，已被实测证伪
+       （在 3~15 层的普通遭遇里大面积出现）⇒ 已移出，见
+       `test_common_trash_is_no_longer_classified_as_elite`。
+    """
+    for room in ("TERROR_EEL", "PHROG_PARASITE", "PHANTASMAL_GARDENER"):
         kind = classify_death(
             deaths=_deaths((room, 100), ("NIBBIT", 10)),
             total_floors=14,
             lost_total=110,
         )
         assert kind == DEATH_KIND_ELITE, f"{room} 应判精英，实际 {kind}"
+
+
+def test_common_trash_is_no_longer_classified_as_elite() -> None:
+    """★ 实测修正：5 个**常见小怪**曾被当成精英，实测共 59 场误判。
+
+    证伪方式：看它们在真实数据里的**全部楼层集合**（`encounter_db.json` 775 场
+    + 记忆库 50 局 route）—— 与普通遭遇完全重合，且在 3~15 层的普通战斗里反复出现：
+
+        VINE_SHAMBLER    8,11,13,14,15      （全项目最常见敌人之一，累计 615 血）
+        SELF_HELP_BOOK   3,6,7,15,28,29
+        HAUNTED_SHIP     5,11,14,15
+        MAWLER           6,8,11,12,13,15
+        BYGONE_EFFIGY    11,12,13,14
+
+    ⇒ 判成 `elite` 会指向 output/quality（"补数值、升级关键牌"），
+      而真实形态是"被小怪磨死" ⇒ 该反思防御浓度。方向错了。
+    """
+    for room in ("VINE_SHAMBLER", "SELF_HELP_BOOK", "HAUNTED_SHIP",
+                 "MAWLER", "BYGONE_EFFIGY"):
+        kind = classify_death(
+            deaths=_deaths((room, 100), ("NIBBIT", 10)),
+            total_floors=13,
+            lost_total=110,
+        )
+        assert kind != DEATH_KIND_ELITE, (
+            f"{room} 是小怪（普通层 3~15 层大面积出现），不该判精英，实际 {kind}"
+        )
 
 
 def test_multi_enemy_uses_aggregate_share_not_single_room() -> None:
@@ -265,6 +298,244 @@ def test_two_rooms_split_is_unknown_not_attrition() -> None:
 def test_no_deaths_is_unknown() -> None:
     """**证据不足 ⇒ 不编造。**"""
     assert classify_death(deaths=[], total_floors=5, lost_total=0) == DEATH_KIND_UNKNOWN
+
+
+# --------------------------------------------------------------------------------------
+# 2b. ★★ Boss 归因：结构性判据（幕末层）+ 名字白名单，二者互补
+# --------------------------------------------------------------------------------------
+#
+# 实测背景（50 局真实记忆）：
+#
+#   · 30 局死在幕末层（本快照：floor 17 ×20 / 33 ×9 / 48 ×1）
+#   · 只按房名判 Boss 的旧 `_looks_boss` 在这 30 局里只认出 1 局
+#   · 旧判决分布：attrition 25 / elite 3 / burst 1 / boss 1
+#     ⇒ 新判决：boss 30
+#   · 后果不是数字难看，而是**反思方向被带反**：
+#     `DEATH_KIND_TO_DIMS["boss"] = ("output","quality")`，
+#     而 `attrition` 是 `("defense","quality")` ⇒ 一直劝"多垫格挡"，
+#     真问题却是"升级关键牌、补数值"。
+
+#: 从**真实数据**统计出的楼层集合（原始统计，未做任何筛选）：
+#: 来源 = `encounter_db.json` 的 775 场遭遇（`encounter_key.act_id` × `floor`）
+#:        + `catgirl_memory.json` 50 局的 `route[].room/floor`。
+#: ★ 这张表是**证据**，不是期望值 —— 它让"为什么这个名字能进白名单"可复核。
+_MEASURED_BOSS_FLOORS: dict[str, tuple[int, ...]] = {
+    # act 0 的 Boss（幕末层 17）
+    "VANTOM": (17,),
+    "CEREMONIAL_BEAST": (17,),
+    "WATERFALL_GIANT": (17,),
+    "LAGAVULIN_MATRIARCH": (17,),
+    "SOUL_FYSH": (17,),
+    "KIN_PRIEST": (17,),
+    "KIN_FOLLOWER": (17,),
+    # act 1 的 Boss（幕末层 33）
+    "THE_INSATIABLE": (33,),
+    "KNOWLEDGE_DEMON": (33,),
+    "CRUSHER": (33,),
+    "ROCKET": (33,),
+    # act 2 的 Boss（幕末层 48）
+    "AEONGLASS": (48,),
+}
+
+#: 被证伪的"伪精英"的楼层集合（普通层大面积出现 ⇒ 不是 Boss、也不该当精英）。
+_MEASURED_TRASH_FLOORS: dict[str, tuple[int, ...]] = {
+    "VINE_SHAMBLER": (8, 11, 13, 14, 15),
+    "SELF_HELP_BOOK": (3, 6, 7, 15, 28, 29),
+    "HAUNTED_SHIP": (5, 11, 14, 15),
+    "MAWLER": (6, 8, 11, 12, 13, 15),
+    "BYGONE_EFFIGY": (11, 12, 13, 14),
+}
+
+
+def _act_final_floors() -> frozenset[int]:
+    from plugin.plugins.sts2_autoplay.death_attribution import (
+        _ACT_FINAL_FLOORS,
+        ACT_FLOOR_SPANS,
+    )
+
+    # 幕末层必须**由**幕区间推导（两张表不许漂移）
+    assert _ACT_FINAL_FLOORS == frozenset(end for _start, end in ACT_FLOOR_SPANS)
+    return _ACT_FINAL_FLOORS
+
+
+def test_act_final_floors_match_the_measured_floor_spans() -> None:
+    """★ 结构性判据的数据底座：幕末层 = {17, 33, 48}（每一幕的最大层）。
+
+    实测（`encounter_db.json` 775 条遭遇的 `act_id` × `floor`）：
+
+        act 0 : floor 2..17    act 1 : floor 19..33    act 2 : floor 35..48
+
+    记忆库 50 局的 `act` 字段与之交叉一致（floor=17 的局 `act` 全为 0）。
+    """
+    assert _act_final_floors() == frozenset({17, 33, 48})
+
+
+@pytest.mark.parametrize("room", sorted(_MEASURED_BOSS_FLOORS))
+def test_real_boss_names_are_classified_as_boss(room: str) -> None:
+    """★ 真 Boss 房名 → `boss`（含**双敌人组合名**与"名字里有小怪味"的 Boss）。
+
+    `KIN_FOLLOWER+KIN_PRIEST` 是**双敌人组合名**（`service._room_identity` 用 `+`
+    连接同场敌人），不是单个 id —— 必须靠 `+` 拆分后逐段匹配。
+    """
+    floors = _MEASURED_BOSS_FLOORS[room]
+    floor = max(floors)
+    kind = classify_death(
+        deaths=[{"room": room, "floor": floor, "lost": 120},
+                {"room": "NIBBIT", "floor": 4, "lost": 30}],
+        total_floors=floor,
+        lost_total=150,
+    )
+    assert kind == DEATH_KIND_BOSS, f"{room} 是真 Boss（实测只在 floor {floors}），实际判成 {kind}"
+
+
+@pytest.mark.parametrize(
+    "combo",
+    ["KIN_FOLLOWER+KIN_PRIEST", "KIN_FOLLOWER+KIN_FOLLOWER+KIN_PRIEST", "CRUSHER+ROCKET"],
+)
+def test_boss_combo_names_are_recognized(combo: str) -> None:
+    """★ 双敌人组合名必须能识别（组合名不是单个 id，靠 `+` 拆段匹配）。"""
+    floor = 33 if "CRUSHER" in combo else 17
+    kind = classify_death(
+        deaths=[{"room": combo, "floor": floor, "lost": 100}],
+        total_floors=floor,
+        lost_total=100,
+    )
+    assert kind == DEATH_KIND_BOSS, f"组合名 {combo} 应判 Boss，实际 {kind}"
+
+
+def test_new_unknown_boss_is_still_recognized_by_floor() -> None:
+    """★★ 结构性判据的**全部意义**：没见过的新 Boss 也必须判对。
+
+    名字白名单对"还没见过的 Boss"必然失效；幕末层不会。
+    这里刻意用一个**不在任何名单里**的房名，只给"死在幕末层"这一个证据。
+    """
+    kind = classify_death(
+        deaths=[{"room": "SOME_BRAND_NEW_2027_BOSS", "floor": 33, "lost": 90},
+                {"room": "SEAPUNK", "floor": 21, "lost": 60}],
+        total_floors=33,
+        lost_total=150,
+    )
+    assert kind == DEATH_KIND_BOSS, (
+        f"死在幕末层(33) 就必是 Boss 战（不依赖名字），实际 {kind}"
+    )
+
+
+@pytest.mark.parametrize("room", sorted(_MEASURED_BOSS_FLOORS))
+def test_boss_name_on_a_normal_floor_is_not_boss(room: str) -> None:
+    """★★★ **防过拟合的关键测试**：同名但出现在普通楼层 ⇒ **不**判 boss。
+
+    这是把白名单加进判据时最容易犯的错：只要名字对上就算 Boss，
+    等于假设"这个敌人永远只在 Boss 房出现"。一旦它（或同名变体）在普通层出现，
+    就会把"被小怪磨死"改判成"被 Boss 打死" —— 错误只是从一头搬到另一头，
+    而且更糟（原来至少判对了大类）。
+
+    ⇒ 楼层是闸门：楼层明确且不是幕末层时，名字说什么都不算数。
+    """
+    normal_floor = 11 if room != "AEONGLASS" else 40
+    kind = classify_death(
+        deaths=[{"room": room, "floor": normal_floor, "lost": 80},
+                {"room": "SEAPUNK", "floor": normal_floor + 1, "lost": 40}],
+        total_floors=normal_floor + 1,
+        lost_total=120,
+    )
+    assert kind != DEATH_KIND_BOSS, (
+        f"{room} 出现在普通层 {normal_floor} ⇒ 不是 Boss 战，实际判成 {kind}"
+    )
+
+
+def test_surviving_the_boss_then_dying_later_is_not_a_boss_death() -> None:
+    """★★ 打过 Boss 之后才死 ⇒ **不是** Boss 死因（实测形态的真实案例）。
+
+    实测 `B2F1CVUP9KB0`：route 里 floor 17（act 0 的 Boss 层）有损血，
+    但它一路打到 floor 23 才死 ⇒ Boss 没能杀死它，真凶是后来的消耗。
+    若不看"死在**哪一层**"而只看"损血过的层里有没有幕末层"，
+    这一局会被误判成 boss。
+    """
+    kind = classify_death(
+        deaths=[
+            {"room": "WATERFALL_GIANT", "floor": 17, "lost": 30},   # 打掉了血，但活着出来了
+            {"room": "SEAPUNK", "floor": 19, "lost": 40},
+            {"room": "NIBBIT", "floor": 21, "lost": 35},
+            {"room": "PAEL", "floor": 23, "lost": 30},
+        ],
+        total_floors=23,      # ← 死在 23，不是幕末层
+        lost_total=135,
+    )
+    assert kind != DEATH_KIND_BOSS, (
+        f"死在 floor 23（非幕末层）⇒ 不该判 Boss，实际 {kind}"
+    )
+    assert kind == DEATH_KIND_ATTRITION, f"跨 4 房无单一主因应判 attrition，实际 {kind}"
+
+
+def test_whitelist_names_all_satisfy_the_floor_invariant() -> None:
+    """★ 白名单的**入榜纪律**：只能收"实测只在幕末层出现"的名字。
+
+    这条把"验证结果"变成可执行断言：日后若有人凭印象往 `_KNOWN_BOSSES`
+    里塞一个在普通层出现过的名字，这里会立刻变红（数字对不上就说明没核对）。
+    """
+    from plugin.plugins.sts2_autoplay.death_attribution import _KNOWN_BOSSES
+
+    act_final = _act_final_floors()
+    for name, floors in _MEASURED_BOSS_FLOORS.items():
+        assert name.lower() in _KNOWN_BOSSES, f"{name} 已验证却不在白名单里"
+        assert set(floors) <= act_final, (
+            f"{name} 的实测楼层 {floors} 不全是幕末层 {sorted(act_final)} ⇒ 不许进 Boss 白名单"
+        )
+    # 反向：白名单里凡是**有实测数据**的名字，都必须满足楼层不变式
+    for name in _KNOWN_BOSSES:
+        measured = _MEASURED_BOSS_FLOORS.get(name.upper())
+        if measured is None:
+            continue
+        assert set(measured) <= act_final, f"{name} 在普通层出现过，不许当 Boss"
+
+
+def test_proven_trash_is_not_a_boss_either() -> None:
+    """★ 被证伪的"伪精英"同时也不满足 Boss 不变式（它们绝对不是 Boss）。"""
+    act_final = _act_final_floors()
+    for name, floors in _MEASURED_TRASH_FLOORS.items():
+        assert not (set(floors) <= act_final), (
+            f"{name} 的实测楼层 {floors} 与幕末层 {sorted(act_final)} 高度重合却" 
+            "被判成只在 Boss 层出现 —— 统计口径有问题"
+        )
+
+
+def test_boss_without_any_floor_evidence_falls_back_to_name() -> None:
+    """★ 向后兼容：**完全没有楼层证据**时退回按名字判 Boss（旧行为）。
+
+    `classify_death` 的调用方不一定带 `floor`（`hp.heaviest` 回落路径就可能缺）；
+    这种情况下没有楼层可用，只能信名字 —— 宁可保守取真。
+    """
+    kind = classify_death(
+        deaths=[{"room": "VANTOM", "lost": 100}, {"room": "NIBBIT", "lost": 20}],
+        total_floors=0,
+        lost_total=120,
+    )
+    assert kind == DEATH_KIND_BOSS, f"无楼层证据时应按名字判 Boss，实际 {kind}"
+
+
+def test_build_attribution_counts_boss_rooms_by_floor() -> None:
+    """`boss_rooms` 计数也走同一套楼层闸门（不得出现"两套 Boss 判据"）。"""
+    boss_run = {
+        "outcome": "defeat",
+        "floor": 17,
+        "route": [
+            {"room": "WATERFALL_GIANT", "floor": 17, "hp_lost": 40},
+            {"room": "SEAPUNK", "floor": 21, "hp_lost": 30},
+        ],
+    }
+    attribution = build_death_attribution(boss_run)
+    assert attribution["kind"] == DEATH_KIND_BOSS
+    assert attribution["boss_rooms"] >= 1
+
+    normal_run = {
+        "outcome": "defeat",
+        "floor": 12,
+        "route": [
+            {"room": "WATERFALL_GIANT", "floor": 11, "hp_lost": 40},   # 普通层 ⇒ 不算 Boss 房
+            {"room": "SEAPUNK", "floor": 12, "hp_lost": 30},
+        ],
+    }
+    assert build_death_attribution(normal_run)["boss_rooms"] == 0
 
 
 # --------------------------------------------------------------------------------------

@@ -41,6 +41,27 @@ class STS2LoopRunner:
         #   随缓存计划一起存活；planner 用它区分「取回后局面已变（漂移 ⇒ 归 A）」与
         #   「取回后局面没变但首步仍做不了（真无解 ⇒ 归 B）」。
         self._solver_plan_fetch_signature = ""
+        # ★★★ t45（单飞 / 节拍 / 取证）：
+        #   `_solver_fetch_lock_*` —— 「同一时刻只允许一次 /solver/plan 在飞」的互斥闸。
+        #     为什么需要：`refresh_state()` 是 tick 的唯一入口，而它有三个并发驱动者 ——
+        #       autoplay 循环（`_autoplay_loop` → `run_autoplay_step`）、
+        #       SSE 事件循环（`_event_loop_body` → `_maybe_event_refresh`）、
+        #       以及 `execute_operation()` 派发成功后自己的 `await self.refresh_state(...)`。
+        #     它们共用一个 asyncio loop，而 tick 里有 `await client.get_combat_plan()`
+        #     (:214) 这样的**挂起点** ⇒ 两个 tick 完全可能同时停在"正在搜索"上
+        #     ⇒ 向 mod 打出**两次并发**搜索（每次最长 8s，Deep 自报预算 120s）。
+        #   `_solver_inflight` —— 在飞的那次请求（用于**合并**：并发 tick 直接复用同一次
+        #     搜索结果，而不是排队再搜一遍）。
+        #   `_solver_last_fetch_seconds` / `_solver_last_budget_ms` / `_solver_fetch_count`
+        #     —— 实测耗时与 mod 自报预算，供自适应节拍与真机取证统计。
+        self._solver_fetch_lock: asyncio.Lock | None = None
+        self._solver_fetch_lock_loop: asyncio.AbstractEventLoop | None = None
+        self._solver_inflight: dict[str, Any] | None = None
+        self._solver_fetch_coalesced = 0
+        self._solver_fetch_count = 0
+        self._solver_last_fetch_seconds = 0.0
+        self._solver_last_budget_ms: Any = None
+        self._solver_last_search_status = ""
         # 计划复用/重算的日志去重键（避免每 tick 刷屏）。
         self._plan_log_key = ""
         # 最近一次 SSE 事件类型（combat_started / player_action_window_opened 等）。随
@@ -210,10 +231,9 @@ class STS2LoopRunner:
                 plan_fetch_signature = self._solver_plan_fetch_signature
                 self._log_plan_reuse(step_index, len(_current_turn_steps(cached) or []))
             if solver_plan is None:
-                try:
-                    fetched = await client.get_combat_plan()
-                except Exception:
-                    fetched = None
+                # ★★★ t45：**单飞（single-flight）取计划** —— 不在搜索尚未返回时并发重复请求。
+                #   见 `_fetch_combat_plan_single_flight` 的注释（谁在并发、为什么）。
+                fetched = await self._fetch_combat_plan_single_flight(client)
                 if fetched and fetched.get("in_combat"):
                     # Only cache an actionable plan; otherwise leave it empty so the next tick retries.
                     solver_plan = fetched
@@ -868,8 +888,31 @@ class STS2LoopRunner:
                     "autoplay-loop TICK=%d OK step_count=%s"
                     % (tick, getattr(self._service._state, "step_count", "?"))
                 )
-            await asyncio.sleep(self._service._cfg_action_interval())
+            # ★★★ t45（第 5 条）：tick 间隔**不再固定**，由求解器实测耗时定下限。
+            #   旧实现：`await asyncio.sleep(self._service._cfg_action_interval())` —— 恒定 1.5s，
+            #   与 `/solver/plan` 的实测耗时（0.4–8s）毫无关系 ⇒ 搜索刚落地就再 tick、
+            #   拿去一份已经过期的计划 ⇒ 重取 ⇒ 再算，这是"抢跑"在时序上的那一半。
+            #   新实现见 `adaptive_tick_interval`（下限 = max(配置值, 上次实测耗时 × 1.0)，上限 3s）。
+            await asyncio.sleep(self._next_tick_interval())
         self._hb_log("autoplay-loop EXIT(shutdown=True) tick=%d" % tick)
+
+    def _next_tick_interval(self) -> float:
+        """本轮 autoplay 结束后该睡多久（t45 自适应节拍）。
+
+        ★ 为什么把算式放进模块级纯函数 `adaptive_tick_interval`：这里只是一个取数壳，
+          真正的规则（下限倍数、上限、为什么不用 budget_ms 当节拍）要在**可单测的地方**
+          写一次 —— 否则它会像历史上那些"只写在注释里的约定"一样，改一次代码就静默失效。
+        """
+        base = 1.5
+        try:
+            base = float(self._service._cfg_action_interval())
+        except Exception:
+            base = 1.5
+        return adaptive_tick_interval(
+            base,
+            measured_seconds=self._solver_last_fetch_seconds,
+            budget_ms=self._solver_last_budget_ms,
+        )
 
     # ★ 心跳间隔：每 N 次 tick 记一行（避免刷屏）。按 action_interval≈0.3s 估算，
     #   _HB_EVERY=20 ⇒ 约每 6s 一行，足以判定存活且不会淹没决策日志。
@@ -912,6 +955,127 @@ class STS2LoopRunner:
                 int(verdict.get("distinct_keys", 0)),
                 int(verdict.get("samples", 0)),
                 int(tick),
+            )
+        except Exception:
+            pass
+
+    def _solver_fetch_lock_for_current_loop(self) -> asyncio.Lock:
+        """取当前事件循环专属的 `/solver/plan` 互斥锁（懒建）。
+
+        ★ 为什么按 loop 存而不是 `__init__` 里建一把：
+          `asyncio.Lock` 在第一次 await 时绑定到当时的运行循环；而本 runner 既会在
+          owner loop 里跑，测试里又可能被 `asyncio.run()` 反复在不同循环里驱动。
+          跨循环复用同一把锁会在争用时抛 "attached to a different loop" —— 那是**测试环境**的
+          假故障，会掩盖真正的并发缺陷。按 loop 缓存，语义与"同一时刻只允许一次搜索"完全一致
+          （同一循环内互斥；不同循环本就不可能并发到同一个 mod 端点上）。
+        """
+        loop = asyncio.get_running_loop()
+        lock = self._solver_fetch_lock
+        if lock is None or self._solver_fetch_lock_loop is not loop:
+            lock = asyncio.Lock()
+            self._solver_fetch_lock = lock
+            self._solver_fetch_lock_loop = loop
+            # 换循环 ⇒ 上一循环留下的在飞记录已失效（它属于另一个 loop）。
+            self._solver_inflight = None
+        return lock
+
+    async def _fetch_combat_plan_single_flight(self, client: Any) -> dict[str, Any] | None:
+        """取一次 `/solver/plan`，**保证同一时刻只有一次搜索在飞**，并把并发者合并到同一次结果。
+
+        ## 为什么必须有（t45 新增；缺陷是"并发重复请求求解器"）
+
+        `tick()` 的并发驱动者（三者共用同一个 asyncio loop）：
+          ① `_autoplay_loop` → `run_autoplay_step` → `refresh_state` → `tick`
+          ② `_event_loop_body` → `_maybe_event_refresh` → `refresh_state` → `tick`
+          ③ `execute_operation()` 派发成功后**自己**再 `await self.refresh_state(...)`
+
+        而 tick 里取计划的那一行是 `await`（挂起点）⇒ ①正在等搜索返回时，②③完全可以
+        再进一次 tick 并**再打一次** `/solver/plan`。mod 侧对每次调用都重跑一遍
+        CombatSolver（Short 默认 8s 预算，Deep 120s）⇒ 并发重复请求 = 双倍搜索、
+        且两份结果基于**不同**局面，谁先回谁写缓存 ⇒ 缓存与"取回时指纹"可能来自不同的搜索。
+
+        ## 语义（两步）
+
+        1. **合并**：已有同循环的在飞请求 ⇒ 直接 `await` 它并复用同一份返回（不发起第二次搜索）。
+        2. **互斥**：否则持锁发起；拿到锁后**再查一次**在飞记录（双检），
+           避免"两个 tick 同时通过第一步检查、然后一前一后各搜一次"。
+
+        ## 观测
+        - `self._solver_fetch_count`      —— 真正打到 mod 的请求次数（取证用）
+        - `self._solver_fetch_coalesced`  —— 被合并掉的重复请求次数
+        - `[sts2_solver_fetch]` 日志行    —— 每次真实请求一行（耗时 / 状态 / 指纹），
+          供"出牌前最近一次求解器耗时分布"统计。
+        """
+        loop = asyncio.get_running_loop()
+        inflight = self._solver_inflight
+        if inflight is not None and inflight.get("loop") is loop and not inflight["task"].done():
+            self._solver_fetch_coalesced += 1
+            self._log_solver_fetch_merged()
+            # shield：合并者被取消（例如它自己的 tick 超时）不该把别人在等的那次搜索打断。
+            return await asyncio.shield(inflight["task"])
+        lock = self._solver_fetch_lock_for_current_loop()
+        async with lock:
+            inflight = self._solver_inflight
+            if inflight is not None and inflight.get("loop") is loop and not inflight["task"].done():
+                self._solver_fetch_coalesced += 1
+                self._log_solver_fetch_merged()
+                return await asyncio.shield(inflight["task"])
+            # ★ 取得协程这一步也必须包在 try 里：`client.get_combat_plan` 属性查找/调用是
+            #   **同步**发生的（还没进 Task），旧实现把它整体放在 `try: await ...` 里，
+            #   于是"客户端没有这个端点"这类错误会被吞成 `fetched=None`。
+            #   改成 Task 之后若不在这一层兜住，就会从 tick 里**抛出去**把整轮打断
+            #   （实测：`test_loop_runner_tick_builds_policy_from_program_mode` 的桩客户端
+            #    没有 get_combat_plan ⇒ AttributeError 直接冒到 tick）。语义必须与旧实现一致：
+            #   取计划失败 = 本 tick 没计划，继续走"等待"路径。
+            try:
+                plan_coro = client.get_combat_plan()
+            except Exception:
+                return None
+            # ★ 必须建 Task（而不是直接 await 协程）：只有 Task 能被第二个 await-er 复用。
+            task = loop.create_task(plan_coro)
+            self._solver_inflight = {"loop": loop, "task": task}
+            started = time()
+            try:
+                fetched = await task
+            except Exception:
+                fetched = None
+            finally:
+                self._solver_inflight = None
+            elapsed = time() - started
+            self._solver_fetch_count += 1
+            self._solver_last_fetch_seconds = elapsed
+            payload = fetched if isinstance(fetched, dict) else {}
+            self._solver_last_budget_ms = payload.get("budget_ms")
+            self._solver_last_search_status = str(payload.get("search_status") or "")
+            self._log_solver_fetch(elapsed, payload)
+            return fetched
+
+    def _log_solver_fetch_merged(self) -> None:
+        try:
+            self._service.logger.info(
+                "[sts2_solver_fetch] 合并：已有一次 /solver/plan 在飞，本 tick 复用其结果"
+                "（合并次数=%d，真实请求次数=%d）",
+                self._solver_fetch_coalesced,
+                self._solver_fetch_count,
+            )
+        except Exception:
+            pass
+
+    def _log_solver_fetch(self, elapsed: float, payload: dict[str, Any]) -> None:
+        """每次真实 `/solver/plan` 一行：耗时 / 状态 / 是否基于当前局面（取证主证据）。"""
+        try:
+            self._service.logger.info(
+                "[sts2_solver_fetch] n=%d elapsed_ms=%d in_combat=%s search_status=%s "
+                "budget_ms=%s nodes=%s fingerprint=%s line_steps=%s sim_turn=%s",
+                self._solver_fetch_count,
+                int(round(elapsed * 1000.0)),
+                payload.get("in_combat"),
+                payload.get("search_status"),
+                payload.get("budget_ms"),
+                payload.get("nodes_expanded"),
+                payload.get("state_fingerprint"),
+                len(_current_turn_steps(payload) or []),
+                payload.get("turn"),
             )
         except Exception:
             pass
@@ -1303,4 +1467,316 @@ def _plan_step_is_executable(step: dict[str, Any], snapshot: dict[str, Any]) -> 
     return True, ""
 
 
-__all__ = ["STS2LoopRunner"]
+# ══════════════════════════════════════════════════════════════════════════════════
+# ★★★ t45：求解器**准入门槛**（HARD GATE）—— 「没算出结果就一张牌都不打」
+# ══════════════════════════════════════════════════════════════════════════════════
+#
+# ## 玩家指示（本次任务的原话）
+#   「严格等待求解器算出结果后才执行，禁止抢跑、禁止启发式兜底出牌。」
+#
+# ## 旧形态（本次要修掉的缺陷）
+#   `heuristic_planner.plan()` 的战斗分支**只要** `_line_step_at(solver_plan, step_index)`
+#   拿得到 `kind` 就出牌；出牌之后才发现计划已过期，再进入"事后补救"
+#   （`_combat_solver_only_outcome` 的 A/B 分类 + 上界）。⇒ 那是补偿，不是准入。
+#   本闸门把判定**搬到出牌路径最前面**：不过闸门 ⇒ 本 tick 不发任何动作。
+#
+# ## `search_status` 的合法取值（**依据，不是猜**）
+#   `GET /solver/plan` 的该字段由
+#   `game_mod/nekospire/Solver/CombatSolverFacade.cs:205` 的 `MapStatus(result)` 产生，
+#   该函数本体在同文件 `:409-412`：
+#
+#       result.BoundaryReason == None       ⇒ "complete"
+#       result.BoundaryReason == TimeLimit  ⇒ "budget_exceeded"
+#       其它                                ⇒ "boundary_" + BoundaryReason.ToString().ToLowerInvariant()
+#
+#   而 `BoundaryReason` 即
+#   `game_mod/nekospire/Solver/Search/CombatPlan.cs:51-65` 的 `SearchBoundaryReason`：
+#       None, Shuffle, NoCards, UnsupportedEffect, DynamicResolution, PendingChoice,
+#       EventDefeat, TurnLimit, NodeLimit, TimeLimit, MemoryNoProgress
+#   ⇒ `MapStatus` 的**值域全集**（逐成员枚举，11 个）恰为下面 `SOLVER_SEARCH_STATUSES`。
+#
+# ## 为什么「已算出结果」= 「search_status ∈ 全集」，而不是只认 "complete"
+#   1. `/solver/plan` 是**同步**端点：`BuildPlanAsync`（:22-104）必须 await 完 `Solve()`
+#      才会走到 `MapResult`。⇒「返回过」本身已证明搜索结束；`search_status` 描述的是
+#      **同一次**返回里"搜索为什么停下"。
+#   2. 真正的"没算出结果"形态**不是**某个 boundary，而是 `Failed(...)`（:425-429）：
+#      `in_combat=false` 且 `search_status` **缺失**。实机原样（2026-10-20 23:47，
+#      本机 18080 实测）：
+#          {"in_combat":false, "search_status":null, "line":[],
+#           "warnings":["CombatSolver 搜索失败: 只能在玩家出牌阶段计算。..."]}
+#      ⇒ 空 / null / 不认识的字符串 = 没算出结果 = 等待。
+#   3. 若只认 "complete"，则 `budget_exceeded` 与所有 `boundary_*` 都会被判成"没算完"。
+#      而 mod 的默认预算是 Short 8000ms / Deep 120000ms（`SolverFacadeOptions.Default`，
+#      同文件 :438-445），复杂战斗里几乎每次都在 budget 边界截断 ⇒ **永远等不到"完成"
+#      ⇒ 卡死**，正是本次任务同样明令禁止的另一半。上游同构：`SolverController` 在
+#      TimeLimit 边界同样先发布已算出的前沿（incumbent）再停。
+#   ⇒ 结论：全集内 = 已算出结果，可以继续接受"首步可执行"与"指纹一致"两道判定；
+#     全集外 = 等待。
+SOLVER_SEARCH_STATUS_COMPLETE = "complete"
+SOLVER_SEARCH_STATUSES = frozenset({
+    "complete",                     # SearchBoundaryReason.None
+    "budget_exceeded",              # SearchBoundaryReason.TimeLimit
+    "boundary_shuffle",             # Shuffle
+    "boundary_nocards",             # NoCards
+    "boundary_unsupportedeffect",   # UnsupportedEffect
+    "boundary_dynamicresolution",   # DynamicResolution
+    "boundary_pendingchoice",       # PendingChoice
+    "boundary_eventdefeat",         # EventDefeat
+    "boundary_turnlimit",           # TurnLimit
+    "boundary_nodelimit",           # NodeLimit
+    "boundary_memorynoprogress",    # MemoryNoProgress
+})
+
+#: 闸门判定结果（日志里的 `verdict=` 取值，稳定字符串以便 grep）。
+GATE_ACT = "act"                        # 允许发动作
+GATE_WAITING = "waiting_solver"         # 求解器还没给出可执行结果 / 局面正漂移 ⇒ 继续等，**不计死锁**
+GATE_CANNOT_ACT = "solver_cannot_act"   # 已给出完整结果但首步不可执行且指纹未变 ⇒ 真无解，走既有上界
+
+
+def solver_play_gate(
+    *,
+    solver_plan: dict[str, Any] | None,
+    snapshot: dict[str, Any],
+    first_step: dict[str, Any] | None,
+    plan_origin: str,
+    plan_fetch_signature: str,
+    current_signature: str | None = None,
+) -> dict[str, Any]:
+    """战斗出牌的**唯一准入闸门**（纯函数，无副作用，可单测）。
+
+    只有**同时**满足下列四条，才允许本 tick 发任何出牌动作（play_card / use_potion / end_turn）：
+
+      C1 `solver_plan` 是 dict 且 `in_combat is True`
+      C2 `search_status` 是 MapStatus 的合法取值（= 搜索已算出结果，依据见本段上方长注释）
+      C3 `line` 非空且**首步在当前局面下可执行**（复用 `_plan_step_is_executable`，
+         **不另造判据**：A/B 分类、"计划能不能续用"用的是同一套事实，见 t37）
+      C4 这份计划确实基于**当前局面**：
+         · `plan_origin == "refetched"` ⇒ 必须 `plan_fetch_signature == 当前局面指纹`
+           （搜索耗时期间局面没漂移；机制沿用 t11 的 `plan_fetch_signature` /
+           `_combat_deadlock_signature`，索引同一个概念，不新造指纹）
+         · `plan_origin == "reused"` ⇒ 整回合快照**续行**：新鲜度已由 `_reusable_plan`
+           在 loop_runner 侧判过（回合签名未变 + 下一步可执行，同一套判据），此处放行。
+           若这里也要求"指纹等于取回时"，就会把"同一份整回合计划逐张打完"判成过期 ——
+           那正是玩家口径「算一次、做成快照、直接按快照执行」所要求的路径。
+         · 其它（"none"/未知）⇒ **无法证明**这份计划基于当前局面 ⇒ 阻塞（保守方向：宁可等）。
+
+    返回值（全部键都稳定存在，便于日志与测试断言）：
+
+        verdict         : GATE_ACT / GATE_WAITING / GATE_CANNOT_ACT
+        missing         : 缺的那一条（"solver_plan"/"in_combat"/"search_status"/
+                          "line"/"executable"/"fingerprint"/""），供日志说明"在等什么"
+        why             : 人类可读中文原因（写进日志）
+        search_status   : 计划自报的搜索状态原值
+        in_combat       : 计划自报的 in_combat 原值
+        fingerprint_match: C4 是否成立
+        fingerprint_note: C4 的口径说明（refetched/reused/unknown 三态）
+        exec_reason     : `_plan_step_is_executable` 给出的不可执行原因
+        step_kind       : 首步 kind（日志用）
+    """
+    origin = str(plan_origin or "none").strip().lower()
+    fetch_sig = str(plan_fetch_signature or "")
+    cur_sig = current_signature if isinstance(current_signature, str) else _combat_deadlock_signature(snapshot)
+    step = first_step if isinstance(first_step, dict) else None
+    verdict: dict[str, Any] = {
+        "verdict": GATE_WAITING,
+        "missing": "",
+        "why": "",
+        "search_status": "",
+        "in_combat": None,
+        "fingerprint_match": False,
+        "fingerprint_note": "",
+        "exec_reason": "",
+        "step_kind": str(step.get("kind") or "") if isinstance(step, dict) else "",
+        "plan_origin": origin,
+    }
+
+    # ── C1：计划存在且在战斗内 ────────────────────────────────────────────────
+    if not isinstance(solver_plan, dict) or not solver_plan:
+        verdict.update(
+            missing="solver_plan",
+            why="没有求解器计划（本 tick 未取到 /solver/plan，或取回的是 in_combat=false 的失败载荷）",
+        )
+        return verdict
+    in_combat = solver_plan.get("in_combat")
+    verdict["in_combat"] = in_combat
+    if in_combat is not True:
+        warning = ""
+        warnings = solver_plan.get("warnings")
+        if isinstance(warnings, list) and warnings:
+            warning = str(warnings[0]).splitlines()[0][:120]
+        verdict.update(
+            missing="in_combat",
+            why=("求解器还没算出结果：in_combat=%r（%s；mod 未在玩家出牌阶段计算 ⇒ 只能等）"
+                 % (in_combat, warning or "无附加说明")),
+        )
+        return verdict
+
+    # ── C2：搜索已算出结果 ───────────────────────────────────────────────────
+    status = str(solver_plan.get("search_status") or "").strip().lower()
+    verdict["search_status"] = status
+    if status not in SOLVER_SEARCH_STATUSES:
+        verdict.update(
+            missing="search_status",
+            why=(
+                "求解器还没算出结果：search_status=%r 不在 MapStatus 值域内"
+                "（合法值见 loop_runner.SOLVER_SEARCH_STATUSES，依据 CombatSolverFacade.cs:409-412）"
+                % (solver_plan.get("search_status"),)
+            ),
+        )
+        return verdict
+
+    # ── C4：先判新鲜度，好把"漂移"与"真无解"分开（见下方 cannot_act 判定）────
+    if origin == "refetched":
+        verdict["fingerprint_match"] = bool(fetch_sig) and fetch_sig == cur_sig
+        verdict["fingerprint_note"] = (
+            "refetched：取回时指纹%s当前指纹" % ("==" if verdict["fingerprint_match"] else "!=")
+        )
+    elif origin == "reused":
+        # 整回合快照续行：见 docstring C4 的论证（不重复判，判据同源）。
+        verdict["fingerprint_match"] = True
+        verdict["fingerprint_note"] = "reused：整回合快照续行（回合签名+可执行性已由 _reusable_plan 判过）"
+    else:
+        verdict["fingerprint_match"] = False
+        verdict["fingerprint_note"] = "来源未知（plan_origin=%r）⇒ 无法证明这份计划基于当前局面" % (origin,)
+
+    # ── C3：line 非空且首步可执行 ────────────────────────────────────────────
+    if step is None:
+        # 已算出结果却没有可执行首步。是不是"真无解"取决于新鲜度：
+        #   refetched + 指纹未变 ⇒ 求解器看着**当前**局面仍给不出东西 ⇒ 真无解（走既有上界）
+        #   其它（漂移/来源未知）⇒ 等待，本 tick 不动作、不计死锁
+        cannot_act = origin == "refetched" and verdict["fingerprint_match"]
+        verdict.update(
+            missing="line",
+            why=("求解器结果里没有可执行首步（line[0].steps 为空；search_status=%s）" % (status,)),
+            verdict=GATE_CANNOT_ACT if cannot_act else GATE_WAITING,
+        )
+        if not cannot_act and origin == "refetched":
+            verdict["why"] += "；取回后局面已漂移 ⇒ 归等待（不计死锁）"
+        return verdict
+
+    executable, exec_reason = _plan_step_is_executable(step, snapshot)
+    verdict["exec_reason"] = exec_reason
+    if not executable:
+        # ★★ t45 实机（2026-10-21 08:06:38）新增的一条细分：**首步是 end_turn、但
+        #   `end_turn` 当前不在 available_actions 里** ⇒ 归**等待**，不是"求解器无解"。
+        #
+        #   为什么（实机形态）：求解器的计划常常以 `end_turn` 结尾；而当上一张牌的结算动画
+        #   还没走完 / 已交回合给敌人时，mod 的 `available_actions` 会短暂退化成
+        #   `['save_and_quit']`（实测 `avail_count=1`）。此时"end_turn 不可执行"的原因是
+        #   **窗口没开**，与求解器的建议质量无关。
+        #   与既有结论同源：t13/D3 已经裁定「窗口没开时既不能发 end_turn，也不该累加 N/3，
+        #   改用独立窗口外计数」。闸门在这里沿用同一裁定 ⇒ 上界不会被"等窗口"消耗。
+        if verdict["step_kind"] == "end_turn":
+            actions = snapshot.get("available_actions") if isinstance(snapshot.get("available_actions"), list) else []
+            window_open = any(
+                str(item.get("type") or item.get("name") or "").strip().lower() == "end_turn"
+                for item in actions
+                if isinstance(item, dict)
+            )
+            if not window_open:
+                verdict.update(
+                    missing="window",
+                    why=("非玩家行动窗口：求解器首步是 end_turn，但 end_turn 当前不在 "
+                         "available_actions 里（%s）⇒ 等窗口，不计死锁" % (exec_reason or "无原因",)),
+                    verdict=GATE_WAITING,
+                )
+                return verdict
+        cannot_act = origin == "refetched" and verdict["fingerprint_match"]
+        verdict.update(
+            missing="executable",
+            why=("求解器首步 %s 在当前局面不可执行（%s；search_status=%s）"
+                 % (verdict["step_kind"] or "?", exec_reason or "无原因", status)),
+            verdict=GATE_CANNOT_ACT if cannot_act else GATE_WAITING,
+        )
+        if not cannot_act:
+            if origin == "refetched":
+                verdict["why"] += "；取回后局面已漂移 ⇒ 归等待（不计死锁）"
+            elif origin == "reused":
+                verdict["why"] += "；复用快照与现场不一致 ⇒ 归等待（下一 tick 重取）"
+        return verdict
+
+    # ── C4 落地：指纹对不上 ⇒ 等待（**不是**真无解，不许计数）──────────────
+    if not verdict["fingerprint_match"]:
+        verdict.update(
+            missing="fingerprint",
+            why=("求解器计划与当前局面指纹不一致（%s；search_status=%s）"
+                 % (verdict["fingerprint_note"], status)),
+        )
+        return verdict
+
+    verdict["verdict"] = GATE_ACT
+    verdict["why"] = "四条件齐备（in_combat=True / search_status=%s / 首步可执行 / %s）" % (
+        status,
+        verdict["fingerprint_note"],
+    )
+    return verdict
+
+
+#: 自适应节拍的硬上限（秒）。取 3.0 的**上界论证**：
+#:   求解器实测耗时可到 8s（Short 预算）甚至更久，若按"耗时倍数"无上限地停，
+#:   一次 8s 搜索后要再等 8s ⇒ 玩家看到 16s 一次出牌，比"抢跑"更不可接受。
+#:   3.0 与 mod 端 Short 预算的一半同量级：既能把"搜索刚落地的瞬间立刻再搜"这种
+#:   背靠背重算挡掉，又不会把节奏拖死。
+_SOLVER_PACING_CAP_SECONDS = 3.0
+#: 「上次搜索耗时 × 本系数」作为节拍下限的倍数。取 1.0 的理由：
+#:   /solver/plan 是同步端点，一次搜索本身就把 tick 卡住了 `measured` 秒；
+#:   若紧接着又以远小于 `measured` 的间隔再 tick，就等于让 mod 的搜索线程
+#:   背靠背连轴转（每次都撞 budget 边界截断 ⇒ 结果质量下降）。
+#:   倍率 > 1 会把节奏无谓拖慢（间隔大于搜索本身），= 1 恰是"不抢在搜索周期之前"。
+_SOLVER_PACING_FACTOR = 1.0
+
+
+def adaptive_tick_interval(
+    base_seconds: float,
+    *,
+    measured_seconds: float = 0.0,
+    budget_ms: Any = None,
+    cap_seconds: float = _SOLVER_PACING_CAP_SECONDS,
+    factor: float = _SOLVER_PACING_FACTOR,
+) -> float:
+    """autoplay 的 tick 间隔：**由求解器实测耗时/budget 决定下限**，而不是固定小 sleep。
+
+    ## 为什么要改（t45 第 5 条）
+    旧实现是 `await asyncio.sleep(self._service._cfg_action_interval())` —— 固定 1.5s。
+    而 `/solver/plan` 是**同步**端点、每次调用都重跑 CombatSolver 搜索（实测 0.4–8s）。
+    固定 1.5s 的节拍与搜索耗时完全无关：搜索 3s 的局面里，我们仍然每 1.5s 就去 tick 一次，
+    每次都撞上一个"刚算完就被局面变化作废"的计划 ⇒ 重取 ⇒ 再算。这就是"抢跑"在
+    时序上的那一半（准入闸门管的是另一半：不许用过期的计划出牌）。
+
+    ## 规则
+        interval = clamp(base_seconds, 下限 = max(base, measured × factor), 上限 = cap)
+    其中 `base_seconds` 是玩家的 `action_interval_seconds` 配置（保持可调、不被覆盖），
+    `measured` 取**上一次** `/solver/plan` 的实测耗时；`budget_ms` 是 mod 自报的本次预算，
+    只用于把"实测远小于预算"的局面记进日志（不参与算式：预算是**上限**，不是耗时）。
+
+    ★ 为什么用实测耗时而不是 budget_ms 直接算：`budget_ms` 在 `MapResult`(:206) 里填的是
+      `result.Elapsed`（**实际**耗时），而 profile 的软预算是上限（Short 8000/Deep 120000）。
+      拿上限当节拍会把间隔抬到 8–120s。⇒ 用实测；`budget_ms` 仅作交叉校验。
+    """
+    try:
+        base = float(base_seconds)
+    except (TypeError, ValueError):
+        base = 1.5
+    if base < 0.0:
+        base = 0.0
+    try:
+        measured = float(measured_seconds)
+    except (TypeError, ValueError):
+        measured = 0.0
+    if measured <= 0.0:
+        return base
+    floor = max(base, measured * max(0.0, float(factor)))
+    cap = max(base, float(cap_seconds))
+    return min(cap, floor)
+
+
+__all__ = [
+    "STS2LoopRunner",
+    "SOLVER_SEARCH_STATUS_COMPLETE",
+    "SOLVER_SEARCH_STATUSES",
+    "GATE_ACT",
+    "GATE_WAITING",
+    "GATE_CANNOT_ACT",
+    "solver_play_gate",
+    "adaptive_tick_interval",
+]

@@ -450,6 +450,29 @@ class STS2HeuristicPlanner:
         #   与 `_solver_deadlock_count` 严格分开：窗口没开时不是"求解器无解"，
         #   把它计进 N/3 会让 N 越过阈值（实机 5/3、7/3）且永远等不到兜底。
         self._solver_out_of_window_count = 0
+        # ══════════════════════════════════════════════════════════════════════════
+        # ★★★ t45：**准入闸门**的记账（见 `_combat_solver_gate_blocked`）
+        # ══════════════════════════════════════════════════════════════════════════
+        #   三个计数**互不掩盖**（t37 契约第 3 条的同一精神：任一 tick 结束后，
+        #   都要能从日志读出「闸门放行了几次 / 等了几次 / 判了几次真无解」）：
+        #     allowed_count      —— 过闸门（= 本 tick 真的可能发动作）
+        #     wait_count         —— `waiting_solver`：**不计数死锁、不发任何动作**
+        #     cannot_act_count   —— `solver_cannot_act`：真无解，**走既有上界**
+        #   ★ 与 `_solver_stale_reclaim_count` 的关系：后者是 t23 遗留的"事后补救"计数，
+        #     只在闸门放行后、执行期才失败时仍可能 +1；`waiting_solver` 路径
+        #     **绝不**动它 —— 这正是「上界不得被等待消耗掉」的落地方式。
+        self._solver_gate_allowed_count = 0
+        self._solver_gate_wait_count = 0
+        self._solver_gate_cannot_act_count = 0
+        # 最近一次闸门结论（供 service 侧观测与测试断言）。
+        self._solver_gate_last: dict[str, Any] = {}
+        # 等待态日志的限流状态：`为什么在等` 的键变了就立刻打一行；
+        # 同因连续等待则每 _SOLVER_GATE_LOG_EVERY 次打一行（行内带**累计**计数，
+        # 于是"被闸门拦下的 tick 数"可以逐字从日志读出来，不靠估算）。
+        self._solver_gate_log_key = ""
+        self._solver_gate_blocked_since_log = 0
+        # 上一次闸门结论（用于"恢复放行"只在**跃迁**时留痕，避免每 tick 重复一行）。
+        self._solver_gate_last_verdict = ""
         # 地图投票策略，由 service.startup 用插件配置覆盖：
         #   wait（默认）——多人局里彻底等待：不投票、也不自动跟票，直到玩家通过对 NEKO 说话下令
         #                 （见 sts2_set_route）。单机局没有队友可等，仍按自己的偏好选，否则会卡死。
@@ -1461,6 +1484,70 @@ class STS2HeuristicPlanner:
             # ★ `first_step` 必须在**函数作用域**里先声明：求解器分支若未进入
             #   （无计划/未在战斗），留痕仍要引用它来记录"求解器本来建议什么"。
             first_step: dict[str, Any] | None = None
+            if solver_plan is not None:
+                first_step = _line_step_at(solver_plan, context.get("solver_step_index"))
+            # ════════════════════════════════════════════════════════════════════
+            # ★★★ t45：战斗出牌的**准入门槛（HARD GATE）** —— 必须排在**最前**。
+            # ════════════════════════════════════════════════════════════════════
+            #
+            # 玩家指示（本次任务）：
+            #   「严格等待求解器算出结果后才执行，禁止抢跑、禁止启发式兜底出牌。」
+            #
+            # 为什么位置必须在**这里**（而不是继续沿用下面那些事后判据）：
+            #   缺陷形态是「只要 `line[0].steps[0]` 存在就出牌，出牌之后才发现计划过期，
+            #   再进入补救流程」—— 那是**补偿**，不是准入。旧判据
+            #   （`is_plan_absent` / `is_true_deadlock` / `is_signature_unchanged_since_fetch`）
+            #   全都在 `_combat_solver_only_outcome` 里，**在出牌动作已经产生之后**才被求值
+            #   ⇒ 对"这一次该不该出手"毫无约束力。
+            #
+            # 四条件（详见 `loop_runner.solver_play_gate` 的 docstring 与
+            # `SOLVER_SEARCH_STATUSES` 上方那段"依据"长注释）：
+            #   C1 `solver_plan` 是 dict 且 `in_combat is True`
+            #   C2 `search_status` ∈ MapStatus 值域（= 搜索已算出结果）
+            #   C3 `line` 非空且首步**在当前局面可执行**
+            #   C4 这份计划确实基于当前局面（`plan_fetch_signature` / 整回合快照续行）
+            #
+            # ★ 不满足时本 tick 的语义（**玩家口径，逐字**）：
+            #   「不发任何出牌动作、不发 end_turn、不落回启发式，只返回"继续等待"」。
+            #   ⇒ 下面 `_combat_solver_gate_blocked` 在 `waiting_solver` 分支只写日志并 return None。
+            #   ★ 唯一例外是 `solver_cannot_act`（求解器已给出**完整**结果、首步仍不可执行、
+            #     且取回后指纹未变）—— 那才是真无解，交给既有上界（`_SOLVER_DEADLOCK_RETRIES`）
+            #     在耗尽后发 end_turn 破局。没有这个例外，求解器对一个"建议了一张打不出的牌"
+            #     的局面会永久静默 ⇒ 卡死，同样违反本次任务。
+            # ★ 惰性导入（与 `_combat_solver_only_outcome` 里的同族处理一致）：
+            #   `loop_runner` 侧也在模块级引用本模块（service 侧），用函数内导入把这个方向的
+            #   依赖彻底推迟到"真的进入战斗分支"，万无一失地避免循环导入。
+            from .loop_runner import GATE_ACT, solver_play_gate
+
+            _gate = solver_play_gate(
+                solver_plan=solver_plan,
+                snapshot=snapshot,
+                first_step=first_step,
+                plan_origin=str(context.get("plan_origin") or "none"),
+                plan_fetch_signature=str(context.get("plan_fetch_signature") or ""),
+                current_signature=self._combat_deadlock_signature(snapshot),
+            )
+            if _gate["verdict"] != GATE_ACT:
+                return self._combat_solver_gate_blocked(
+                    gate=_gate,
+                    snapshot=snapshot,
+                    available_actions=available_actions,
+                    solver_plan=solver_plan,
+                    first_step=first_step,
+                    hand=_combat_hand,
+                    classification=classification,
+                    context=context,
+                )
+            self._solver_gate_allowed_count += 1
+            # ★ 闸门恢复（上一 tick 在等/判无解，这一 tick 放行）⇒ 打一行**带精确累计值**的收口行。
+            #   为什么需要它：等待期的日志是节流的（同因每 N 次一行），单看那些行读不出"这一轮
+            #   到底被拦了几次"。恢复行在**边界**上把三个计数逐字写出来 ⇒
+            #   「被 gate 拦下的 tick 数 / 放行数」可精确核对，不靠数日志行。
+            #   ★ 只在**状态跃迁**时打（上一 tick 是拦下的），否则每个放行 tick 都会重复一行。
+            if self._solver_gate_last_verdict in {"waiting_solver", "solver_cannot_act"}:
+                self._log_solver_gate_resume(gate=_gate)
+            self._solver_gate_last_verdict = "act"
+            self._log_solver_gate_act(gate=_gate)
             if not solver_plan or not solver_plan.get("in_combat"):
                 solver_skip_reason = "无求解器计划（未在战斗/取计划失败）"
             if solver_plan and solver_plan.get("in_combat"):
@@ -1688,6 +1775,174 @@ class STS2HeuristicPlanner:
         floor = str(payload.get("floor") or "")
         event_id = str(payload.get("event_id") or "")
         return "%s|%s|%s" % (screen, floor, event_id)
+
+    #: ★★ t45：等待态日志的节流步长。
+    #:   语义：`为什么在等` 的键（= verdict|missing|search_status|plan_origin）一变就立刻打一行；
+    #:   同因连续等待则每 N 次打一行，行内带**累计**计数 ⇒「被闸门拦下的 tick 数」可逐字读出。
+    #:   N 取 5：tick ≈ 1.5s ⇒ 同因等待时约每 7.5s 一行，既不刷屏也不会让日志出现死寂
+    #:   （静默正是本项目历史上多个缺陷最难查的原因）。
+    _SOLVER_GATE_LOG_EVERY = 5
+
+    def _combat_solver_gate_blocked(
+        self,
+        *,
+        gate: dict[str, Any],
+        snapshot: dict[str, Any],
+        available_actions: list[dict[str, Any]],
+        solver_plan: dict[str, Any] | None,
+        first_step: dict[str, Any] | None,
+        hand: list[Any],
+        classification: dict[str, Any],
+        context: dict[str, Any],
+    ) -> PlannedOperation | None:
+        """战斗准入闸门**未通过**时的唯一出口（t45）。
+
+        两种语义，**必须分开记账**（这就是本次任务第 3 条要求的"不许死锁但也不许把等待
+        算成死锁"）：
+
+        - `waiting_solver`：求解器**还没**给出可执行结果（未在出牌阶段 / search_status 缺失 /
+          计划为空 / 局面正漂移）。⇒ 本 tick **不发任何动作（含 end_turn）、不落启发式**
+          —— 玩家原话是「不发任何出牌动作、不发 end_turn、不发启发式，只返回继续等待」；
+          并且**不碰** `_solver_stale_reclaim_count` / `_solver_deadlock_count`
+          ⇒ **上界不会被等待消耗掉**。
+          不死锁的保障来自另外两条，不是靠计数：
+            ① 等待不产生任何状态变更 ⇒ 下一 tick 的局面与这一 tick 相同，重取一定会发生
+               （`_reusable_plan` 判不过 ⇒ `plan_origin=refetched`）；
+            ② 日志里带累计计数（可观测），且既有 `_maybe_fallback_refresh` 无进展看门狗
+               与 SSE 业务静默重连仍在运行 —— "插件没动"与"mod 卡死"可区分。
+
+        - `solver_cannot_act`：求解器**已给出完整结果**（search_status 合法）、首步在当前局面
+          不可执行、且**取回后指纹未变** ⇒ 这才是真无解。
+          ⇒ 直接交给既有上界机制 `_combat_solver_only_outcome`（判据同源，不另造）：
+          计数到 `_SOLVER_DEADLOCK_RETRIES` 后发 `end_turn` 破局。
+          ★ 为什么这里可以直接委托：`solver_play_gate` 判 cannot_act 的判据
+            （refetched + 指纹未变 + 首步不可执行）与该方法里的 `is_true_deadlock`
+            **逐条等价**，所以委托后它必然走 (B) 分支，不会误入 (A) 把真无解当漂移。
+        """
+        verdict = str(gate.get("verdict") or "")
+        plan_origin = str(context.get("plan_origin") or "none")
+        plan_fetch_signature = str(context.get("plan_fetch_signature") or "")
+        self._solver_gate_last = dict(gate)
+        self._solver_gate_last_verdict = verdict
+
+        if verdict == "solver_cannot_act":
+            self._solver_gate_cannot_act_count += 1
+            self._log_solver_gate(gate=gate, plan_origin=plan_origin, force=True)
+            return self._combat_solver_only_outcome(
+                snapshot=snapshot,
+                available_actions=available_actions,
+                solver_plan=solver_plan,
+                first_step=first_step,
+                solver_skip_reason=("求解器已给出完整结果（search_status=%s）但首步不可执行：%s"
+                                    % (gate.get("search_status") or "?", gate.get("exec_reason") or gate.get("why") or "")),
+                hand=hand,
+                plan_origin=plan_origin,
+                plan_fetch_signature=plan_fetch_signature,
+                classification=classification,
+            )
+
+        # ── waiting_solver：只等，不动作，不计死锁 ────────────────────────────────
+        self._solver_gate_wait_count += 1
+        self._log_solver_gate(gate=gate, plan_origin=plan_origin, force=False)
+        return None
+
+    def _log_solver_gate(self, *, gate: dict[str, Any], plan_origin: str, force: bool) -> None:
+        """闸门留痕：一行说清「在等什么 / 三个计数各是多少 / 局面与计划是否对得上」。
+
+        ★ 为什么必须留痕（与 t13/t23/t37 同一条纪律）：静默的等待与"插件卡死"在日志里
+          无法区分 —— 这正是本项目历史上最贵的几类缺陷的共同形态。
+        ★ 为什么带累计计数：本次验收要求报出「被 gate 拦下的 tick 数」，靠数日志行会漏
+          （节流/去重/上限都会吃掉行）⇒ 直接把累计值写进行内，**数字自证**。
+        """
+        key = "|".join((
+            str(gate.get("verdict") or ""),
+            str(gate.get("missing") or ""),
+            str(gate.get("search_status") or ""),
+            plan_origin,
+        ))
+        self._solver_gate_blocked_since_log += 1
+        if not force and key == self._solver_gate_log_key and (
+            self._solver_gate_blocked_since_log % self._SOLVER_GATE_LOG_EVERY != 0
+        ):
+            return
+        self._solver_gate_log_key = key
+        if self._logger is None:
+            return
+        try:
+            self._logger.info(
+                "[sts2_solver_gate] verdict=%s 在等=%s plan_origin=%s in_combat=%s "
+                "search_status=%s 指纹=%s 首步=%s 原因=%s "
+                "｜累计 allowed=%d waiting=%d cannot_act=%d "
+                "｜死锁计数 deadlock=%d/%d stale_reclaim=%d/%d（等待不计入）",
+                gate.get("verdict"),
+                gate.get("missing") or "-",
+                plan_origin,
+                gate.get("in_combat"),
+                gate.get("search_status") or "-",
+                gate.get("fingerprint_note") or "-",
+                gate.get("step_kind") or "-",
+                gate.get("why") or "-",
+                self._solver_gate_allowed_count,
+                self._solver_gate_wait_count,
+                self._solver_gate_cannot_act_count,
+                self._solver_deadlock_count,
+                self._SOLVER_DEADLOCK_RETRIES,
+                self._solver_stale_reclaim_count,
+                self._SOLVER_STALE_RECLAIM_LIMIT,
+            )
+        except Exception:
+            pass
+
+    def _log_solver_gate_resume(self, *, gate: dict[str, Any]) -> None:
+        """闸门**放行**时的收口行：把等待期累计的三个计数精确写出来（可逐字核对）。"""
+        if self._logger is None:
+            return
+        try:
+            self._logger.info(
+                "[sts2_solver_gate] 恢复放行 verdict=%s search_status=%s 指纹=%s 首步=%s "
+                "｜累计 allowed=%d waiting=%d cannot_act=%d "
+                "｜死锁计数 deadlock=%d/%d stale_reclaim=%d/%d",
+                gate.get("verdict"),
+                gate.get("search_status") or "-",
+                gate.get("fingerprint_note") or "-",
+                gate.get("step_kind") or "-",
+                self._solver_gate_allowed_count,
+                self._solver_gate_wait_count,
+                self._solver_gate_cannot_act_count,
+                self._solver_deadlock_count,
+                self._SOLVER_DEADLOCK_RETRIES,
+                self._solver_stale_reclaim_count,
+                self._SOLVER_STALE_RECLAIM_LIMIT,
+            )
+        except Exception:
+            pass
+
+    def _log_solver_gate_act(self, *, gate: dict[str, Any]) -> None:
+        """**每一次放行**都留一行四条件证据（真机取证用，不节流）。
+
+        ★ 为什么每次都要留（而不是只在"恢复"时留一行）：本次的核心验收是
+          「每一次实际出牌之前，最近一次 /solver/plan 返回都满足 in_combat=True + 完整状态 +
+          指纹一致」。要让这句话**可被日志逐条核对**，就必须让每次放行都带
+          `in_combat / search_status / 指纹 / 首步` 四个字段，且紧挨在出牌行之前。
+          出牌行本身（`[sts2_combat_follow] 一致=是` 与心跳的 `plan-return action_type=...`）
+          保持格式不动 —— 既有解析器依赖那两个格式（t39/t44 的教训）。
+        """
+        if self._logger is None:
+            return
+        try:
+            self._logger.info(
+                "[sts2_solver_gate] verdict=act 四条件齐备 in_combat=%s search_status=%s "
+                "指纹=%s 首步=%s ｜累计 allowed=%d waiting=%d cannot_act=%d",
+                gate.get("in_combat"),
+                gate.get("search_status") or "-",
+                gate.get("fingerprint_note") or "-",
+                gate.get("step_kind") or "-",
+                self._solver_gate_allowed_count,
+                self._solver_gate_wait_count,
+                self._solver_gate_cannot_act_count,
+            )
+        except Exception:
+            pass
 
     def _combat_solver_only_outcome(
         self,
