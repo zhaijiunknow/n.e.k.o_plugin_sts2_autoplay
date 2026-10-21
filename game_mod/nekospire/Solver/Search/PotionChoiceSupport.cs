@@ -10,7 +10,8 @@ namespace CombatSolver;
 internal static class PotionChoiceSupport
 {
     public static bool RequiresChoice(PotionModel potion)
-        => GeneratesCardChoice(potion)
+        => PotionChoiceMirrors.RequiresChoice(potion)
+            || GeneratesCardChoice(potion)
             || potion is Ashwater
             or DropletOfPrecognition
             or GamblersBrew
@@ -21,13 +22,14 @@ internal static class PotionChoiceSupport
         CombatPredictionSimulator simulator,
         PotionModel potion)
     {
+        // 第三方登记优先。登记表为空时这是一次字典 Count 检查。
+        if (PotionChoiceMirrors.TryGetSpec(simulator, potion, out CardChoiceSpec registered))
+            return registered;
         Player owner = potion.Owner;
         SimPlayerCombatState state = simulator.State.GetPlayerCombatState(owner);
         if (GeneratesCardChoice(potion))
         {
-            CombatPredictionCardGenerationOptionsEntry generated = simulator.History
-                .OfType<CombatPredictionCardGenerationOptionsEntry>()
-                .LastOrDefault()
+            CombatPredictionCardGenerationOptionsEntry generated = simulator.History.FindLatestCardGenerationOptions()
                 ?? throw new InvalidOperationException($"药水 {potion.Id.Entry} 没有生成三选一候选。");
             return RangeSpec(
                 state,
@@ -74,18 +76,18 @@ internal static class PotionChoiceSupport
         };
     }
 
-    public static void Apply(
+    public static bool Apply(
         CombatPredictionSimulator simulator,
         PotionModel potion,
         PlanCardChoice choice)
     {
+        if (PotionChoiceMirrors.TryApply(simulator, potion, choice, out bool registeredCompleted))
+            return registeredCompleted;
         SimPlayerCombatState owner = simulator.State.GetPlayerCombatState(potion.Owner);
         List<PredictedCard> selected = new(choice.Cards.Count);
         if (choice.Effect == PlanChoiceEffect.GenerateToHand)
         {
-            CombatPredictionCardGenerationOptionsEntry generated = simulator.History
-                .OfType<CombatPredictionCardGenerationOptionsEntry>()
-                .LastOrDefault()
+            CombatPredictionCardGenerationOptionsEntry generated = simulator.History.FindLatestCardGenerationOptions()
                 ?? throw new InvalidOperationException($"药水 {potion.Id.Entry} 缺少生成候选。");
             foreach (PlanCardToken token in choice.Cards)
                 selected.Add(Find(generated.Options, token).Clone());
@@ -105,11 +107,14 @@ internal static class PotionChoiceSupport
                 break;
             case PlanChoiceEffect.Exhaust:
                 foreach (PredictedCard card in selected)
+                {
                     simulator.Exhaust(card);
+                    if (simulator.HasPendingChoice)
+                        return false;
+                }
                 break;
             case PlanChoiceEffect.DiscardAndDraw:
-                simulator.Discard(selected);
-                simulator.Draw(potion.Owner, selected.Count);
+                simulator.DiscardAndDraw(selected, selected.Count);
                 break;
             case PlanChoiceEffect.MoveToHandFreeThisTurn:
                 foreach (PredictedCard card in selected)
@@ -137,6 +142,7 @@ internal static class PotionChoiceSupport
                 throw new InvalidOperationException(
                     $"药水 {potion.Id.Entry} 不支持选牌效果 {choice.Effect}。");
         }
+        return !simulator.HasPendingChoice;
     }
 
     private static CardChoiceSpec ExactSpec(

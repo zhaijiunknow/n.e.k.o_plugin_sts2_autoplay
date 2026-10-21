@@ -40,18 +40,20 @@ internal static class AfterCurrentHpChangedMirrors
     private static void HandleRedSkull(RedSkull relic, AfterCurrentHpChangedMirrorContext context)
     {
         var ownerState = context.State.GetCreature(relic.Owner.Creature);
-        var threshold = ownerState.MaxHp * (relic.DynamicVars[GameRef.GetStatic<string>(typeof(RedSkull), "_hpThresholdKey")].BaseValue / 100m);
+        var threshold = ownerState.MaxHp * (relic.DynamicVars[T44PrivateAccess.RedSkull_HpThresholdKey()].BaseValue / 100m);
         bool shouldApplyStrength = ownerState.CurrentHp <= threshold;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("红头骨效果缺少可写的预测状态。");
         bool applied = effects.GetRedSkullStrengthApplied(relic);
         if (shouldApplyStrength != applied)
         {
-            effects.ApplyPower(
+            // 原版红头骨同样传 cardSource: null（遗物来源）。
+            effects.ApplyPowerFromSource(
                 typeof(StrengthPower),
                 relic.Owner.Creature,
                 shouldApplyStrength ? relic.DynamicVars.Strength.IntValue : -relic.DynamicVars.Strength.IntValue,
-                relic.Owner.Creature);
+                relic.Owner.Creature,
+                cardSource: null);
             effects.SetRedSkullStrengthApplied(relic, shouldApplyStrength);
         }
     }

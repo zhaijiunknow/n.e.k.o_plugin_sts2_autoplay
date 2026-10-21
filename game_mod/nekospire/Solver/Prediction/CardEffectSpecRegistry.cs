@@ -53,7 +53,6 @@ internal static class CardEffectSpecRegistry
         [typeof(LightningRod)] = [Owner<LightningRodPower>("LightningRodPower")],
         [typeof(Mangle)] = [Target<ManglePower>("StrengthLoss")],
         [typeof(NegativePulse)] = [AllEnemies<DoomPower>(card => card.DynamicVars.Doom.IntValue)],
-        [typeof(Neurosurge)] = [Owner<NeurosurgePower>("NeurosurgePower")],
         [typeof(PanicButton)] = [Owner<NoBlockPower>("Turns")],
         [typeof(Patter)] = [Owner<VigorPower>("VigorPower")],
         [typeof(Pounce)] = [Owner<FreeSkillPower>(_ => 1)],
@@ -79,12 +78,12 @@ internal static class CardEffectSpecRegistry
 
     private static readonly HashSet<Type> ResourceEffects =
     [
-        typeof(Adrenaline), typeof(BigBang), typeof(BloodWall), typeof(Breakthrough), typeof(BrightestFlame), typeof(GatherLight),
-        typeof(Glow), typeof(Hemokinesis), typeof(Neurosurge), typeof(Offering), typeof(ShiningStrike), typeof(SolarStrike),
+        typeof(BigBang), typeof(BloodWall), typeof(Breakthrough), typeof(BrightestFlame), typeof(GatherLight),
+        typeof(Glow), typeof(Hemokinesis), typeof(ShiningStrike), typeof(SolarStrike),
         typeof(AllForOne), typeof(BoneShards), typeof(Bulwark), typeof(Claw), typeof(Compact),
         typeof(DeathsDoor), typeof(EvilEye), typeof(GeneticAlgorithm), typeof(Glitterstream), typeof(GoForTheEyes),
-        typeof(Misery), typeof(Modded), typeof(MoltenFist), typeof(MomentumStrike), typeof(PullAggro),
-        typeof(Rampage), typeof(SpoilsOfBattle), typeof(Whistle), typeof(WroughtInWar),
+        typeof(Modded), typeof(MoltenFist), typeof(MomentumStrike), typeof(PullAggro),
+        typeof(Rampage), typeof(Whistle), typeof(WroughtInWar),
     ];
 
     private static readonly HashSet<Type> GenerationEffects =
@@ -110,9 +109,9 @@ internal static class CardEffectSpecRegistry
             [
                 typeof(AllForOne), typeof(BoneShards), typeof(Bulwark), typeof(Claw), typeof(Compact),
                 typeof(DeathsDoor), typeof(EvilEye), typeof(GeneticAlgorithm), typeof(Glitterstream),
-                typeof(GoForTheEyes), typeof(Misery), typeof(Modded), typeof(MoltenFist),
+                typeof(GoForTheEyes), typeof(Modded), typeof(MoltenFist),
                 typeof(MomentumStrike), typeof(PullAggro), typeof(Rampage), typeof(SicEm),
-                typeof(SpoilsOfBattle), typeof(Whistle), typeof(WroughtInWar),
+                typeof(Whistle), typeof(WroughtInWar),
             ];
             foreach (Type type in completionTypes)
                 result[type] = "CARD-COMPLETION-BATCH-123";
@@ -129,13 +128,15 @@ internal static class CardEffectSpecRegistry
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         PredictedCard playedCard,
-        Creature? target)
+        Creature? target,
+        CardPlay cardPlay)
     {
         CardModel card = playedCard.Preview;
         Creature ownerCreature = playedCard.Preview.Owner.Creature;
         bool applied = false;
         if (PowerEffects.TryGetValue(card.GetType(), out CardPowerEffect[]? effects))
         {
+            applied = true;
             foreach (CardPowerEffect effect in effects)
             {
                 int amount = effect.Amount(card);
@@ -165,14 +166,21 @@ internal static class CardEffectSpecRegistry
                         break;
                     }
                     case CardEffectTarget.AllEnemies:
+                    {
                         foreach (Creature enemy in combat.HittableEnemies)
+                        {
                             ApplyPower(combat, effect.PowerType, enemy, amount, owner);
+                            if (simulator.HasPendingChoice)
+                                return true;
+                        }
                         break;
+                    }
                     default:
                         throw new ArgumentOutOfRangeException(nameof(effect.Target), effect.Target, null);
                 }
+                if (simulator.HasPendingChoice)
+                    return true;
             }
-            applied = true;
         }
 
         switch (card)
@@ -189,13 +197,10 @@ internal static class CardEffectSpecRegistry
                 applied = true;
                 break;
             }
-            case Adrenaline:
-                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
-                applied = true;
-                break;
             case BigBang:
                 simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
-                simulator.GainStars(card.Owner, card.DynamicVars.Stars.IntValue);
+                if (!simulator.GainStars(card.Owner, card.DynamicVars.Stars.IntValue))
+                    return true;
                 PersistentPowerSupport.Forge(simulator, card.Owner, card.DynamicVars.Forge.IntValue);
                 applied = true;
                 break;
@@ -209,6 +214,7 @@ internal static class CardEffectSpecRegistry
                 break;
             case BrightestFlame:
             {
+                combat.RecordBrightestFlameMaxHpLoss(card.DynamicVars.MaxHp.IntValue);
                 simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
                 SimCreatureState ownerState = simulator.State.GetCreature(card.Owner.Creature);
                 int newMaxHp = Math.Max(1, ownerState.MaxHp - card.DynamicVars.MaxHp.IntValue);
@@ -219,6 +225,8 @@ internal static class CardEffectSpecRegistry
                         ownerState.CurrentHp - newMaxHp,
                         ValueProp.Unblockable | ValueProp.Unpowered | ValueProp.Move,
                         null);
+                    if (simulator.HasPendingChoice)
+                        return true;
                 }
                 ownerState.SetMaxHp(newMaxHp);
                 applied = true;
@@ -232,19 +240,6 @@ internal static class CardEffectSpecRegistry
                 simulator.GainStars(card.Owner, card.DynamicVars.Stars.IntValue);
                 applied = true;
                 break;
-            case Neurosurge:
-                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
-                applied = true;
-                break;
-            case Offering:
-                simulator.Damage(
-                    card.Owner.Creature,
-                    card.DynamicVars.HpLoss.IntValue,
-                    ValueProp.Unblockable | ValueProp.Unpowered | ValueProp.Move,
-                    card.Owner.Creature);
-                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
-                applied = true;
-                break;
             case ShiningStrike or SolarStrike:
                 simulator.GainStars(card.Owner, card.DynamicVars.Stars.IntValue);
                 applied = true;
@@ -252,7 +247,10 @@ internal static class CardEffectSpecRegistry
             case BoneShards:
                 if (simulator.State.GetOsty(card.Owner) is { } osty
                     && simulator.State.GetCreature(osty).IsAlive)
-                    simulator.Kill(osty, force: true);
+                {
+                    if (!simulator.Kill(osty, force: true))
+                        return true;
+                }
                 applied = true;
                 break;
             case Bulwark:
@@ -264,10 +262,10 @@ internal static class CardEffectSpecRegistry
                 PredictedCard[] statuses = simulator.State.GetPlayerCombatState(card.Owner).Hand.Cards
                     .Where(candidate => candidate.Preview.IsTransformable && candidate.Preview.Type == CardType.Status)
                     .ToArray();
-                CardChoiceSupport.TransformCards(
+                CardChoiceSupport.TransformCardBatch(
                     simulator,
                     statuses,
-                    ModelDb.Card<Fuel>(),
+                    CanonicalModels.Card<Fuel>(),
                     card.IsUpgraded);
                 applied = true;
                 break;
@@ -278,26 +276,35 @@ internal static class CardEffectSpecRegistry
                 foreach (PredictedCard candidate in simulator.State.GetPlayerCombatState(card.Owner).AllCards)
                 {
                     if (candidate.Preview is Claw)
-                        GameRef.Invoke((Claw)candidate.MutablePreview, "BuffFromClawPlay", increase);
+                        // BuffFromClawPlay is internal on Claw; route through the reflection layer.
+                        T44PrivateAccess.Invoke((Claw)candidate.MutablePreview, "BuffFromClawPlay", increase);
                 }
                 applied = true;
                 break;
             }
             case DeathsDoor when combat.WasDoomAppliedThisTurn(ownerCreature):
                 for (int index = 0; index < card.DynamicVars.Repeat.IntValue; index++)
-                    simulator.GainBlock(ownerCreature, card.DynamicVars.Block, playedCard, null);
+                {
+                    simulator.GainBlock(ownerCreature, card.DynamicVars.Block, playedCard, cardPlay);
+                    if (simulator.HasPendingChoice)
+                        return true;
+                }
                 applied = true;
                 break;
             case EvilEye when combat.WasCardExhaustedThisTurn(ownerCreature):
-                simulator.GainBlock(ownerCreature, card.DynamicVars.Block, playedCard, null);
+                simulator.GainBlock(ownerCreature, card.DynamicVars.Block, playedCard, cardPlay);
                 applied = true;
                 break;
             case GeneticAlgorithm geneticAlgorithm:
             {
                 int increase = geneticAlgorithm.DynamicVars["Increase"].IntValue;
-                GameRef.Invoke((GeneticAlgorithm)playedCard.MutablePreview, "BuffFromPlay", increase);
+                // BuffFromPlay is internal on GeneticAlgorithm; route through the reflection layer.
+                T44PrivateAccess.Invoke((GeneticAlgorithm)playedCard.MutablePreview, "BuffFromPlay", increase);
                 if (playedCard.MutablePreview.DeckVersion != null)
+                {
                     combat.RecordLongTermResource(increase);
+                    combat.RecordGrowthReward(GrowthSource.GeneticAlgorithm);
+                }
                 applied = true;
                 break;
             }
@@ -310,7 +317,7 @@ internal static class CardEffectSpecRegistry
                     nextTurn.BaseValue,
                     nextTurn.Props,
                     playedCard,
-                    null,
+                    cardPlay,
                     out _);
                 combat.Apply<BlockNextTurnPower>(ownerCreature, (int)amount, ownerCreature);
                 applied = true;
@@ -318,10 +325,6 @@ internal static class CardEffectSpecRegistry
             }
             case GoForTheEyes when target != null && combat.IsEnemyIntendingToAttack(target):
                 combat.Apply<WeakPower>(target, card.DynamicVars.Weak.IntValue, ownerCreature);
-                applied = true;
-                break;
-            case Misery when target != null:
-                SpreadDebuffs(combat, target);
                 applied = true;
                 break;
             case Modded:
@@ -350,14 +353,10 @@ internal static class CardEffectSpecRegistry
                 decimal increase = rampage.DynamicVars["Increase"].BaseValue;
                 Rampage mutableRampage = (Rampage)playedCard.MutablePreview;
                 mutableRampage.DynamicVars.Damage.BaseValue += increase;
-                GameRef.Set(mutableRampage, "ExtraDamageFromPlays", GameRef.Get<int>(mutableRampage, "ExtraDamageFromPlays") + increase);
+                T44PrivateAccess.SetRampage_ExtraDamageFromPlays(mutableRampage, T44PrivateAccess.Rampage_ExtraDamageFromPlays(mutableRampage) + ( increase));
                 applied = true;
                 break;
             }
-            case SpoilsOfBattle:
-                PersistentPowerSupport.Forge(simulator, card.Owner, card.DynamicVars.Forge.IntValue);
-                applied = true;
-                break;
             case WroughtInWar:
                 PersistentPowerSupport.Forge(simulator, card.Owner, card.DynamicVars.Forge.IntValue);
                 applied = true;
@@ -368,6 +367,8 @@ internal static class CardEffectSpecRegistry
                 applied = true;
                 break;
         }
+        if (simulator.HasPendingChoice)
+            return true;
         switch (card)
         {
             case AdaptiveStrike:
@@ -425,7 +426,7 @@ internal static class CardEffectSpecRegistry
                 List<PredictedCard> souls = new(count);
                 for (int index = 0; index < count; index++)
                 {
-                    PredictedCard soul = PredictedCard.Create(ModelDb.Card<Soul>(), card.Owner);
+                    PredictedCard soul = PredictedCard.Create(CanonicalModels.Card<Soul>(), card.Owner);
                     if (card.IsUpgraded)
                         soul.Upgrade();
                     souls.Add(soul);
@@ -442,7 +443,11 @@ internal static class CardEffectSpecRegistry
             case Severance:
             {
                 AddFixed<Soul>(simulator, card, PileType.Draw, 1, CardPilePosition.Random);
+                if (simulator.HasPendingChoice)
+                    return true;
                 AddFixed<Soul>(simulator, card, PileType.Discard, 1);
+                if (simulator.HasPendingChoice)
+                    return true;
                 AddFixed<Soul>(simulator, card, PileType.Hand, 1);
                 applied = true;
                 break;
@@ -457,32 +462,6 @@ internal static class CardEffectSpecRegistry
                 break;
         }
         return applied;
-    }
-
-    private static void SpreadDebuffs(SimulatedCombatState combat, Creature source)
-    {
-        Dictionary<Type, (int Amount, Creature? Applier)> debuffs = combat.EffectivePowers()
-            .Where(power => power.Owner == source
-                && power.TypeForCurrentAmount == PowerType.Debuff)
-            .GroupBy(power => power.GetType())
-            .ToDictionary(
-                group => group.Key,
-                group => (group.Sum(power => power.Amount), group.First().Applier));
-        foreach (PowerModel power in combat.EffectivePowers().Where(power => power.Owner == source))
-        {
-            if (power is not ITemporaryPower temporary
-                || !debuffs.TryGetValue(temporary.InternallyAppliedPower.GetType(), out var internalEffect))
-            {
-                continue;
-            }
-            debuffs[temporary.InternallyAppliedPower.GetType()] =
-                (internalEffect.Amount + power.Amount, internalEffect.Applier);
-        }
-        foreach (Creature enemy in combat.HittableEnemies.Where(enemy => enemy != source))
-        {
-            foreach ((Type type, (int amount, Creature? applier)) in debuffs)
-                combat.ApplyPower(type, enemy, amount, applier);
-        }
     }
 
     private static void AddFixed<TCard>(

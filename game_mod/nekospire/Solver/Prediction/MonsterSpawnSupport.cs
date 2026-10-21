@@ -1,3 +1,4 @@
+using CombatSolver.Engine.Common;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models;
@@ -32,7 +33,7 @@ internal static class MonsterSpawnSupport
         Action<T>? configure = null)
         where T : MonsterModel
     {
-        T monster = (T)ModelDb.Monster<T>().ToMutable();
+        T monster = (T)CanonicalModels.Monster<T>().ToMutable();
         configure?.Invoke(monster);
         return combat.CreatePredictedMonster(simulator, monster, CombatSide.Enemy, slot);
     }
@@ -46,12 +47,13 @@ internal static class MonsterSpawnSupport
     {
         combat.AddPredictedMonster(creature);
         ApplyNativeEntrancePowers(combat, creature);
-        if (minion && combat.GetAmount<MinionPower>(creature) <= 0)
-            combat.Apply<MinionPower>(creature, 1, source);
         if (creature.Side == CombatSide.Enemy && combat.Modifiers.Any(static modifier => modifier is Murderous))
             combat.Apply<StrengthPower>(creature, 3);
         ApplyCreatureAddedRelics(simulator, combat, creature);
         combat.PreparePredictedMonster(simulator, creature);
+        // The summoning move applies Minion after CreatureCmd.Add and its entrance hooks finish.
+        if (minion && combat.GetAmount<MinionPower>(creature) <= 0)
+            combat.Apply<MinionPower>(creature, 1, source);
     }
 
     public static string? NextSlot(SimulatedCombatState combat)

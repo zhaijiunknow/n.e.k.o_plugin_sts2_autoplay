@@ -71,10 +71,7 @@ internal static class BeforeSideTurnEndMirrors
 
         registry.Register<PlatingPower>(HandlePlatingPower);
         registry.Register<RegenPower>(HandleRegenPower);
-        // PrepareExtraPlayerTurn resolves Pael's Eye before the turn history is rolled.
-        // Re-evaluating it here would see the freshly reset history and exhaust hands
-        // even on turns where the player actually played cards.
-        registry.RegisterIgnored<PaelsEye>();
+        registry.Register<PaelsEye>(HandlePaelsEye);
 
         return registry;
     }
@@ -107,6 +104,13 @@ internal static class BeforeSideTurnEndMirrors
         {
             context.Simulator.GainBlock(power.Owner, power.Amount, ValueProp.Unpowered);
         }
+    }
+
+    private static void HandlePaelsEye(PaelsEye relic, BeforeSideTurnEndMirrorContext context)
+    {
+        if (context.Participants.Contains(relic.Owner.Creature)
+            && context.State.CombatState is SimulatedCombatState combat && combat.ShouldTriggerPaelsEye(relic))
+            SimulatedCombatState.TriggerPaelsEye(context.Simulator, relic.Owner, relic);
     }
 
     private static void HandleRegenPower(RegenPower power, BeforeSideTurnEndMirrorContext context)
@@ -181,7 +185,7 @@ internal static class BeforeSideTurnEndMirrors
     {
         if (context.Participants.Contains(relic.Owner.Creature) &&
             context.CombatState is SimulatedCombatState combat &&
-            combat.GetPlayerTurnNumber(relic.Owner) == relic.DynamicVars[GameRef.GetStatic<string>(typeof(StoneCalendar), "_damageTurnKey")].IntValue)
+            combat.GetPlayerTurnNumber(relic.Owner) == relic.DynamicVars[T44PrivateAccess.StoneCalendar_DamageTurnKey()].IntValue)
         {
             context.Simulator.Damage(context.State.HittableEnemies, relic.DynamicVars.Damage, relic.Owner.Creature);
         }
@@ -200,6 +204,8 @@ internal static class BeforeSideTurnEndMirrors
         }
 
         context.Simulator.Damage(context.State.HittableEnemies, power.DynamicVars.Damage, power.Owner);
+        if (context.Simulator.HasPendingChoice)
+            return;
         amount.Consume();
     }
 
@@ -247,7 +253,7 @@ internal static class BeforeSideTurnEndMirrors
         }
 
         var previewCard = (Regret)predictedCard.MutablePreview;
-        GameRef.Set(previewCard, "CardsInHand", ownerState.Hand.Cards.Count);
+        T44PrivateAccess.SetRegret_CardsInHand(previewCard,  ownerState.Hand.Cards.Count);
     }
 
     private static void HandleChainsOfBindingPower(
@@ -269,9 +275,8 @@ internal static class BeforeSideTurnEndMirrors
         }
         ChainsOfBindingPredictionState state = context.StateStore.Get(
             power,
-            () => new ChainsOfBindingPredictionState(power));
+            static () => new ChainsOfBindingPredictionState());
         state.BoundCardPlayed = false;
-        state.BoundCardsAfflictedThisTurn = 0;
     }
 
 }

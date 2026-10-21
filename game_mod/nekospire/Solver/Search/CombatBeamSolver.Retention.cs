@@ -1,6 +1,4 @@
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
@@ -24,12 +22,63 @@ namespace CombatSolver;
 
 internal sealed partial class CombatBeamSolver
 {
+    // A finite branch healing allowance can prove strictly worse HP regardless
+    // of character or encounter. Zero-allowance counter goals still keep every
+    // equal-HP turn so that the final route can improve those counters.
+    private readonly bool _strictHpBoundWithRelicTargets = CanUseStrictHpRelicBound(root, policy);
+
+    // Zero HP allowances cannot compensate strictly worse HP. Keep the existing
+    // local proof across their masks, while retaining all equal-HP goal routes.
+    private bool CanUseLocalPrimaryHpBound
+        => (!_hasGrowthTargets || _strictHpBoundWithRelicTargets)
+            && root.InitialGrowthRewards.Total == 0
+            && _theftPolicy != SolverTheftPolicy.PreserveResources;
+
+    private bool IsLocalPrimaryHpBucket(PrimaryIncumbentBucket bucket)
+        => ResourceIncumbentPolicy.IsPrimaryHpBucket(bucket, _strictHpBoundWithRelicTargets);
+
+    internal static bool CanUseStrictHpRelicBound(CombatRootSnapshot root, SearchPolicySnapshot policy)
+        => CanUseStrictHpRelicBound(root.CanCertifyRemainingHealing || root.UsesKnownNativeHealingPolicy,
+            policy.EffectiveHasGrowthTargets, policy.RelicTargets);
+
+    internal static bool CanUseStrictHpRelicBound(bool hasRemainingHealingBound,
+        bool hasGrowthTargets, IReadOnlyList<RelicCounterTarget> targets)
+        => hasRemainingHealingBound && !hasGrowthTargets && targets.Count > 0
+            && targets.All(target => target.HpAllowance == 0);
+
     private readonly record struct CycleProbeFamilyKey(
         int Turn,
         StateFingerprint ShapeKey,
         StateFingerprint SequenceKey,
         int PeriodActions,
+        int HealthRiskBucket,
         CycleProbeTracker? Tracker);
+
+    private readonly record struct CycleStartupRetentionKey(
+        int HealthRiskBucket,
+        long HealthRisk,
+        int PotionStrategicCost,
+        int LiveDeckClutter,
+        int LiveDeckSize,
+        long SetupValue,
+        StateFingerprint StableFingerprint);
+
+    private sealed record CycleStartupRetentionTestCandidate(
+        int Identity,
+        int ProjectedPlayerHp,
+        CycleStartupRetentionKey Key);
+
+    [InlineArray(5)]
+    private struct CycleStartupNodeBuckets
+    {
+        private SearchNode? _element0;
+    }
+
+    [InlineArray(5)]
+    private struct CycleStartupKeyBuckets
+    {
+        private CycleStartupRetentionKey _element0;
+    }
 
     private readonly record struct CycleExitProbeFamilyKey(
         StateFingerprint OriginShapeKey,
@@ -85,41 +134,68 @@ internal sealed partial class CombatBeamSolver
         };
     }
 
+    private List<SearchNode> RankLongTermResourceWithAncestorRanks(
+        List<SearchNode> pool,
+        List<SearchNode> global)
+    {
+        // Uniform pools have no independent resource route. Determine that before staging
+        // ancestor ranks: the resource selector never consumes those ranks in this case.
+        var maximum = BeamRetentionPolicy.GetLongTermResourceMaximum(pool);
+        if (maximum.Count == pool.Count)
+            return [];
+        // RankBest 的返回表按引用去重，保存/还原名次只需要一条与它同序的并行数组，
+        // 还原顺序与原来按插入序枚举字典完全一致。
+        int[] globalRetentionRanks = new int[global.Count];
+        for (int index = 0; index < global.Count; index++)
+            globalRetentionRanks[index] = global[index].RetentionRank;
+        Dictionary<SearchNode, int> ancestorRetentionRanks = new(ReferenceEqualityComparer.Instance);
+        foreach (SearchNode candidate in pool)
+        {
+            for (SearchNode? ancestor = candidate.Parent; ancestor != null; ancestor = ancestor.Parent)
+            {
+                // The first visit records this ancestor and its complete parent chain.
+                // A repeated ancestor therefore proves every remaining parent is recorded too.
+                if (!ancestorRetentionRanks.TryAdd(ancestor, ancestor.RetentionRank))
+                    break;
+                if (ancestor.LongTermResourceRetentionRank != int.MaxValue)
+                    ancestor.RetentionRank = ancestor.LongTermResourceRetentionRank;
+            }
+        }
+        List<SearchNode> longTermResource = Retention.RankLongTermResource(pool, _profile.BeamWidth, maximum);
+        foreach (SearchNode candidate in longTermResource)
+            candidate.LongTermResourceRetentionRank = candidate.RetentionRank;
+        foreach ((SearchNode ancestor, int retentionRank) in ancestorRetentionRanks)
+            ancestor.RetentionRank = retentionRank;
+        for (int index = 0; index < global.Count; index++)
+            global[index].RetentionRank = globalRetentionRanks[index];
+        return longTermResource;
+    }
+
     private List<SearchNode> Prune(IEnumerable<SearchNode> nodes)
     {
         SearchMeasurement measurement = _run.Performance.Begin();
         try
         {
-            List<SearchNode> pool = nodes.ToList();
+            // Rank the complete candidate pool before applying the incumbent. Filtering first
+            // backfills the beam with weaker branches and changes which exact lineages win later
+            // transposition races; an incumbent is a bound, not a request to refill every lane.
+            List<SearchNode> pool = nodes as List<SearchNode> ?? nodes.ToList();
+            int pathBoundaryId = ObserveSearchPathBoundaryInput(
+                pool, SearchPathObservationStage.PruneInput, "prune_input");
+            Action<GlobalRetentionDecision>? observeGlobalRetention =
+                CreateGlobalRetentionObserver(pool, pathBoundaryId);
             List<SearchNode> global = Retention.RankBest(
                 pool,
                 _profile.BeamWidth,
-                preserveDefensiveRoute: true);
+                preserveDefensiveRoute: true,
+                useSecondRankBand: true,
+                observe: observeGlobalRetention);
+            // RankBest has drained its lanes and published its ordered result. The rest of
+            // retention is a separate allocation interval while the complete pool stays rooted.
+            _run.CheckpointPruneMetadata?.Invoke("resource_routes");
             List<SearchNode> selected = [.. global];
             HashSet<SearchNode> selectedSet = new(global, ReferenceEqualityComparer.Instance);
-            Dictionary<SearchNode, int> globalRetentionRanks = new(ReferenceEqualityComparer.Instance);
-            foreach (SearchNode candidate in global)
-                globalRetentionRanks.Add(candidate, candidate.RetentionRank);
-            Dictionary<SearchNode, int> ancestorRetentionRanks = new(ReferenceEqualityComparer.Instance);
-            foreach (SearchNode candidate in pool)
-            {
-                for (SearchNode? ancestor = candidate.Parent; ancestor != null; ancestor = ancestor.Parent)
-                {
-                    // The first visit records this ancestor and its complete parent chain.
-                    // A repeated ancestor therefore proves every remaining parent is recorded too.
-                    if (!ancestorRetentionRanks.TryAdd(ancestor, ancestor.RetentionRank))
-                        break;
-                    if (ancestor.LongTermResourceRetentionRank != int.MaxValue)
-                        ancestor.RetentionRank = ancestor.LongTermResourceRetentionRank;
-                }
-            }
-            List<SearchNode> longTermResource = Retention.RankLongTermResource(pool, _profile.BeamWidth);
-            foreach (SearchNode candidate in longTermResource)
-                candidate.LongTermResourceRetentionRank = candidate.RetentionRank;
-            foreach ((SearchNode ancestor, int retentionRank) in ancestorRetentionRanks)
-                ancestor.RetentionRank = retentionRank;
-            foreach ((SearchNode candidate, int retentionRank) in globalRetentionRanks)
-                candidate.RetentionRank = retentionRank;
+            List<SearchNode> longTermResource = RankLongTermResourceWithAncestorRanks(pool, global);
             foreach (SearchNode candidate in longTermResource
                          .OrderBy(node => node.RetentionRank)
                          .ThenByDescending(node => node.Score))
@@ -128,55 +204,73 @@ internal sealed partial class CombatBeamSolver
                     continue;
                 selected.Add(candidate);
             }
-            AddCyclePortfolio(pool, selected, selectedSet);
-            AddCycleExitPortfolio(pool, selected, selectedSet);
-            AddCrossTurnPortfolio(pool, selected, selectedSet);
-            SortRetained(selected);
-            if (_profile.Phase != SolverSearchPhase.Deep || pool.Count <= _profile.BeamWidth)
-                return ApplyPrimaryIncumbentBound(selected);
-            if (!root.HasUnusedCardReplayAllocator)
-                return ApplyPrimaryIncumbentBound(selected);
-
-            int channelWidth = Math.Clamp(_profile.BeamWidth / 12, 6, 12);
-            List<List<SearchNode>> openingChannels = pool
-                .Select(node => (Node: node, Opening: FindOpeningCardNode(node)))
-                .Where(item => item.Opening?.Parent is { } parent
-                    && (item.Opening.Snapshot.PersistentBuffValue > parent.Snapshot.PersistentBuffValue
-                        || item.Opening.Snapshot.StrategicEffects.RetentionValue
-                            > parent.Snapshot.StrategicEffects.RetentionValue))
-                .GroupBy(item => (
-                    item.Node.PotionCount,
-                    FirstCardId: item.Opening!.Action!.CardId))
-                .OrderByDescending(group => group.Max(item =>
-                    item.Opening!.Snapshot.StrategicEffects.RetentionValue))
-                .ThenByDescending(group => group.Max(item => item.Node.Score))
-                .Take(8)
-                .Select(group => Retention.RankBest(
-                    group.Select(item => item.Node),
-                    channelWidth,
-                    preserveDefensiveRoute: true))
-                .ToList();
-            if (openingChannels.Count == 0)
-                return ApplyPrimaryIncumbentBound(selected);
-
-            int expandedLimit = Math.Min(
-                pool.Count,
-                checked(selected.Count + Math.Max(12, _profile.BeamWidth / 3)));
-            for (int round = 0;
-                 selected.Count < expandedLimit && openingChannels.Any(channel => round < channel.Count);
-                 round++)
+            _run.CheckpointPruneMetadata?.Invoke("opening_routes");
+            bool hasCyclePortfolioWork = false;
+            bool hasCycleExitWork = false;
+            bool hasCrossTurnWork = false;
+            bool hasCycleRegionWork = false;
+            bool hasOrderedMutationWork = false;
+            foreach (SearchNode candidate in pool)
             {
-                foreach (IReadOnlyList<SearchNode> channel in openingChannels)
-                {
-                    if (round >= channel.Count || !selectedSet.Add(channel[round]))
-                        continue;
-                    selected.Add(channel[round]);
-                    if (selected.Count >= expandedLimit)
-                        break;
-                }
+                hasCyclePortfolioWork |= candidate.CycleProbeLease != null
+                    || RequiresBoundedCyclePlanning(candidate);
+                hasCycleExitWork |= candidate.CycleExitProbe != null;
+                hasCrossTurnWork |= candidate.CrossTurnProbe != null
+                    || RequiresCrossTurnPlanning(candidate);
+                hasCycleRegionWork |= !IsCycleRegionBudgetExempt(candidate)
+                    && (candidate.CycleExitProbe != null
+                        || candidate.CycleProbeLease != null
+                        || candidate.Cycle != null);
+                hasOrderedMutationWork |= candidate.OrderedMutationLineage != null
+                    || candidate.OrderedMutationBoundaryLineage != null
+                    || candidate.OrderedMutationRetentionLease != null
+                    || candidate.OrderedMutationActivationTicket != null
+                    || candidate.OrderedMutationLeaseTransitionPending
+                    || candidate.OrderedMutationAdmissionPending
+                    || candidate.OrderedMutationContinuationHandoff
+                    || candidate.OrderedMutationContinuationBridge
+                    || candidate.OrderedMutationObservationRequested
+                    || candidate.OrderedMutationObservationDebtSettlementPending
+                    || candidate.OrderedMutationObservationStepsRemaining > 0;
+            }
+            if (hasCyclePortfolioWork)
+                AddCyclePortfolio(pool, selected, selectedSet);
+            if (hasCycleExitWork)
+                AddCycleExitPortfolio(pool, selected, selectedSet);
+            if (hasCrossTurnWork)
+                AddCrossTurnPortfolio(pool, selected, selectedSet);
+            // Every independent retention channel must finish before the ordered coordinator.
+            // Power commitments are already settled inside RankBest and do not append candidates here.
+            _run.CheckpointPruneMetadata?.Invoke("ordered_routes");
+            CycleRegionRetentionTransaction? cycleRegionTransaction = null;
+            if (hasOrderedMutationWork)
+                Retention.AddOrderedMutationPortfolio(pool, selected, selectedSet);
+            _run.CheckpointPruneMetadata?.Invoke("finalize_routes");
+            if (hasCycleRegionWork)
+            {
+                cycleRegionTransaction = ApplyCycleRegionRetention(
+                    pool,
+                    selected);
             }
             SortRetained(selected);
-            return ApplyPrimaryIncumbentBound(selected);
+            List<SearchNode> finalized = FinalizePrunedSelection(
+                pool,
+                selected,
+                hasOrderedMutationWork,
+                hasCycleExitWork,
+                cycleRegionTransaction);
+            List<SearchNode> bounded = ApplySmartPotionEligibilityBound(
+                ApplyPrimaryIncumbentBound(finalized));
+            // Emit all watched final aliases, after every portfolio and the incumbent.
+            // The paired value events avoid equating a `with` clone with a dropped route.
+            ObserveSearchPathBoundary(
+                bounded, SearchPathObservationStage.PruneFinal, "after_incumbent", pathBoundaryId);
+            if (observeGlobalRetention != null)
+            {
+                ObserveSearchPathRetentionPool(
+                    bounded, SearchPathObservationStage.RetentionPoolFinal, "outer_prune_final", pathBoundaryId);
+            }
+            return bounded;
         }
         finally
         {
@@ -184,24 +278,208 @@ internal sealed partial class CombatBeamSolver
         }
     }
 
+    private List<SearchNode> FinalizePrunedSelection(
+        IReadOnlyList<SearchNode> pool,
+        List<SearchNode> selected,
+        bool hasOrderedMutationWork,
+        bool hasCycleExitWork,
+        CycleRegionRetentionTransaction? cycleRegionTransaction = null)
+    {
+        // Ordered settlement may remove only its own exempt pending work; ordinary CycleRegion
+        // survivors are stable and its provisional slots therefore cannot develop backfill holes.
+        // The primary incumbent is applied by the caller after every transaction has settled, so
+        // removed candidates deliberately leave holes instead of changing the ranked population.
+        List<SearchNode> bounded = selected;
+        if (hasOrderedMutationWork)
+        {
+            FinalizeOrderedMutationPortfolio(bounded);
+            Retention.ArmOrderedMutationObservationBridges(pool, bounded);
+        }
+        else if (_run.PendingOrderedMutationHandoffSourceByNode.Count != 0)
+        {
+            throw new InvalidOperationException(
+                "无 ordered-mutation frontier 时遗留了 pending source admission。");
+        }
+        List<SearchNode> finalized = hasCycleExitWork
+            ? FinalizePrunedCycleExitProbeTickets(pool, bounded)
+            : bounded;
+        FinalizeCycleRegionRetention(cycleRegionTransaction, finalized);
+        return finalized;
+    }
+
     private List<SearchNode> ApplyPrimaryIncumbentBound(List<SearchNode> retained)
     {
-        if (_primaryIncumbent is not { } incumbent)
-            return retained;
+        List<SearchNode> bounded = retained;
+        int pruned = 0;
+        int certifiedHealingBoundPruned = 0;
+        if (CanUseLocalPrimaryHpBound && _primaryIncumbent is { } incumbent
+            && retained.All(node => IsLocalPrimaryHpBucket(
+                ResourceIncumbentPolicy.CompletedBucket(node.Snapshot, 0))))
+            bounded = ApplyPrimaryIncumbentBoundCore(
+            retained,
+            incumbent,
+            out pruned,
+            _strategicBossHpRelief,
+            root.HasOnlyPostCombatHealing,
+            root.CanCertifyRemainingHealing || root.UsesKnownNativeHealingPolicy
+                ? RemainingHealingPotential : null,
+            out certifiedHealingBoundPruned,
+            allowTurnTieBound: !_strictHpBoundWithRelicTargets,
+            pruneEqualHp: policy.RelicTargets.Count == 0,
+            preservePotionCostOpportunities: root.UsesComponentHealingCertificate,
+            requireCertifiedHealingProof: root.UsesComponentHealingCertificate,
+            minimumExplicitPotionUses: root.UsesComponentHealingCertificate && policy.RelicTargets.Count == 0
+                ? _minimumPotionUses : 0,
+            minimumPotionStrategicCost: root.MinimumSearchablePotionStrategicCost ?? 0);
+        // A node may still move to a higher potion tier. Only use its current
+        // tier's witness when explicit use is closed by the member's policy.
+        List<SearchNode>? sharedBounded = null;
+        for (int index = 0; index < bounded.Count && _useSharedPrimaryIncumbents; index++)
+        {
+            SearchNode node = bounded[index];
+            int uses = ExplicitPotionUseCount(node);
+            bool potionTierClosed = CanUseSharedPotionTier(uses, _maximumPotionUses,
+                _forceAllPotionsDisabled, _potionPolicy, _potionStrategy.HasForcedDirectives);
+            int lootBucket = node.Snapshot.OutstandingStolenResource;
+            if (_theftPolicy == SolverTheftPolicy.PreserveResources && node.Snapshot.HasSimulator)
+                lootBucket = ((SimulatedCombatState)((CombatPredictionSimulator)node.Snapshot.Simulator).State.CombatState)
+                    .MinimumOutstandingStolenResource((CombatPredictionSimulator)node.Snapshot.Simulator);
+            // Certified roots use their strict branch proof. Other roots keep
+            // the upstream known-source policy, including its healing headroom.
+            bool eligible = !node.IsTerminal && !node.Snapshot.HasRisk && potionTierClosed
+                && PrimaryIncumbentTable.CanShareRoot(root);
+            int remainingHealing = !eligible ? int.MaxValue : root.UsesComponentHealingCertificate
+                ? CertifiedRemainingHealingPotential(node.Snapshot)
+                : Math.Min(RemainingHealingPotential(node.Snapshot), node.Snapshot.FutureHealPotential);
+            eligible &= remainingHealing != int.MaxValue;
+            int hpLowerBound = eligible ? StrategicHpLowerBound(node.Snapshot, _strategicBossHpRelief,
+                remainingHealing) : 0;
+            bool prune = eligible
+                && ResourceIncumbentPolicy.TryOptimisticBucket(policy, root.ExhaustingGrowthUpperBound,
+                    node.Snapshot, lootBucket, uses, out var resourceBucket, out int rewardCredit)
+                && _primaryIncumbents.TryGet(resourceBucket, out var shared)
+                && ShouldPruneByPrimaryIncumbent(
+                    hpLowerBound - rewardCredit,
+                    node.Turn, shared, allowTurnTieBound: !_strictHpBoundWithRelicTargets
+                        && CanPruneEqualHpWithPotionCost(node.Snapshot, shared,
+                            root.UsesComponentHealingCertificate),
+                    pruneEqualHp: CanPruneEqualHpWithPotionCost(node.Snapshot, shared,
+                        root.UsesComponentHealingCertificate));
+            if (!prune && eligible && !policy.IgnoreLongTermRewards && policy.RelicTargets.Count == 0
+                && (_hasGrowthTargets || node.Snapshot.GrowthRewards.Total != 0)
+                && node.Snapshot.HasSimulator)
+            {
+                var simulator = (CombatPredictionSimulator)node.Snapshot.Simulator;
+                var remainingUpper = ResourceIncumbentPolicy.CaptureExhaustingGrowthUpperBound(
+                    simulator, root.PlayerIdentity);
+                prune = ResourceIncumbentPolicy.PruneGrowthTargets(policy, remainingUpper,
+                    node.Snapshot.GrowthRewards, lootBucket, uses, hpLowerBound,
+                    _primaryIncumbents, out _, out _);
+            }
+            if (prune)
+            {
+                if (sharedBounded == null)
+                    sharedBounded = bounded.GetRange(0, index);
+                pruned++;
+            }
+            else
+                sharedBounded?.Add(node);
+        }
+        bounded = sharedBounded ?? bounded;
+        _run.PrimaryIncumbentBranchesPruned += pruned;
+        _run.PrimaryIncumbentCertifiedHealingBoundBranchesPruned += certifiedHealingBoundPruned;
+        return bounded;
+    }
 
+    internal static bool CanUseSharedPotionTier(int uses, int? maximum,
+        bool forceAllDisabled, SolverPotionPolicy potionPolicy, bool hasForcedDirectives)
+        => forceAllDisabled
+            || potionPolicy == SolverPotionPolicy.Disabled && !hasForcedDirectives
+            || maximum is { } limit && uses >= limit;
+
+    internal static List<SearchNode> ApplyPrimaryIncumbentBound(
+        List<SearchNode> retained,
+        PrimarySearchIncumbent incumbent,
+        out int pruned,
+        BossHpRelief bossHpRelief = BossHpRelief.None,
+        Func<SimulationSnapshot, int>? remainingHealingPotential = null,
+        bool allowTurnTieBound = true,
+        bool pruneEqualHp = false)
+        => ApplyPrimaryIncumbentBoundCore(
+            retained,
+            incumbent,
+            out pruned,
+            bossHpRelief,
+            false,
+            remainingHealingPotential,
+            out _,
+            allowTurnTieBound,
+            pruneEqualHp);
+
+    private static List<SearchNode> ApplyPrimaryIncumbentBoundCore(
+        List<SearchNode> retained,
+        PrimarySearchIncumbent incumbent,
+        out int pruned,
+        BossHpRelief bossHpRelief,
+        bool rootHasCertifiedHealingBound,
+        Func<SimulationSnapshot, int>? remainingHealingPotential,
+        out int certifiedHealingBoundPruned,
+        bool allowTurnTieBound = true,
+        bool pruneEqualHp = false,
+        bool preservePotionCostOpportunities = true,
+        bool requireCertifiedHealingProof = true,
+        int minimumExplicitPotionUses = 0,
+        int minimumPotionStrategicCost = 0)
+    {
+        pruned = 0;
+        certifiedHealingBoundPruned = 0;
         List<SearchNode>? bounded = null;
         for (int index = 0; index < retained.Count; index++)
         {
             SearchNode node = retained[index];
-            if (ShouldPruneByPrimaryIncumbent(
-                    node.Snapshot.CumulativePlayerHpLost,
-                    node.Turn,
-                    incumbent))
+            int baselineFutureHealPotential = remainingHealingPotential?.Invoke(node.Snapshot) ?? int.MaxValue;
+            // The new equal-HP shortcut cannot tighten a proof with the legacy heuristic.
+            if (requireCertifiedHealingProof && pruneEqualHp && baselineFutureHealPotential == int.MaxValue)
             {
-                bounded ??= new List<SearchNode>(retained.Count);
-                if (bounded.Count == 0 && index > 0)
-                    bounded.AddRange(retained.GetRange(0, index));
-                _run.PrimaryIncumbentBranchesPruned++;
+                bounded?.Add(node);
+                continue;
+            }
+            int futureHealPotential = requireCertifiedHealingProof && pruneEqualHp ? baselineFutureHealPotential
+                : Math.Min(baselineFutureHealPotential, node.Snapshot.FutureHealPotential);
+            // Component closure excludes new potion acquisition. A legal exact
+            // layer must still pay for its remaining mandatory explicit uses;
+            // the minimum over all initial slots also includes unavailable or
+            // disabled cheaper slots, so it can only loosen this cost floor.
+            long futurePotionCost = (long)Math.Max(0,
+                minimumExplicitPotionUses - ExplicitPotionUseCount(node)) * minimumPotionStrategicCost;
+            bool costClosed = CanPruneEqualHpWithPotionCost(node.Snapshot, incumbent,
+                preservePotionCostOpportunities, futurePotionCost);
+            if (ShouldPruneByPrimaryIncumbent(
+                    StrategicHpLowerBound(node.Snapshot, bossHpRelief, futureHealPotential),
+                    node.Turn,
+                    incumbent,
+                    allowTurnTieBound && costClosed,
+                    pruneEqualHp && !node.IsTerminal && !node.Snapshot.HasRisk
+                        && costClosed))
+            {
+                if (rootHasCertifiedHealingBound
+                    && !ShouldPruneByPrimaryIncumbent(
+                        StrategicHpLowerBound(node.Snapshot, bossHpRelief, baselineFutureHealPotential),
+                        node.Turn,
+                        incumbent,
+                        allowTurnTieBound && costClosed,
+                        pruneEqualHp && !node.IsTerminal && !node.Snapshot.HasRisk
+                            && costClosed))
+                {
+                    certifiedHealingBoundPruned++;
+                }
+                if (bounded == null)
+                {
+                    bounded = new List<SearchNode>(retained.Count);
+                    if (index > 0)
+                        bounded.AddRange(retained.GetRange(0, index));
+                }
+                pruned++;
                 continue;
             }
             bounded?.Add(node);
@@ -209,12 +487,92 @@ internal sealed partial class CombatBeamSolver
         return bounded ?? retained;
     }
 
+    /// <summary>
+    /// Remaining healing allowance for incumbent pruning under the frozen root policy.
+    /// </summary>
+    /// <remarks>
+    /// Future damage cannot help: every point of it raises cumulative loss and can at most be healed back, so
+    /// it cancels out. What is left is the HP the node is currently missing, which a heal could still restore.
+    /// Max HP is deliberately excluded for the same reason the caller excludes it: it may still recover.
+    ///
+    /// A certified remaining-healing environment supplies the baseline bound for each unfinished branch.
+    /// A separately certified non-healing root may tighten that bound to its fixed post-combat relic heal.
+    /// The known-native policy reserves materialized healing and recurring sources, while omitting
+    /// speculative random potion generation. Other roots retain the full HP headroom.
+    /// </remarks>
+    private int RemainingHealingPotential(SimulationSnapshot snapshot)
+        => RemainingHealingPotentialCore(snapshot, certifiedOnly: false);
+
+    private int CertifiedRemainingHealingPotential(SimulationSnapshot snapshot)
+        => RemainingHealingPotentialCore(snapshot, certifiedOnly: true);
+
+    private int RemainingHealingPotentialCore(SimulationSnapshot snapshot, bool certifiedOnly)
+    {
+        if (!snapshot.HasSimulator || snapshot.HasRisk)
+            return int.MaxValue;
+        if (root.UsesComponentHealingCertificate)
+            return StrategicHpRecoveryBound.ComponentHealingUpperBound(
+                (CombatPredictionSimulator)snapshot.Simulator, _player,
+                root.PostCombatRelicHeal.UnconditionalHeal + root.PostCombatRelicHeal.WoundedHeal,
+                includePotionHealing: !_forceAllPotionsDisabled,
+                maximumExplicitPotionUses: _maximumPotionUses,
+                potionStrategy: _potionStrategy,
+                effectivePotionPolicy: _potionPolicy);
+        int certifiedPotential = root.CanCertifyRemainingHealing
+            ? StrategicHpRecoveryBound.RemainingHealingUpperBound(
+                (CombatPredictionSimulator)snapshot.Simulator, _player,
+                root.PostCombatRelicHeal.UnconditionalHeal,
+                includePotionHealing: !_forceAllPotionsDisabled,
+                maximumExplicitPotionUses: _maximumPotionUses)
+            : int.MaxValue;
+        // A branch which introduces an unknown source invalidates its certificate.
+        // The known-native policy cannot restore proof by omitting that source.
+        if (certifiedOnly)
+            return certifiedPotential;
+        if (root.UsesKnownNativeHealingPolicy && certifiedPotential != 0)
+            return Math.Min(certifiedPotential, StrategicHpRecoveryBound.KnownNativeHealingPotential(
+                (CombatPredictionSimulator)snapshot.Simulator, _player,
+                root.PostCombatRelicHeal.UnconditionalHeal + root.PostCombatRelicHeal.WoundedHeal,
+                includePotionHealing: !_forceAllPotionsDisabled,
+                maximumExplicitPotionUses: _maximumPotionUses,
+                ignoreExhaustedFeed: root.ExhaustingGrowthUpperBound is { } upper
+                    && snapshot.GrowthRewards.Feed >= upper.Feed));
+        return certifiedPotential;
+    }
+
+    private static int StrategicHpLowerBound(
+        SimulationSnapshot snapshot,
+        BossHpRelief bossHpRelief,
+        int futureHealPotential)
+        => ActEndingBossPolicy.StrategicHpDeficit(
+            snapshot.CumulativePlayerHpLost,
+            maxHpDeficit: 0,
+            StrategicHpRecoveryBound.OptimisticRecoveredHp(
+                snapshot.RecoveredPlayerHp,
+                snapshot.PlayerHp,
+                snapshot.PlayerMaxHp,
+                futureHealPotential),
+            bossHpRelief,
+            snapshot.DeathSaveHpRestored);
+
+    // Equal HP may still improve potion cost. Consumed explicit cost cannot
+    // decrease within a branch; a missing witness cost leaves equality open.
+    private static bool CanPruneEqualHpWithPotionCost(
+        SimulationSnapshot snapshot, PrimarySearchIncumbent incumbent,
+        bool preservePotionCostOpportunities = true,
+        long minimumFuturePotionCost = 0)
+        => !preservePotionCostOpportunities || incumbent.ExplicitPotionStrategicCost is { } cost
+            && snapshot.ExplicitPotionStrategicCost + minimumFuturePotionCost >= cost;
+
     internal static bool ShouldPruneByPrimaryIncumbent(
-        int cumulativePlayerHpLost,
+        int strategicHpLowerBound,
         int turn,
-        PrimarySearchIncumbent incumbent)
-        => cumulativePlayerHpLost > incumbent.StrategicHpDeficit
-            || cumulativePlayerHpLost == incumbent.StrategicHpDeficit
+        PrimarySearchIncumbent incumbent,
+        bool allowTurnTieBound = true,
+        bool pruneEqualHp = false)
+        => strategicHpLowerBound > incumbent.StrategicHpDeficit
+            || pruneEqualHp && strategicHpLowerBound == incumbent.StrategicHpDeficit
+            || allowTurnTieBound && strategicHpLowerBound == incumbent.StrategicHpDeficit
                 && turn > incumbent.CombatEndedTurn;
 
     internal static bool TryTightenPrimarySearchIncumbent(
@@ -226,29 +584,46 @@ internal sealed partial class CombatBeamSolver
         int candidateExplicitPotionUses,
         int candidateStrategicHpDeficit,
         int? candidateCombatEndedTurn,
-        ref PrimarySearchIncumbent? incumbent)
+        ref PrimarySearchIncumbent? incumbent,
+        SolverPotionPolicy? effectivePotionPolicy = null,
+        int candidateDeathSaveUseCount = 0,
+        int? candidateExplicitPotionStrategicCost = null)
     {
-        if (auditedPotionFreeBaseline is not { } baseline
-            || minimumPotionUses <= 0
-            || maximumPotionUses != minimumPotionUses
-            || !candidateCompleteVictory
+        if (!candidateCompleteVictory
             || !candidateSatisfiesHardRules
+            || candidateDeathSaveUseCount > 0
             || candidateExplicitPotionUses != minimumPotionUses
-            || candidateCombatEndedTurn is not { } combatEndedTurn
-            || SolverInterimResultOrdering.ComparePrimaryQuality(
+            || candidateCombatEndedTurn is not { } combatEndedTurn)
+        {
+            return false;
+        }
+
+        // A complete, hard-policy-compliant victory without explicit potion use is
+        // already eligible under Disabled/Smart. It needs no separate potion audit.
+        // Positive exact layers retain their stricter, audited eligibility proof.
+        bool eligiblePotionFreeVictory = minimumPotionUses == 0
+            && effectivePotionPolicy is SolverPotionPolicy.Disabled or SolverPotionPolicy.Smart;
+        bool eligibleExactPotionVictory = auditedPotionFreeBaseline is { } baseline
+            && minimumPotionUses > 0
+            && maximumPotionUses == minimumPotionUses
+            && SolverInterimResultOrdering.ComparePrimaryQuality(
                 candidateCompleteVictory: true,
                 candidateStrategicHpDeficit,
                 candidateCombatEndedTurn,
                 currentCompleteVictory: baseline.Won,
                 currentStrategicHpDeficit: baseline.HpDeficit,
-                currentCombatEndedTurn: baseline.CombatEndedTurn) >= 0)
+                currentCombatEndedTurn: baseline.CombatEndedTurn,
+                candidateDeathSaveUseCount: candidateDeathSaveUseCount,
+                currentDeathSaveUseCount: baseline.DeathSaveUseCount) < 0;
+        if (!eligiblePotionFreeVictory && !eligibleExactPotionVictory)
         {
             return false;
         }
 
         PrimarySearchIncumbent candidate = new(
             candidateStrategicHpDeficit,
-            combatEndedTurn);
+            combatEndedTurn,
+            minimumPotionUses == 0 ? 0 : candidateExplicitPotionStrategicCost);
         if (incumbent is { } current
             && SolverInterimResultOrdering.ComparePrimaryQuality(
                 candidateCompleteVictory: true,
@@ -269,19 +644,23 @@ internal sealed partial class CombatBeamSolver
         IReadOnlyList<SearchNode> retained,
         int completedTurnLayers)
     {
-        if (_potionFreePolicyBaseline == null
-            || _minimumPotionUses <= 0
-            || _maximumPotionUses != _minimumPotionUses
-            // The strict-primary escape in FinalPlanOrdering is guaranteed to make an
-            // exact-layer victory policy-eligible only when every explicit use is optional.
-            // Smart-gradient exact layers use a policy override and therefore do not enforce
-            // per-slot directives here. Future forced-directive exact solvers must prove their
-            // optional-use facts separately before they may tighten this bound.
-            || _enforcePotionDirectives)
+        bool canEstablishPotionFreeIncumbent = _minimumPotionUses == 0
+            && _potionPolicy is SolverPotionPolicy.Disabled or SolverPotionPolicy.Smart;
+        // The strict-primary escape in FinalPlanOrdering is guaranteed to make an
+        // exact-layer victory policy-eligible only when every explicit use is optional.
+        // Smart-gradient exact layers use a policy override and therefore do not enforce
+        // per-slot directives here. Future forced-directive exact solvers must prove their
+        // optional-use facts separately before they may tighten this bound.
+        bool canEstablishExactPotionIncumbent = _potionFreePolicyBaseline != null
+            && _minimumPotionUses > 0
+            && _maximumPotionUses == _minimumPotionUses
+            && !_enforcePotionDirectives;
+        if (!canEstablishPotionFreeIncumbent && !canEstablishExactPotionIncumbent)
         {
             return false;
         }
 
+        bool bucketUpdated = false;
         PrimarySearchIncumbent? tightened = _primaryIncumbent;
         foreach (SearchNode node in retained)
         {
@@ -292,6 +671,7 @@ internal sealed partial class CombatBeamSolver
                 node.Snapshot.PlayerDead,
                 node.Snapshot.ProjectedPlayerHp);
             if (!completeVictory
+                || node.Snapshot.ProjectedDeathSaveUseCount > 0
                 || explicitPotionUses != _minimumPotionUses
                 || _enforcePotionDirectives
                     && !_potionStrategy.EvaluateForcedUses(
@@ -303,30 +683,68 @@ internal sealed partial class CombatBeamSolver
             }
 
             // PlayerMaxHp is part of the incumbent only after combat has actually ended.
-            // ApplyPrimaryIncumbentBound deliberately keeps using cumulative HP loss alone
-            // as the lower bound for incomplete nodes because max HP may still recover.
-            int strategicHpDeficit = node.Snapshot.CumulativePlayerHpLost
-                + Math.Max(0, root.InitialPlayerMaxHp - node.Snapshot.PlayerMaxHp);
+            // ApplyPrimaryIncumbentBound deliberately keeps using a looser lower bound for
+            // incomplete nodes because max HP may still recover and HP may still be healed.
+            int strategicHpDeficit = ActEndingBossPolicy.StrategicHpDeficit(
+                node.Snapshot.CumulativePlayerHpLost,
+                Math.Max(0, root.InitialPlayerMaxHp - node.Snapshot.PlayerMaxHp),
+                node.Snapshot.RecoveredPlayerHp
+                    + ActEndingBossPolicy.RankedPostCombatRelicHeal(
+                        root.PostCombatRelicHeal, true, node.Snapshot.PlayerHp, node.Snapshot.PlayerMaxHp),
+                _strategicBossHpRelief,
+                node.Snapshot.DeathSaveHpRestored) - node.Snapshot.StrategicHpCredit;
+            var resourceBucket = ResourceIncumbentPolicy.CompletedBucket(node.Snapshot, explicitPotionUses);
+            PrimarySearchIncumbent? classIncumbent = _primaryIncumbents.TryGet(
+                resourceBucket, out var witnessed)
+                    ? witnessed : null;
+            if (TryTightenPrimarySearchIncumbent(
+                _potionFreePolicyBaseline,
+                _minimumPotionUses,
+                _maximumPotionUses,
+                candidateCompleteVictory: true,
+                candidateSatisfiesHardRules: !node.Snapshot.HasRisk,
+                explicitPotionUses,
+                strategicHpDeficit,
+                node.Snapshot.CombatEndedTurn,
+                ref classIncumbent,
+                effectivePotionPolicy: _potionPolicy,
+                candidateDeathSaveUseCount: node.Snapshot.ProjectedDeathSaveUseCount,
+                candidateExplicitPotionStrategicCost: node.Snapshot.ExplicitPotionStrategicCost))
+            {
+                bucketUpdated |= _primaryIncumbents.Tighten(resourceBucket, classIncumbent!.Value);
+            }
+            if (!CanUseLocalPrimaryHpBound || !IsLocalPrimaryHpBucket(resourceBucket))
+                continue;
             TryTightenPrimarySearchIncumbent(
                 _potionFreePolicyBaseline,
                 _minimumPotionUses,
                 _maximumPotionUses,
                 candidateCompleteVictory: true,
-                candidateSatisfiesHardRules: true,
+                candidateSatisfiesHardRules: !node.Snapshot.HasRisk,
                 explicitPotionUses,
                 strategicHpDeficit,
-                node.Action?.Turn,
-                ref tightened);
+                node.Snapshot.CombatEndedTurn,
+                ref tightened,
+                effectivePotionPolicy: _potionPolicy,
+                candidateDeathSaveUseCount: node.Snapshot.ProjectedDeathSaveUseCount,
+                candidateExplicitPotionStrategicCost: node.Snapshot.ExplicitPotionStrategicCost);
         }
 
-        if (Nullable.Equals(tightened, _primaryIncumbent))
-            return false;
-
+        if (!CanUseLocalPrimaryHpBound || Nullable.Equals(tightened, _primaryIncumbent))
+        {
+            if (bucketUpdated)
+            {
+                _run.PrimaryIncumbentUpdates++;
+                policy.Diagnostics.Info("[CombatSolver/Test] PRIMARY_INCUMBENT_UPDATE source=resource_bucket");
+            }
+            return bucketUpdated;
+        }
         PrimarySearchIncumbent? previous = _primaryIncumbent;
         _primaryIncumbent = tightened;
         _run.PrimaryIncumbentUpdates++;
         policy.Diagnostics.Info(
             $"[CombatSolver/Test] PRIMARY_INCUMBENT_UPDATE " +
+            $"source={(canEstablishPotionFreeIncumbent ? "no_explicit_potion" : "exact_potion_layer")} " +
             $"completed_turns={completedTurnLayers} " +
             $"previous_deficit={previous?.StrategicHpDeficit.ToString() ?? "-"} " +
             $"previous_turn={previous?.CombatEndedTurn.ToString() ?? "-"} " +
@@ -374,99 +792,95 @@ internal sealed partial class CombatBeamSolver
             }
         }
         List<SearchNode> eligible = [];
-        int bestMaxHp = int.MinValue;
         foreach (SearchNode node in pool)
         {
             if (node.CycleProbeLease == null && !RequiresBoundedCyclePlanning(node))
                 continue;
             eligible.Add(node);
-            bestMaxHp = Math.Max(bestMaxHp, node.Snapshot.PlayerMaxHp);
         }
         if (eligible.Count == 0)
             return;
 
-        long minimumHealthRisk = long.MaxValue;
-        foreach (SearchNode node in eligible)
-            minimumHealthRisk = Math.Min(minimumHealthRisk, CycleHealthRisk(node, bestMaxHp));
-        int familyQuotaPerBand = Math.Clamp(_profile.BeamWidth / 12, 1, 2);
-        int totalFamilyQuota = familyQuotaPerBand * 2;
-        List<SearchNode> leased = [];
-        foreach (bool investmentBand in new[] { false, true })
+        // Compute every candidate's startup key once. The five fixed-size buffers stay on this
+        // stack frame, avoiding both repeated setup fingerprint work and per-bucket collections.
+        CycleStartupNodeBuckets activeByBucket = default;
+        CycleStartupNodeBuckets startupByBucket = default;
+        CycleStartupKeyBuckets startupKeysByBucket = default;
+        SearchNode? purificationAnchor = null;
+        CycleStartupRetentionKey purificationKey = default;
+        bool hasFirstDeckShape = false;
+        int firstClutter = 0;
+        int firstSize = 0;
+        bool hasMeaningfulDeckImprovement = false;
+        foreach (SearchNode candidate in eligible)
         {
-            Dictionary<CycleProbeFamilyKey, int> familyIndexes = [];
-            List<SearchNode> familyBest = [];
-            foreach (SearchNode node in eligible)
+            int healthRiskBucket = CycleStartupHealthRiskBucket(candidate);
+            if (candidate.CycleProbeLease is { NextActionIndex: > 0 })
             {
-                // An exact pattern that is mid-period gets priority only inside its
-                // current health band. A newly arrived lower-risk family can therefore
-                // pre-empt excess high-risk probes immediately.
-                if (node.CycleProbeLease is not { NextActionIndex: > 0 }
-                    || (CycleHealthRisk(node, bestMaxHp) > minimumHealthRisk)
-                        != investmentBand)
+                SearchNode? active = activeByBucket[healthRiskBucket];
+                if (active == null
+                    || CompareCycleProbeCandidates(
+                        candidate,
+                        active,
+                        root.InitialPlayerMaxHp) < 0)
                 {
-                    continue;
+                    activeByBucket[healthRiskBucket] = candidate;
                 }
-                AddCycleProbeFamilyBest(familyIndexes, familyBest, node, bestMaxHp);
+                continue;
             }
-            AddTopCycleProbeCandidates(
-                familyBest,
-                familyQuotaPerBand,
-                bestMaxHp,
-                leased);
-        }
-        HashSet<(CycleProbeFamilyKey Family, bool InvestmentBand)> leasedFamilies = [];
-        foreach (SearchNode node in leased)
-        {
-            leasedFamilies.Add((
-                BuildCycleProbeFamilyKey(node),
-                CycleHealthRisk(node, bestMaxHp) > minimumHealthRisk));
-        }
-        foreach (bool investmentBand in new[] { false, true })
-        {
-            if (leased.Count >= totalFamilyQuota)
-                break;
-            int activeInBand = 0;
-            foreach (SearchNode node in leased)
-            {
-                if ((CycleHealthRisk(node, bestMaxHp) > minimumHealthRisk) == investmentBand)
-                    activeInBand++;
-            }
-            int openBandSlots = Math.Max(0, familyQuotaPerBand - activeInBand);
-            if (openBandSlots == 0)
+            if (!CanOccupyCycleStartupReserve(candidate.Snapshot.ProjectedPlayerHp))
                 continue;
 
-            Dictionary<CycleProbeFamilyKey, int> familyIndexes = [];
-            List<SearchNode> familyBest = [];
-            foreach (SearchNode node in eligible)
+            CycleStartupRetentionKey key = BuildCycleStartupRetentionKey(candidate);
+            SearchNode? startup = startupByBucket[healthRiskBucket];
+            if (startup == null
+                || CompareCycleStartupKeys(
+                    key,
+                    startupKeysByBucket[healthRiskBucket]) < 0)
             {
-                if (node.CycleProbeLease is { NextActionIndex: > 0 }
-                    || (CycleHealthRisk(node, bestMaxHp) > minimumHealthRisk)
-                        != investmentBand)
-                {
-                    continue;
-                }
-                CycleProbeFamilyKey family = BuildCycleProbeFamilyKey(node);
-                if (leasedFamilies.Contains((family, investmentBand)))
-                    continue;
-                AddCycleProbeFamilyBest(
-                    familyIndexes,
-                    familyBest,
-                    family,
-                    node,
-                    bestMaxHp);
+                startupByBucket[healthRiskBucket] = candidate;
+                startupKeysByBucket[healthRiskBucket] = key;
             }
-            int previousCount = leased.Count;
-            AddTopCycleProbeCandidates(
-                familyBest,
-                Math.Min(openBandSlots, totalFamilyQuota - leased.Count),
-                bestMaxHp,
-                leased);
-            for (int index = previousCount; index < leased.Count; index++)
+
+            if (!hasFirstDeckShape)
             {
-                SearchNode candidate = leased[index];
-                leasedFamilies.Add((BuildCycleProbeFamilyKey(candidate), investmentBand));
+                hasFirstDeckShape = true;
+                firstClutter = key.LiveDeckClutter;
+                firstSize = key.LiveDeckSize;
+            }
+            else if (key.LiveDeckClutter != firstClutter
+                     || key.LiveDeckSize != firstSize)
+            {
+                hasMeaningfulDeckImprovement = true;
+            }
+            if (purificationAnchor == null
+                || CompareCyclePurificationKeys(key, purificationKey) < 0)
+            {
+                purificationAnchor = candidate;
+                purificationKey = key;
             }
         }
+
+        // Each stable health-investment bucket owns one bounded lane. An already-issued
+        // mid-period lease settles that bucket's obligation first; otherwise the slot starts
+        // the deepest still-survivable setup in the bucket. This merges debt and startup into
+        // one hard-capped portfolio instead of letting either reserve grow independently.
+        List<SearchNode> leased = new(6);
+        for (int healthRiskBucket = 0; healthRiskBucket <= 4; healthRiskBucket++)
+        {
+            SearchNode? candidate = activeByBucket[healthRiskBucket]
+                ?? startupByBucket[healthRiskBucket];
+            if (candidate != null)
+                leased.Add(candidate);
+        }
+        if (hasMeaningfulDeckImprovement
+            && purificationAnchor != null
+            && !ContainsReference(leased, purificationAnchor))
+        {
+            leased.Add(purificationAnchor);
+        }
+        if (leased.Count > 6)
+            throw new InvalidOperationException("循环 startup portfolio 超过 6 条硬上限。");
 
         HashSet<SearchNode> leasedSet = new(leased, ReferenceEqualityComparer.Instance);
         foreach (SearchNode candidate in pool)
@@ -480,6 +894,13 @@ internal sealed partial class CombatBeamSolver
         {
             if (candidate.CycleProbeLease == null)
                 StartCycleProbeLease(candidate);
+            // Only final portfolio winners reach this point. A retained health-investment
+            // lane asks its already-admitted family for the matching staged observation
+            // budget; rejected siblings cannot mint an epoch or a family ledger. The issued
+            // tracker supplies the exact canonical family without re-hashing the action path.
+            RequestRetainedCycleStartupImprovementEpoch(
+                candidate,
+                CycleStartupHealthRiskBucket(candidate));
             candidate.CycleRetentionRank = _profile.BeamWidth + rank++;
             if (!selectedSet.Add(candidate))
                 continue;
@@ -492,66 +913,182 @@ internal sealed partial class CombatBeamSolver
         }
     }
 
-    private static long CycleHealthRisk(SearchNode node, int bestMaxHp)
+    private static long CycleHealthRisk(SearchNode node, int referenceMaxHp)
         => (long)node.Snapshot.CumulativePlayerHpLost
             + node.FutureSoldHp
-            + Math.Max(0, bestMaxHp - node.Snapshot.PlayerMaxHp);
+            + Math.Max(0, referenceMaxHp - node.Snapshot.PlayerMaxHp);
 
-    private static void AddCycleProbeFamilyBest(
-        Dictionary<CycleProbeFamilyKey, int> familyIndexes,
-        List<SearchNode> familyBest,
-        SearchNode candidate,
-        int bestMaxHp)
-        => AddCycleProbeFamilyBest(
-            familyIndexes,
-            familyBest,
-            BuildCycleProbeFamilyKey(candidate),
-            candidate,
-            bestMaxHp);
+    private long CycleStartupHealthRisk(SearchNode node)
+        => CycleHealthRisk(node, root.InitialPlayerMaxHp);
 
-    private static void AddCycleProbeFamilyBest(
-        Dictionary<CycleProbeFamilyKey, int> familyIndexes,
-        List<SearchNode> familyBest,
-        CycleProbeFamilyKey family,
-        SearchNode candidate,
-        int bestMaxHp)
+    private int CycleStartupHealthRiskBucket(SearchNode node)
+        => CycleStartupHealthRiskBucket(
+            root.InitialPlayerHp,
+            CycleStartupHealthRisk(node));
+
+    private static int CycleStartupHealthRiskBucket(
+        int initialPlayerHp,
+        long healthRisk)
     {
-        if (!familyIndexes.TryGetValue(family, out int index))
-        {
-            familyIndexes.Add(family, familyBest.Count);
-            familyBest.Add(candidate);
-            return;
-        }
-        if (CompareCycleProbeCandidates(candidate, familyBest[index], bestMaxHp) < 0)
-            familyBest[index] = candidate;
+        if (healthRisk <= 0)
+            return 0;
+        long survivableRisk = Math.Max(1L, (long)initialPlayerHp - 1);
+        long quartile = Math.Min(3L, checked((healthRisk - 1) * 4) / survivableRisk);
+        return checked(1 + (int)quartile);
     }
 
-    private static void AddTopCycleProbeCandidates(
-        IReadOnlyList<SearchNode> candidates,
-        int limit,
-        int bestMaxHp,
-        List<SearchNode> destination)
+    private static bool CanOccupyCycleStartupReserve(int projectedPlayerHp)
+        => projectedPlayerHp > 0;
+
+    private CycleStartupRetentionKey BuildCycleStartupRetentionKey(SearchNode node)
     {
-        SearchNode? first = null;
-        SearchNode? second = null;
-        foreach (SearchNode candidate in candidates)
+        long healthRisk = CycleStartupHealthRisk(node);
+        StateFingerprint actionFingerprint =
+            BuildCycleDeterministicActionFingerprint(node.Action);
+        StateFingerprint parentFingerprint = node.Parent?.StateKey ?? default;
+        return new CycleStartupRetentionKey(
+            CycleStartupHealthRiskBucket(root.InitialPlayerHp, healthRisk),
+            healthRisk,
+            node.PotionStrategicCost,
+            node.Snapshot.LiveDeckClutter,
+            node.Snapshot.LiveDeckSize,
+            CycleRegionSetupValue(node.Snapshot),
+            BuildCycleStartupStableFingerprint(
+                node.StateKey,
+                actionFingerprint,
+                parentFingerprint));
+    }
+
+    private static StateFingerprint BuildCycleStartupStableFingerprint(
+        StateFingerprint state,
+        StateFingerprint action,
+        StateFingerprint parent)
+    {
+        StateFingerprintBuilder stable = new();
+        stable.Add(state.First);
+        stable.Add(state.Second);
+        stable.Add(action.First);
+        stable.Add(action.Second);
+        stable.Add(parent.First);
+        stable.Add(parent.Second);
+        return stable.Finish();
+    }
+
+    private static T? SelectCycleStartupBucketRepresentative<T>(
+        IEnumerable<T> candidates,
+        int healthRiskBucket,
+        Func<T, bool> isEligible,
+        Func<T, CycleStartupRetentionKey> keySelector)
+        where T : class
+    {
+        T? best = null;
+        CycleStartupRetentionKey bestKey = default;
+        foreach (T candidate in candidates)
         {
-            if (first == null
-                || CompareCycleProbeCandidates(candidate, first, bestMaxHp) < 0)
+            if (!isEligible(candidate))
+                continue;
+            CycleStartupRetentionKey key = keySelector(candidate);
+            if (key.HealthRiskBucket != healthRiskBucket)
+                continue;
+            if (best == null || CompareCycleStartupKeys(key, bestKey) < 0)
             {
-                second = first;
-                first = candidate;
-            }
-            else if (second == null
-                     || CompareCycleProbeCandidates(candidate, second, bestMaxHp) < 0)
-            {
-                second = candidate;
+                best = candidate;
+                bestKey = key;
             }
         }
-        if (limit > 0 && first != null)
-            destination.Add(first);
-        if (limit > 1 && second != null)
-            destination.Add(second);
+        return best;
+    }
+
+    private static T? SelectCyclePurificationAnchor<T>(
+        IEnumerable<T> candidates,
+        Func<T, bool> isEligible,
+        Func<T, CycleStartupRetentionKey> keySelector)
+        where T : class
+    {
+        T? best = null;
+        CycleStartupRetentionKey bestKey = default;
+        bool hasFirstDeckShape = false;
+        int firstClutter = 0;
+        int firstSize = 0;
+        bool hasMeaningfulDeckImprovement = false;
+        foreach (T candidate in candidates)
+        {
+            if (!isEligible(candidate))
+                continue;
+            CycleStartupRetentionKey key = keySelector(candidate);
+            if (!hasFirstDeckShape)
+            {
+                hasFirstDeckShape = true;
+                firstClutter = key.LiveDeckClutter;
+                firstSize = key.LiveDeckSize;
+            }
+            else if (key.LiveDeckClutter != firstClutter
+                     || key.LiveDeckSize != firstSize)
+            {
+                hasMeaningfulDeckImprovement = true;
+            }
+            if (best == null || CompareCyclePurificationKeys(key, bestKey) < 0)
+            {
+                best = candidate;
+                bestKey = key;
+            }
+        }
+        return hasMeaningfulDeckImprovement ? best : null;
+    }
+
+    private static int CompareCycleStartupKeys(
+        CycleStartupRetentionKey left,
+        CycleStartupRetentionKey right)
+    {
+        int comparison = right.HealthRisk.CompareTo(left.HealthRisk);
+        if (comparison != 0)
+            return comparison;
+        comparison = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
+        if (comparison != 0)
+            return comparison;
+        comparison = left.LiveDeckClutter.CompareTo(right.LiveDeckClutter);
+        if (comparison != 0)
+            return comparison;
+        comparison = left.LiveDeckSize.CompareTo(right.LiveDeckSize);
+        if (comparison != 0)
+            return comparison;
+        comparison = right.SetupValue.CompareTo(left.SetupValue);
+        return comparison != 0
+            ? comparison
+            : CompareCycleStartupStableFingerprints(left, right);
+    }
+
+    private static int CompareCyclePurificationKeys(
+        CycleStartupRetentionKey left,
+        CycleStartupRetentionKey right)
+    {
+        int comparison = left.LiveDeckClutter.CompareTo(right.LiveDeckClutter);
+        if (comparison != 0)
+            return comparison;
+        comparison = left.LiveDeckSize.CompareTo(right.LiveDeckSize);
+        if (comparison != 0)
+            return comparison;
+        comparison = right.SetupValue.CompareTo(left.SetupValue);
+        if (comparison != 0)
+            return comparison;
+        comparison = left.HealthRisk.CompareTo(right.HealthRisk);
+        if (comparison != 0)
+            return comparison;
+        comparison = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
+        return comparison != 0
+            ? comparison
+            : CompareCycleStartupStableFingerprints(left, right);
+    }
+
+    private static int CompareCycleStartupStableFingerprints(
+        CycleStartupRetentionKey left,
+        CycleStartupRetentionKey right)
+    {
+        int comparison = left.StableFingerprint.First.CompareTo(
+            right.StableFingerprint.First);
+        return comparison != 0
+            ? comparison
+            : left.StableFingerprint.Second.CompareTo(right.StableFingerprint.Second);
     }
 
     private void AddCycleExitPortfolio(
@@ -560,32 +1097,25 @@ internal sealed partial class CombatBeamSolver
         HashSet<SearchNode> selectedSet)
     {
         List<SearchNode> eligible = [];
-        int bestMaxHp = int.MinValue;
         foreach (SearchNode node in pool)
         {
             if (node.CycleExitProbe is not { RemainingActions: > 0 })
                 continue;
             eligible.Add(node);
-            bestMaxHp = Math.Max(bestMaxHp, node.Snapshot.PlayerMaxHp);
         }
         if (eligible.Count == 0)
             return;
-        long minimumHealthRisk = long.MaxValue;
-        foreach (SearchNode node in eligible)
-            minimumHealthRisk = Math.Min(minimumHealthRisk, CycleHealthRisk(node, bestMaxHp));
-        int rank = 0;
-        List<SearchNode> leased = [];
-        foreach (bool investmentBand in new[] { false, true })
+
+        List<SearchNode> leased = new(6);
+        List<SearchNode> newestRepresentatives = [];
+        for (int healthRiskBucket = 0; healthRiskBucket <= 4; healthRiskBucket++)
         {
             Dictionary<CycleExitProbeFamilyKey, int> familyIndexes = [];
             List<SearchNode> representatives = [];
             foreach (SearchNode node in eligible)
             {
-                if ((CycleHealthRisk(node, bestMaxHp) > minimumHealthRisk)
-                    != investmentBand)
-                {
+                if (CycleStartupHealthRiskBucket(node) != healthRiskBucket)
                     continue;
-                }
                 CycleExitProbeFamilyKey family = BuildCycleExitProbeFamilyKey(node);
                 if (!familyIndexes.TryGetValue(family, out int index))
                 {
@@ -596,90 +1126,57 @@ internal sealed partial class CombatBeamSolver
                 if (CompareCycleExitFamilyCandidates(
                         node,
                         representatives[index],
-                        bestMaxHp) < 0)
+                        root.InitialPlayerMaxHp) < 0)
                 {
                     representatives[index] = node;
                 }
             }
             if (representatives.Count == 0)
                 continue;
+            newestRepresentatives.AddRange(representatives);
 
-            // Each health band has two bounded obligations: one finishes an already-issued
-            // lookahead while one preserves the newest exact origin. A later generation can
-            // therefore expose a hidden N-th-cycle payoff without cancelling the older probe.
-            List<SearchNode> bandLeases = [];
+            // At most one already-issued lookahead debt survives per stable health-risk bucket.
+            // New tickets share one global newest slot below, keeping the combined hard cap six.
             SearchNode? inFlight = FindActiveCycleExitCandidate(
                 representatives,
-                bandLeases,
-                bestMaxHp,
+                leased,
+                root.InitialPlayerMaxHp,
                 CycleExitCandidateRank.InFlight);
             if (inFlight != null)
-                bandLeases.Add(inFlight);
-
-            SearchNode? newest = FindActiveCycleExitCandidate(
-                representatives,
-                bandLeases,
-                bestMaxHp,
-                CycleExitCandidateRank.Newest);
-            if (newest != null)
-                bandLeases.Add(newest);
-
-            AddActiveCycleExitFallbacks(
-                representatives,
-                bandLeases,
-                bestMaxHp);
-
-            foreach (SearchNode candidate in bandLeases)
-            {
-                leased.Add(candidate);
-                candidate.CycleExitRetentionRank = _profile.BeamWidth + 4 + rank++;
-                if (!selectedSet.Add(candidate))
-                    continue;
-                candidate.RetentionRank = int.MaxValue;
-                candidate.LongTermResourceRetentionRank = int.MaxValue;
-                candidate.CycleRetentionRank = int.MaxValue;
-                selected.Add(candidate);
-            }
+                leased.Add(inFlight);
         }
 
-        HashSet<SearchNode> leasedSet = new(leased, ReferenceEqualityComparer.Instance);
-        HashSet<CycleExitProbeTicketKey> survivingTickets = [];
-        foreach (SearchNode retained in leased)
+        SearchNode? newest = FindActiveCycleExitCandidate(
+            newestRepresentatives,
+            leased,
+            root.InitialPlayerMaxHp,
+            CycleExitCandidateRank.Newest);
+        if (newest != null && !ContainsReference(leased, newest))
+            leased.Add(newest);
+        if (leased.Count > 6)
+            throw new InvalidOperationException("循环出口 portfolio 超过 6 条硬上限。");
+
+        int rank = 0;
+        foreach (SearchNode candidate in leased)
         {
-            if (retained.CycleExitProbe == null)
+            candidate.CycleExitRetentionRank = _profile.BeamWidth + 4 + rank++;
+            if (!selectedSet.Add(candidate))
                 continue;
-            survivingTickets.Add(BuildCycleExitProbeTicketKey(retained));
+            candidate.RetentionRank = int.MaxValue;
+            candidate.LongTermResourceRetentionRank = int.MaxValue;
+            candidate.CycleRetentionRank = int.MaxValue;
+            selected.Add(candidate);
         }
 
-        HashSet<CycleExitProbeTicketKey> settledTickets = [];
-        foreach (SearchNode dropped in eligible)
-        {
-            if (leasedSet.Contains(dropped))
-                continue;
-            if (dropped.CycleExitProbe is { LeaseIssued: true } probe)
-            {
-                CycleExitProbeTicketKey ticket = BuildCycleExitProbeTicketKey(dropped);
-                if (!survivingTickets.Contains(ticket) && settledTickets.Add(ticket))
-                {
-                    // Settle one whole ticket, not each sibling. Losing one branch while
-                    // another survives must never mint duplicate generations.
-                    probe.OriginTracker.RetryAbandonedExitProbe(
-                        probe.OriginPhaseIndex,
-                        probe.ExitActionKey,
-                        probe.OriginGeneration);
-                }
-            }
-            // Ordinary Beam/long-term retention does not bypass the fixed two-per-band
-            // cycle-exit lease portfolio. It may retain the route, but not the probe lease.
-            dropped.CycleExitProbe = null;
-        }
+        // Ticket settlement is intentionally delayed until the final Prune survivor set is
+        // known. Region retention and the in-Prune primary-incumbent bound run after this
+        // portfolio; any later destructive filter must invoke the same settlement finalizer.
     }
 
     private enum CycleExitCandidateRank : byte
     {
         InFlight,
         Newest,
-        Fallback,
     }
 
     private static SearchNode? FindActiveCycleExitCandidate(
@@ -710,24 +1207,6 @@ internal sealed partial class CombatBeamSolver
                 return best;
             // A newer pending generation can supersede siblings created in the same wave.
             // Never let that stale ticket consume one of the two bounded portfolio slots.
-        }
-    }
-
-    private static void AddActiveCycleExitFallbacks(
-        IReadOnlyList<SearchNode> representatives,
-        List<SearchNode> bandLeases,
-        int bestMaxHp)
-    {
-        while (bandLeases.Count < 2)
-        {
-            SearchNode? candidate = FindActiveCycleExitCandidate(
-                representatives,
-                bandLeases,
-                bestMaxHp,
-                CycleExitCandidateRank.Fallback);
-            if (candidate == null)
-                break;
-            bandLeases.Add(candidate);
         }
     }
 
@@ -770,14 +1249,11 @@ internal sealed partial class CombatBeamSolver
         SearchNode right,
         int bestMaxHp)
     {
-        int leftLeasePriority = left.CycleExitProbe is
-            { LeaseIssued: true, RemainingActions: < MaximumCycleExitProbeActions }
-                ? 0
-                : 1;
-        int rightLeasePriority = right.CycleExitProbe is
-            { LeaseIssued: true, RemainingActions: < MaximumCycleExitProbeActions }
-                ? 0
-                : 1;
+        // A freshly issued ticket is already an in-flight obligation even before its first
+        // expansion consumes horizon. Prefer it over pending siblings from the same exact
+        // family so the per-bucket debt lane cannot silently discard a live ticket.
+        int leftLeasePriority = left.CycleExitProbe is { LeaseIssued: true } ? 0 : 1;
+        int rightLeasePriority = right.CycleExitProbe is { LeaseIssued: true } ? 0 : 1;
         int comparison = leftLeasePriority.CompareTo(rightLeasePriority);
         if (comparison != 0)
             return comparison;
@@ -785,22 +1261,7 @@ internal sealed partial class CombatBeamSolver
             .CompareTo(right.CycleExitProbe?.RemainingActions ?? int.MaxValue);
         if (comparison != 0)
             return comparison;
-        comparison = CycleHealthRisk(left, bestMaxHp)
-            .CompareTo(CycleHealthRisk(right, bestMaxHp));
-        if (comparison != 0)
-            return comparison;
-        comparison = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
-        if (comparison != 0)
-            return comparison;
-        comparison = left.Turn.CompareTo(right.Turn);
-        if (comparison != 0)
-            return comparison;
-        comparison = left.ActionCount.CompareTo(right.ActionCount);
-        if (comparison != 0)
-            return comparison;
-        comparison = right.Snapshot.ProjectedPlayerHp.CompareTo(
-            left.Snapshot.ProjectedPlayerHp);
-        return comparison != 0 ? comparison : right.Score.CompareTo(left.Score);
+        return CompareCycleExitQuality(left, right, bestMaxHp);
     }
 
     private static int CompareCycleExitCandidates(
@@ -818,10 +1279,6 @@ internal sealed partial class CombatBeamSolver
                 left,
                 right,
                 bestMaxHp),
-            CycleExitCandidateRank.Fallback => CompareCycleExitFallbackCandidates(
-                left,
-                right,
-                bestMaxHp),
             _ => throw new ArgumentOutOfRangeException(nameof(rank), rank, null),
         };
 
@@ -834,22 +1291,7 @@ internal sealed partial class CombatBeamSolver
             .CompareTo(right.CycleExitProbe?.RemainingActions ?? int.MaxValue);
         if (comparison != 0)
             return comparison;
-        comparison = CycleHealthRisk(left, bestMaxHp)
-            .CompareTo(CycleHealthRisk(right, bestMaxHp));
-        if (comparison != 0)
-            return comparison;
-        comparison = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
-        if (comparison != 0)
-            return comparison;
-        comparison = left.Turn.CompareTo(right.Turn);
-        if (comparison != 0)
-            return comparison;
-        comparison = left.ActionCount.CompareTo(right.ActionCount);
-        if (comparison != 0)
-            return comparison;
-        comparison = right.Snapshot.ProjectedPlayerHp.CompareTo(
-            left.Snapshot.ProjectedPlayerHp);
-        return comparison != 0 ? comparison : right.Score.CompareTo(left.Score);
+        return CompareCycleExitQuality(left, right, bestMaxHp);
     }
 
     private static int CompareCycleExitNewestCandidates(
@@ -857,19 +1299,27 @@ internal sealed partial class CombatBeamSolver
         SearchNode right,
         int bestMaxHp)
     {
-        int comparison = CycleHealthRisk(left, bestMaxHp)
-            .CompareTo(CycleHealthRisk(right, bestMaxHp));
-        if (comparison != 0)
-            return comparison;
-        comparison = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
-        if (comparison != 0)
-            return comparison;
-        comparison = (right.CycleExitProbe?.OriginNode.ActionCount ?? 0)
+        int comparison = (right.CycleExitProbe?.OriginNode.ActionCount ?? 0)
             .CompareTo(left.CycleExitProbe?.OriginNode.ActionCount ?? 0);
         if (comparison != 0)
             return comparison;
         comparison = (right.CycleExitProbe?.OriginGeneration ?? 0)
             .CompareTo(left.CycleExitProbe?.OriginGeneration ?? 0);
+        if (comparison != 0)
+            return comparison;
+        return CompareCycleExitQuality(left, right, bestMaxHp);
+    }
+
+    // 出口候选在各自租约前缀同分后共用此顺序；区域和跨回合候选有不同的键次序。
+    private static int CompareCycleExitQuality(
+        SearchNode left,
+        SearchNode right,
+        int bestMaxHp)
+    {
+        int comparison = RouteQualityPolicy.Compare(
+            RouteQuality.ForRetention(CycleHealthRisk(left, bestMaxHp), left.PotionStrategicCost),
+            RouteQuality.ForRetention(CycleHealthRisk(right, bestMaxHp), right.PotionStrategicCost),
+            RouteQualityProjection.RetentionCost);
         if (comparison != 0)
             return comparison;
         comparison = left.Turn.CompareTo(right.Turn);
@@ -880,28 +1330,12 @@ internal sealed partial class CombatBeamSolver
             return comparison;
         comparison = right.Snapshot.ProjectedPlayerHp.CompareTo(
             left.Snapshot.ProjectedPlayerHp);
-        return comparison != 0 ? comparison : right.Score.CompareTo(left.Score);
-    }
-
-    private static int CompareCycleExitFallbackCandidates(
-        SearchNode left,
-        SearchNode right,
-        int bestMaxHp)
-    {
-        int comparison = CycleHealthRisk(left, bestMaxHp)
-            .CompareTo(CycleHealthRisk(right, bestMaxHp));
         if (comparison != 0)
             return comparison;
-        comparison = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
-        if (comparison != 0)
-            return comparison;
-        comparison = (left.CycleExitProbe?.RemainingActions ?? int.MaxValue)
-            .CompareTo(right.CycleExitProbe?.RemainingActions ?? int.MaxValue);
-        if (comparison != 0)
-            return comparison;
-        comparison = (right.CycleExitProbe?.OriginNode.ActionCount ?? 0)
-            .CompareTo(left.CycleExitProbe?.OriginNode.ActionCount ?? 0);
-        return comparison != 0 ? comparison : right.Score.CompareTo(left.Score);
+        comparison = right.Score.CompareTo(left.Score);
+        return comparison != 0
+            ? comparison
+            : CompareCycleCandidateDeterministicFingerprints(left, right);
     }
 
     private static CycleExitProbeFamilyKey BuildCycleExitProbeFamilyKey(SearchNode node)
@@ -949,15 +1383,11 @@ internal sealed partial class CombatBeamSolver
         long minimumHealthRisk = long.MaxValue;
         foreach (SearchNode node in eligible)
             minimumHealthRisk = Math.Min(minimumHealthRisk, CycleHealthRisk(node, bestMaxHp));
-        int availableFutureSoldHp = Math.Max(
-            0,
-            SoldHpThreshold() - battleDamage.SoldHpCommitted);
         List<SearchNode> retained = [];
         foreach (bool investmentBand in new[] { false, true })
         {
             bool InBand(SearchNode node)
-                => (node.FutureSoldHp > availableFutureSoldHp
-                        || CycleHealthRisk(node, bestMaxHp) > minimumHealthRisk)
+                => (CycleHealthRisk(node, bestMaxHp) > minimumHealthRisk)
                     == investmentBand;
 
             Dictionary<CrossTurnProbeFamilyKey, int> inFlightIndexes = [];
@@ -1101,11 +1531,10 @@ internal sealed partial class CombatBeamSolver
         SearchNode right,
         int bestMaxHp)
     {
-        int comparison = CycleHealthRisk(left, bestMaxHp)
-            .CompareTo(CycleHealthRisk(right, bestMaxHp));
-        if (comparison != 0)
-            return comparison;
-        comparison = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
+        int comparison = RouteQualityPolicy.Compare(
+            RouteQuality.ForRetention(CycleHealthRisk(left, bestMaxHp), left.PotionStrategicCost),
+            RouteQuality.ForRetention(CycleHealthRisk(right, bestMaxHp), right.PotionStrategicCost),
+            RouteQualityProjection.RetentionCost);
         if (comparison != 0)
             return comparison;
         bool leftChanged = left.CrossTurnProbe?.LastTurnChangedSemanticState
@@ -1151,7 +1580,12 @@ internal sealed partial class CombatBeamSolver
             return comparison;
         comparison = right.Snapshot.ProjectedPlayerHp.CompareTo(
             left.Snapshot.ProjectedPlayerHp);
-        return comparison != 0 ? comparison : right.Score.CompareTo(left.Score);
+        if (comparison != 0)
+            return comparison;
+        comparison = right.Score.CompareTo(left.Score);
+        return comparison != 0
+            ? comparison
+            : CompareCycleCandidateDeterministicFingerprints(left, right);
     }
 
     private static int CompareCycleProbeCandidates(
@@ -1161,11 +1595,10 @@ internal sealed partial class CombatBeamSolver
     {
         // Finish an already-issued exact phase lease before rotating to another family.
         // The lease remains bounded by the repetition budget and never affects final quality.
-        int comparison = CycleHealthRisk(left, bestMaxHp)
-            .CompareTo(CycleHealthRisk(right, bestMaxHp));
-        if (comparison != 0)
-            return comparison;
-        comparison = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
+        int comparison = RouteQualityPolicy.Compare(
+            RouteQuality.ForRetention(CycleHealthRisk(left, bestMaxHp), left.PotionStrategicCost),
+            RouteQuality.ForRetention(CycleHealthRisk(right, bestMaxHp), right.PotionStrategicCost),
+            RouteQualityProjection.RetentionCost);
         if (comparison != 0)
             return comparison;
         comparison = left.Turn.CompareTo(right.Turn);
@@ -1180,7 +1613,12 @@ internal sealed partial class CombatBeamSolver
             return comparison;
         comparison = (right.Cycle?.TotalStructuralRepetitions ?? 0)
             .CompareTo(left.Cycle?.TotalStructuralRepetitions ?? 0);
-        return comparison != 0 ? comparison : right.Score.CompareTo(left.Score);
+        if (comparison != 0)
+            return comparison;
+        comparison = right.Score.CompareTo(left.Score);
+        return comparison != 0
+            ? comparison
+            : CompareCycleCandidateDeterministicFingerprints(left, right);
     }
 
     private static CrossTurnProbeFamilyKey BuildCrossTurnProbeFamilyKey(SearchNode node)
@@ -1196,7 +1634,7 @@ internal sealed partial class CombatBeamSolver
                 node.PotionCount,
                 null);
 
-    private static CycleProbeFamilyKey BuildCycleProbeFamilyKey(SearchNode node)
+    private CycleProbeFamilyKey BuildCycleProbeFamilyKey(SearchNode node)
     {
         if (node.CycleProbeLease is { } lease)
         {
@@ -1205,6 +1643,7 @@ internal sealed partial class CombatBeamSolver
                 lease.Tracker.ShapeKey,
                 lease.Tracker.SequenceKey,
                 lease.Tracker.PeriodActions,
+                CycleStartupHealthRiskBucket(node),
                 lease.Tracker);
         }
         CycleSearchState cycle = node.Cycle
@@ -1214,6 +1653,7 @@ internal sealed partial class CombatBeamSolver
             cycle.ShapeKey,
             cycle.SequenceKey,
             cycle.PeriodActions,
+            CycleStartupHealthRiskBucket(node),
             null);
     }
 
@@ -1226,25 +1666,6 @@ internal sealed partial class CombatBeamSolver
                 opening = cursor;
         }
         return opening;
-    }
-
-    private void CaptureContinuation(SearchNode node)
-    {
-        if (node.Action is not { } action
-            || action.Kind != PlanActionKind.EndTurn && !action.EndsPlayerTurn
-            || node.Snapshot.Continuation != null
-            || node.Snapshot.PlayerDead
-            || node.Snapshot.AllEnemiesDead
-            || node.Snapshot.BoundaryReason != SearchBoundaryReason.None)
-        {
-            return;
-        }
-        node.Snapshot.SetContinuation(ContinuationStamp.CapturePredicted(
-            _player,
-            node.Snapshot.Simulator,
-            node.Turn,
-            _forecast,
-            _startTurnNumber));
     }
 
     private static void ValidateHistoricalSimulatorsReleased(IReadOnlyList<SearchNode> candidates)
@@ -1263,6 +1684,20 @@ internal sealed partial class CombatBeamSolver
         IReadOnlyList<SearchNode> candidates,
         IReadOnlyList<SearchNode> retained)
     {
+        // Larger retained pools otherwise require a quadratic reference scan. Keep the
+        // allocation-free path for tiny pools; snapshot identity (not node identity) owns retention.
+        if (retained.Count > 8)
+        {
+            HashSet<SimulationSnapshot> retainedSnapshots = new(
+                retained.Count, ReferenceEqualityComparer.Instance);
+            foreach (SearchNode survivor in retained)
+                retainedSnapshots.Add(survivor.Snapshot);
+            foreach (SearchNode candidate in candidates)
+                if (!retainedSnapshots.Contains(candidate.Snapshot))
+                    candidate.Snapshot.ReleaseSimulator();
+            return;
+        }
+
         foreach (SearchNode candidate in candidates)
         {
             bool keepSnapshot = false;
@@ -1275,6 +1710,364 @@ internal sealed partial class CombatBeamSolver
             }
             if (!keepSnapshot)
                 candidate.Snapshot.ReleaseSimulator();
+        }
+    }
+
+    private static List<SearchNode> FinalizePrunedCycleExitProbeTickets(
+        IReadOnlyList<SearchNode> pool,
+        List<SearchNode> retained)
+    {
+        SettleDroppedCycleExitProbeTickets(pool, retained);
+        return retained;
+    }
+
+    private static void SettleDroppedCycleExitProbeTickets(
+        IReadOnlyList<SearchNode> candidates,
+        IReadOnlyList<SearchNode> retained)
+    {
+        HashSet<SearchNode> retainedSet = new(
+            retained,
+            ReferenceEqualityComparer.Instance);
+        HashSet<CycleExitProbeTicketKey> survivingIssuedTickets = [];
+        List<CycleExitProbeTicketKey> issuedCandidates = [];
+
+        foreach (SearchNode survivor in retained)
+        {
+            if (survivor.CycleExitProbe is not { } probe)
+                continue;
+            bool retainsPortfolioLease = survivor.CycleExitRetentionRank != int.MaxValue;
+            if (probe.LeaseIssued)
+            {
+                CycleExitProbeTicketKey ticket = BuildCycleExitProbeTicketKey(survivor);
+                if (retainsPortfolioLease)
+                    survivingIssuedTickets.Add(ticket);
+                else
+                    issuedCandidates.Add(ticket);
+            }
+            if (!retainsPortfolioLease)
+            {
+                // Ordinary Beam/long-term retention may keep the route, but it cannot bypass
+                // the bounded exit-probe portfolio merely by surviving another prune channel.
+                survivor.CycleExitProbe = null;
+            }
+        }
+
+        foreach (SearchNode candidate in candidates)
+        {
+            bool retainsPortfolioLease = retainedSet.Contains(candidate)
+                && candidate.CycleExitRetentionRank != int.MaxValue;
+            if (candidate.CycleExitProbe is { LeaseIssued: true })
+                issuedCandidates.Add(BuildCycleExitProbeTicketKey(candidate));
+            if (!retainsPortfolioLease)
+                candidate.CycleExitProbe = null;
+        }
+
+        SettleAbandonedCycleExitProbeTickets(
+            issuedCandidates,
+            survivingIssuedTickets);
+    }
+
+    private static void SettleAbandonedCycleExitProbeTickets(
+        IEnumerable<CycleExitProbeTicketKey> issuedCandidates,
+        IEnumerable<CycleExitProbeTicketKey> survivingIssuedTickets)
+    {
+        HashSet<CycleExitProbeTicketKey> surviving = [.. survivingIssuedTickets];
+        HashSet<CycleExitProbeTicketKey> settled = [];
+        foreach (CycleExitProbeTicketKey ticket in issuedCandidates)
+        {
+            if (surviving.Contains(ticket) || !settled.Add(ticket))
+                continue;
+            // Settle one whole ticket, not each sibling. Losing one branch while another
+            // survives must never mint duplicate generations.
+            ticket.OriginTracker.RetryAbandonedExitProbe(
+                ticket.OriginPhaseIndex,
+                ticket.ExitActionKey,
+                ticket.OriginGeneration);
+        }
+    }
+
+    internal static void VerifyCycleExitTicketSettlementPolicyForTesting()
+    {
+        VerifyCycleStartupRetentionPolicyForTesting();
+
+        StateFingerprint shapeKey = new(0x1001UL, 0x1002UL);
+        StateFingerprint sequenceKey = new(0x2001UL, 0x2002UL);
+        StateFingerprint firstActionKey = new(0x3001UL, 0x3002UL);
+        StateFingerprint droppedActionKey = new(0x4001UL, 0x4002UL);
+        CycleProbeTracker tracker = new(
+            shapeKey,
+            sequenceKey,
+            [firstActionKey],
+            default);
+        long firstGeneration = tracker.ObserveExit(
+            0,
+            firstActionKey,
+            default,
+            out _);
+        long droppedGeneration = tracker.ObserveExit(
+            0,
+            droppedActionKey,
+            default,
+            out _);
+        if (!tracker.TryMarkExitProbeIssued(0, firstActionKey, firstGeneration)
+            || !tracker.TryMarkExitProbeIssued(0, droppedActionKey, droppedGeneration))
+        {
+            throw new InvalidOperationException("循环出口测试票据无法签发。");
+        }
+
+        int activeBefore = tracker.ActiveExitProbeTicketCountForTesting;
+        CycleExitProbeTicketKey survivor = new(
+            tracker,
+            0,
+            firstActionKey,
+            firstGeneration);
+        CycleExitProbeTicketKey dropped = new(
+            tracker,
+            0,
+            droppedActionKey,
+            droppedGeneration);
+        SettleAbandonedCycleExitProbeTickets(
+            [survivor, survivor, dropped, dropped],
+            [survivor]);
+        long survivingPendingGeneration = tracker.ObserveExit(
+            0,
+            firstActionKey,
+            default,
+            out _);
+        if (survivingPendingGeneration != 0)
+        {
+            throw new InvalidOperationException(
+                "同一出口票据仍有 sibling 存活时被错误 rearm。");
+        }
+        long rearmedGeneration = tracker.ObserveExit(
+            0,
+            droppedActionKey,
+            default,
+            out _);
+        if (!tracker.HasPendingExitProbe(0, droppedActionKey, rearmedGeneration)
+            || tracker.ActiveExitProbeTicketCountForTesting != activeBefore)
+        {
+            throw new InvalidOperationException(
+                "同一出口票据的全部 sibling 删除后没有唯一变回 pending，或 ActiveTickets 发生增长。");
+        }
+        tracker.RearmExitProbes();
+        long checkpointGeneration = tracker.ObserveExit(
+            0,
+            firstActionKey,
+            default,
+            out _);
+        if (checkpointGeneration <= firstGeneration
+            || !tracker.HasPendingExitProbe(0, firstActionKey, checkpointGeneration)
+            || !tracker.HasPendingExitProbe(0, droppedActionKey, rearmedGeneration)
+            || tracker.ActiveExitProbeTicketCountForTesting != activeBefore + 1)
+        {
+            throw new InvalidOperationException(
+                "循环检查点没有在保留旧探测的同时唯一签发新一代出口票据。");
+        }
+        tracker.RearmExitProbes();
+        long repeatedCheckpointGeneration = tracker.ObserveExit(
+            0,
+            firstActionKey,
+            default,
+            out _);
+        long repeatedRearmGeneration = tracker.ObserveExit(
+            0,
+            droppedActionKey,
+            default,
+            out _);
+        if (repeatedCheckpointGeneration != checkpointGeneration
+            || repeatedRearmGeneration != rearmedGeneration
+            || tracker.ActiveExitProbeTicketCountForTesting != activeBefore + 1)
+        {
+            throw new InvalidOperationException(
+                "同一循环检查点被重复处理时重复签发了出口票据。");
+        }
+    }
+
+    private static void VerifyCycleStartupRetentionPolicyForTesting()
+    {
+        const int initialPlayerHp = 17;
+        long[] risks = [0, 1, 5, 9, 13];
+        int[] expectedBuckets = [0, 1, 2, 3, 4];
+        for (int index = 0; index < risks.Length; index++)
+        {
+            int bucket = CycleStartupHealthRiskBucket(initialPlayerHp, risks[index]);
+            if (bucket != expectedBuckets[index])
+            {
+                throw new InvalidOperationException(
+                    $"循环 startup 风险桶错误：risk={risks[index]}，" +
+                    $"bucket={bucket}/{expectedBuckets[index]}。");
+            }
+        }
+        if (CanOccupyCycleStartupReserve(0)
+            || CanOccupyCycleStartupReserve(-1)
+            || !CanOccupyCycleStartupReserve(1))
+        {
+            throw new InvalidOperationException(
+                "循环 startup reserve 没有严格拒绝 projected HP 非正的路线。");
+        }
+
+        static CycleStartupRetentionKey Key(
+            long risk,
+            int potionCost,
+            int clutter,
+            int size,
+            long setup,
+            ulong stable)
+            => new(
+                CycleStartupHealthRiskBucket(initialPlayerHp, risk),
+                risk,
+                potionCost,
+                clutter,
+                size,
+                setup,
+                new StateFingerprint(stable, stable + 100));
+
+        CycleStartupRetentionTestCandidate[] candidates =
+        [
+            new(0, 1, Key(0, 0, 4, 10, 1, 10)),
+            new(1, 1, Key(1, 0, 3, 10, 99, 11)),
+            // The deep edge of a bucket wins before potion/deck/setup tie-breakers.
+            new(2, 1, Key(4, 9, 8, 20, 0, 12)),
+            // Global purification prefers the smallest clutter/size, independently of depth.
+            new(3, 1, Key(5, 1, 0, 7, 2, 13)),
+            new(4, 1, Key(8, 0, 5, 12, 50, 14)),
+            new(5, 1, Key(9, 0, 4, 11, 3, 15)),
+            new(6, 1, Key(13, 0, 4, 11, 3, 16)),
+            // A numerically attractive but non-surviving startup may never own a reserve.
+            new(7, 0, Key(4, 0, 0, 1, 999, 1)),
+        ];
+        static bool Eligible(CycleStartupRetentionTestCandidate candidate)
+            => CanOccupyCycleStartupReserve(candidate.ProjectedPlayerHp);
+        static CycleStartupRetentionKey SelectKey(
+            CycleStartupRetentionTestCandidate candidate)
+            => candidate.Key;
+
+        static int[] SelectBucketIdentities(
+            IReadOnlyList<CycleStartupRetentionTestCandidate> source)
+        {
+            int[] identities = new int[5];
+            for (int bucket = 0; bucket <= 4; bucket++)
+            {
+                CycleStartupRetentionTestCandidate selected =
+                    SelectCycleStartupBucketRepresentative(
+                        source,
+                        bucket,
+                        Eligible,
+                        SelectKey)
+                    ?? throw new InvalidOperationException(
+                        $"循环 startup 测试缺少第 {bucket} 桶代表。");
+                identities[bucket] = selected.Identity;
+            }
+            return identities;
+        }
+
+        int[] expectedIdentities = [0, 2, 4, 5, 6];
+        int[] forward = SelectBucketIdentities(candidates);
+        CycleStartupRetentionTestCandidate[] reversed = [.. candidates.Reverse()];
+        int[] backward = SelectBucketIdentities(reversed);
+        if (!forward.SequenceEqual(expectedIdentities)
+            || !backward.SequenceEqual(expectedIdentities))
+        {
+            throw new InvalidOperationException(
+                "循环 startup 桶内深端选择错误，或结果受候选遍历顺序影响。");
+        }
+
+        StateFingerprint sharedState = new(700, 701);
+        StateFingerprint sharedParent = new(800, 801);
+        StateFingerprint firstRoute = BuildCycleStartupStableFingerprint(
+            sharedState,
+            new StateFingerprint(900, 901),
+            sharedParent);
+        StateFingerprint secondRoute = BuildCycleStartupStableFingerprint(
+            sharedState,
+            new StateFingerprint(902, 903),
+            sharedParent);
+        if (firstRoute == secondRoute)
+            throw new InvalidOperationException("循环 startup 稳定键没有区分同状态的不同动作路线。");
+        CycleStartupRetentionTestCandidate[] tiedStates =
+        [
+            new(30, 1, Key(1, 0, 4, 10, 1, 30) with
+            {
+                StableFingerprint = firstRoute,
+            }),
+            new(31, 1, Key(1, 0, 4, 10, 1, 31) with
+            {
+                StableFingerprint = secondRoute,
+            }),
+        ];
+        CycleStartupRetentionTestCandidate tiedForward =
+            SelectCycleStartupBucketRepresentative(
+                tiedStates,
+                1,
+                Eligible,
+                SelectKey)
+            ?? throw new InvalidOperationException("循环 startup 同状态稳定性测试没有代表。");
+        CycleStartupRetentionTestCandidate tiedBackward =
+            SelectCycleStartupBucketRepresentative(
+                tiedStates.Reverse(),
+                1,
+                Eligible,
+                SelectKey)
+            ?? throw new InvalidOperationException("逆序循环 startup 同状态稳定性测试没有代表。");
+        if (tiedForward.Identity != tiedBackward.Identity)
+        {
+            throw new InvalidOperationException(
+                "循环 startup 同状态路线的选择仍受候选遍历顺序影响。");
+        }
+
+        CycleStartupRetentionTestCandidate forwardAnchor = SelectCyclePurificationAnchor(
+                candidates,
+                Eligible,
+                SelectKey)
+            ?? throw new InvalidOperationException("循环 purification anchor 意外缺失。");
+        CycleStartupRetentionTestCandidate reverseAnchor = SelectCyclePurificationAnchor(
+                reversed,
+                Eligible,
+                SelectKey)
+            ?? throw new InvalidOperationException("逆序循环 purification anchor 意外缺失。");
+        if (forwardAnchor.Identity != 3
+            || reverseAnchor.Identity != 3
+            || expectedIdentities.Append(forwardAnchor.Identity).Distinct().Count() != 6)
+        {
+            throw new InvalidOperationException(
+                "循环 purification anchor 没有稳定选择真实 deck 净化路线，或组合上限失效。");
+        }
+
+        CycleStartupRetentionTestCandidate[] uniformDeck =
+        [
+            new(20, 1, Key(1, 0, 4, 10, 1, 20)),
+            new(21, 1, Key(4, 0, 4, 10, 99, 21)),
+        ];
+        if (SelectCyclePurificationAnchor(
+                uniformDeck,
+                Eligible,
+                SelectKey) != null)
+        {
+            throw new InvalidOperationException(
+                "候选集没有 deck clutter/size 改善时仍占用了 purification reserve。");
+        }
+
+        CycleStartupRetentionTestCandidate stableHigh =
+            new(30, 1, Key(1, 0, 4, 10, 1, 30));
+        CycleStartupRetentionTestCandidate stableLow =
+            new(31, 1, Key(1, 0, 4, 10, 1, 29));
+        foreach (CycleStartupRetentionTestCandidate[] order in
+                 new[]
+                 {
+                     new[] { stableHigh, stableLow },
+                     new[] { stableLow, stableHigh },
+                 })
+        {
+            if (SelectCycleStartupBucketRepresentative(
+                    order,
+                    1,
+                    Eligible,
+                    SelectKey)?.Identity != stableLow.Identity)
+            {
+                throw new InvalidOperationException(
+                    "循环 startup 完全同质候选没有按稳定 fingerprint 决胜。");
+            }
         }
     }
 
@@ -1296,7 +2089,7 @@ internal sealed partial class CombatBeamSolver
         string summary = string.Join(';', nodes
             .Take(limit)
             .Select(node =>
-                $"{string.Join('>', node.Actions.Select(PolicyActionToken))}:" +
+                $"{string.Join('>', node.Actions.Select(PolicyActionIdentityToken))}:" +
                 $"score{node.Score:F0}:hp{node.Snapshot.ProjectedPlayerHp}:" +
                 $"enemy{node.Snapshot.EnemyHp}:hand{node.Snapshot.HandCount}/" +
                 $"{node.Snapshot.ReachableHandValue}/{node.Snapshot.ZeroCostPlayableCount}:" +
@@ -1346,22 +2139,44 @@ internal sealed partial class CombatBeamSolver
     {
         if (_run.StandPatCache.TryGetValue(node.StateKey, out StandPatEvaluation cached))
             return cached;
-        SimulationSnapshot end = ReplayAction(node, new PlanAction(PlanActionKind.EndTurn, node.Turn));
-        StandPatEvaluation evaluation = new(
-            end.AllEnemiesDead,
-            Math.Max(0, node.Snapshot.EnemyHp - end.EnemyHp),
-            end.ProjectedPlayerHp,
-            end.Energy * 16
-                + end.Stars * 8
-                + end.HandCount
-                + end.ReachableHandValue
-                + end.FutureResourceValue
-                + end.OstyHp * 16
-                + end.OstyMaxHp * 4);
-        end.ReleaseSimulator();
+        _run.CheckpointPruneMetadata?.Invoke("stand_pat_single");
+        _run.EnsurePruneMemory?.Invoke(StandPatProbeAllocationReserve());
+        long allocatedBefore = OwnedSearchAllocatedBytes();
+        long threadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        StandPatEvaluation evaluation = ComputeStandPat(node);
+        _run.StandPatBatchAllocatedBytes += Math.Max(
+            0, OwnedSearchAllocatedBytes() - allocatedBefore);
+        _run.StandPatProbeAllocatedHighWater = Math.Max(
+            _run.StandPatProbeAllocatedHighWater,
+            GC.GetAllocatedBytesForCurrentThread() - threadAllocatedBefore);
         _run.StandPatCache.Add(node.StateKey, evaluation);
         _run.StandPatProbes++;
+        _run.CheckpointPruneMetadata?.Invoke("rank_after_stand_pat_single");
         return evaluation;
+    }
+
+    private StandPatEvaluation ComputeStandPat(SearchNode node)
+    {
+        SimulationSnapshot end = ReplayAction(node, new PlanAction(PlanActionKind.EndTurn, node.Turn));
+        try
+        {
+            ObserveSearchPath(node, SearchPathObservationStage.StandPatProbe, "stand_pat_replayed");
+            return new StandPatEvaluation(
+                end.AllEnemiesDead,
+                Math.Max(0, node.Snapshot.EnemyHp - end.EnemyHp),
+                end.ProjectedPlayerHp,
+                end.Energy * 16
+                    + end.Stars * 8
+                    + end.HandCount
+                    + end.ReachableHandValue
+                    + end.FutureResourceValue
+                    + end.OstyHp * 16
+                    + end.OstyMaxHp * 4);
+        }
+        finally
+        {
+            end.ReleaseSimulator();
+        }
     }
 
     private static int PolicyBoundaryRank(SearchBoundaryReason reason)
@@ -1392,5 +2207,26 @@ internal sealed partial class CombatBeamSolver
                     $"{choice.SourceId}={string.Join(',', choice.Cards.Select(card => card.CardId))}")),
             _ => throw new ArgumentOutOfRangeException(nameof(action), action.Kind, null),
         };
+
+    private static string PolicyActionIdentityToken(PlanAction action)
+    {
+        string token = PolicyActionToken(action);
+        if (action.Kind == PlanActionKind.PlayCard)
+        {
+            token += $"#card{action.CardOccurrence}/state{action.CardStateOccurrence}";
+        }
+        if (action.Choice != null)
+            token += $"#primary={PolicyChoiceIdentityToken(action.Choice)}";
+        if (action.NestedChoices is { Count: > 0 })
+        {
+            token += $"#nested_before={action.NestedChoicesBeforePrimary}:" +
+                string.Join(',', action.NestedChoices.Select(PolicyChoiceIdentityToken));
+        }
+        return token;
+    }
+
+    private static string PolicyChoiceIdentityToken(PlanCardChoice choice)
+        => $"{choice.Effect}[{string.Join(',', choice.Cards.Select(card =>
+            $"{card.CardId}+{card.UpgradeLevel}@src{card.SourceOccurrence}/opt{card.OptionOccurrence}"))}]";
 
 }

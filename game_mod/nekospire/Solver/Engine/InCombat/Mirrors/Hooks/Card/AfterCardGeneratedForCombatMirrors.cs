@@ -24,6 +24,7 @@ internal static class AfterCardGeneratedForCombatMirrors
 
     public static void Invoke(AbstractModel listener, AfterCardGeneratedForCombatMirrorContext context)
     {
+        using var dispatch = context.Simulator.BeginExecutionDispatch();
         Registry.Invoke(listener, context);
     }
 
@@ -61,7 +62,8 @@ internal static class AfterCardGeneratedForCombatMirrors
         {
             if (context.CombatState is not ICombatPredictionEffectSink effects)
                 throw new InvalidOperationException("军械库效果缺少可写的预测状态。");
-            effects.ApplyPower(typeof(StrengthPower), power.Owner, power.Amount, power.Owner);
+            // 原版军械库（ArsenalPower.AfterCardGeneratedForCombat）传 cardSource: null。
+            effects.ApplyPowerFromSource(typeof(StrengthPower), power.Owner, power.Amount, power.Owner, cardSource: null);
         }
     }
 
@@ -143,6 +145,8 @@ internal static class AfterCardGeneratedForCombatMirrors
         {
             var orb = OrbModel.GetRandomOrb(context.Rng.CombatOrbGeneration).ToMutable();
             context.Simulator.OrbChannel(player, orb);
+            if (context.Simulator.HasPendingChoice)
+                return;
         }
     }
 
@@ -164,14 +168,14 @@ internal sealed class AfterCardGeneratedForCombatMirrorContext : CombatCardMirro
 
 internal sealed class SoulboundPredictionState(SoulboundPower power) : IPredictionStateForkable
 {
-    public bool IsAddingSoul { get; set; } = GameRef.Get<bool>(power, "_isAddingSoul");
+    public bool IsAddingSoul { get; set; } = T44PrivateAccess.SoulboundPower_IsAddingSoul(power);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }
 
 internal sealed class RegalitePredictionState(Regalite relic) : IPredictionStateForkable
 {
-    public bool UsedThisTurn { get; set; } = GameRef.Get<bool>(relic, "_usedThisTurn");
+    public bool UsedThisTurn { get; set; } = T44PrivateAccess.Regalite_UsedThisTurn(relic);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

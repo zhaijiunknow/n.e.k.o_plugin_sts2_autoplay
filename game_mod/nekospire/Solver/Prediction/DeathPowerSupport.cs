@@ -1,4 +1,3 @@
-using CombatSolver.Engine.Common;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Monsters;
@@ -10,7 +9,23 @@ namespace CombatSolver;
 
 internal static class DeathPowerSupport
 {
-    public static void Trigger(
+    /// <summary>
+    /// 这个死亡效果会不会往场上放一个新的<b>主要</b>敌人。
+    /// </summary>
+    /// <remarks>
+    /// 补货、寄生和惊吓都会生成主要敌人，结算完成前应保留战斗。
+    /// 补货在 AfterDeath 镜像内、旧个体移出阵容前生成替补；寄生与惊吓仍由
+    /// <see cref="CorePowerSupport.ApplyEnemyDeathPowers" /> 的领域清理结算。
+    ///
+    /// 幻象和重接不在这里：它们复活的是同一个个体，走的是
+    /// <c>SimulatedCombatState.RevivingEnemyHp</c> 那条既有的有效生命路径。
+    ///
+    /// 新增会生成主要敌人的死亡效果时，应同时登记这里的终局约束和对应权威结算入口。
+    /// </remarks>
+    public static bool SpawnsPrimaryEnemyOnDeath(PowerModel power)
+        => power.Amount > 0 && power is StockPower or InfestedPower or SurprisePower;
+
+    public static bool Trigger(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         Creature dead)
@@ -27,28 +42,6 @@ internal static class DeathPowerSupport
             {
                 combat.ForceStunnedMove(power.Owner);
                 combat.Apply<StrengthPower>(power.Owner, power.Amount, power.Owner);
-                continue;
-            }
-
-            if (power is CrabRagePower
-                && !ReferenceEquals(power.Owner, dead)
-                && power.Owner.Side == dead.Side)
-            {
-                combat.Apply<StrengthPower>(
-                    power.Owner,
-                    power.DynamicVars.Strength.IntValue,
-                    power.Owner);
-                simulator.GainBlock(
-                    power.Owner,
-                    power.DynamicVars.Block.BaseValue,
-                    ValueProp.Unpowered);
-                combat.SetPowerAmount(power, 0);
-                continue;
-            }
-
-            if (power is DampenPower)
-            {
-                combat.RemoveDampenCaster(dead);
                 continue;
             }
 
@@ -95,18 +88,6 @@ internal static class DeathPowerSupport
                 case ReattachPower:
                     combat.BeginReattach(simulator, dead);
                     break;
-                case StockPower stock when stock.Amount > 0:
-                    MonsterSpawnSupport.Spawn<Axebot>(
-                        simulator,
-                        combat,
-                        dead,
-                        dead.SlotName,
-                        configure: axebot =>
-                        {
-                            axebot.ShouldPlaySpawnAnimation = true;
-                            axebot.StockAmount = stock.Amount - 1;
-                        });
-                    break;
                 case SurprisePower:
                     Creature fat = MonsterSpawnSupport.Create<FatGremlin>(simulator, combat, "fat");
                     foreach (ThieveryPower thievery in combat.EffectivePowers()
@@ -118,7 +99,7 @@ internal static class DeathPowerSupport
                             fat,
                             thievery.DynamicVars.Gold.IntValue,
                             dead);
-                        GameRef.Set(heist, "_target", thievery.Target);
+                        T44PrivateAccess.SetPowerModel_Target(heist,  thievery.Target);
                     }
                     MonsterSpawnSupport.Spawn<SneakyGremlin>(simulator, combat, dead, "sneaky");
                     MonsterSpawnSupport.AddCreated(simulator, combat, dead, fat);
@@ -127,10 +108,15 @@ internal static class DeathPowerSupport
                     combat.RefundPossessedStats(dead);
                     break;
             }
+            if (simulator.HasPendingChoice)
+                return false;
         }
         combat.RecoverStolenResources(simulator, dead);
+        if (simulator.HasPendingChoice)
+            return false;
         combat.RemovePowersAfterDeath(dead);
         combat.CompleteDeathPhase(dead);
+        return true;
     }
 
 }

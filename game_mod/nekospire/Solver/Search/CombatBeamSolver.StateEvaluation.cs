@@ -1,11 +1,9 @@
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Extensions;
-using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
@@ -15,9 +13,7 @@ using MegaCrit.Sts2.Core.Models.Powers;
 using CombatSolver.Engine.InCombat.Mirrors.Hooks.Card;
 using MegaCrit.Sts2.Core.Models.Potions;
 using MegaCrit.Sts2.Core.Models.Relics;
-using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
 using MegaCrit.Sts2.Core.Random;
-using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Mirrors;
@@ -31,6 +27,19 @@ namespace CombatSolver;
 
 internal sealed partial class CombatBeamSolver
 {
+    private static bool HasUncompensatedDeathGap(IReadOnlyList<PredictionGap> gaps)
+    {
+        for (int index = 0; index < gaps.Count; index++)
+        {
+            if (!gaps[index].Compensated
+                && gaps[index].Method.Contains("Death", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private SimulationSnapshot Snapshot(
         CombatPredictionSimulator simulator,
         int turn,
@@ -80,16 +89,16 @@ internal sealed partial class CombatBeamSolver
         StateFingerprint enemyCombatDistributionKey = enemyCombatDistribution.Finish();
         if (boundary == SearchBoundaryReason.None && combat.HasPendingChoice)
             boundary = SearchBoundaryReason.PendingChoice;
-        bool dead = player.IsDead;
+        // Later effects may restore HP after native pending loss has already been committed.
+        bool dead = player.IsDead || simulator.TerminalStamp is { Outcome: CombatTerminalOutcome.Defeat };
         bool won = boundary != SearchBoundaryReason.EventDefeat
             && !dead
             && !combat.HasPendingChoice
-            && (!simulator.IsInProgress || simulator.IsEnding);
+            && simulator.TerminalStamp is { Outcome: CombatTerminalOutcome.Victory };
         CoverageSummary coverage = GetCoverageSummary(simulator);
         IReadOnlyList<PredictionGap> predictionGaps = coverage.Gaps;
         bool risk = coverage.HasUncompensatedRisk;
-        bool uncertainVictory = won && predictionGaps.Any(gap =>
-            !gap.Compensated && gap.Method.Contains("Death", StringComparison.Ordinal));
+        bool uncertainVictory = won && HasUncompensatedDeathGap(predictionGaps);
         if (uncertainVictory)
             boundary = SearchBoundaryReason.UnsupportedEffect;
 
@@ -109,13 +118,17 @@ internal sealed partial class CombatBeamSolver
         // Projected shuffle needs these piles in this exact pre-sort order. The remaining
         // snapshot metrics are order-independent, so they can reuse the shuffled list instead
         // of materializing a second deck-sized backing array.
-        List<PredictedCard> liveCards = [
-            .. playerState.DiscardPile.Cards,
-            .. playerState.DrawPile.Cards,
-            .. playerState.Hand.Cards,
-        ];
+        using SnapshotListBuffer<PredictedCard>.Lease liveCardsLease =
+            _run.SnapshotLiveCards.Rent();
+        List<PredictedCard> liveCards = liveCardsLease.Items;
+        liveCards.EnsureCapacity(playerState.DiscardPile.Cards.Count
+            + playerState.DrawPile.Cards.Count + playerState.Hand.Cards.Count);
+        liveCards.AddRange(playerState.DiscardPile.Cards);
+        liveCards.AddRange(playerState.DrawPile.Cards);
+        liveCards.AddRange(playerState.Hand.Cards);
         (StateFingerprint projectedShuffleOrderKey, int projectedShuffleOrderValue) =
             BuildProjectedShuffleOrder(simulator, liveCards);
+        int liveCardCount = liveCards.Count;
         _run.Performance.End(
             SearchMetricPhase.ProjectedShuffle,
             projectedShuffleMeasurement);
@@ -123,44 +136,95 @@ internal sealed partial class CombatBeamSolver
 
         int roundIndex = turn - _startTurnNumber;
         SearchMeasurement threatMeasurement = _run.Performance.Begin();
-        int projectedHp;
+        ThreatProjection threat;
         if (won)
         {
             // A lethal player action ends combat immediately. Enemy intent from that round must
             // never lower the route's projected HP or leak into battle-loss reporting.
-            projectedHp = player.CurrentHp;
+            threat = new ThreatProjection(player.CurrentHp, 0, 0);
         }
         else if (boundary != SearchBoundaryReason.None)
         {
-            projectedHp = player.CurrentHp;
+            threat = new ThreatProjection(player.CurrentHp, 0, 0);
         }
-        else if (!_run.ThreatProjectionCache.TryGetValue((key, roundIndex), out projectedHp))
+        else if (!_run.ThreatProjectionCache.TryGetValue((key, roundIndex), out threat))
         {
-            projectedHp = ProjectHpAfterThreat(simulator, player, roundIndex);
-            _run.ThreatProjectionCache.Add((key, roundIndex), projectedHp);
+            threat = ProjectHpAfterThreat(simulator, player);
+            _run.ThreatProjectionCache.Add((key, roundIndex), threat);
         }
+        int projectedHp = threat.Hp;
         _run.Performance.End(SearchMetricPhase.ThreatProjection, threatMeasurement);
         int cumulativePlayerHpLost = combat.GetCumulativeHpLost(_player.Creature);
+        int recoveredPlayerHp = combat.GetRecoveredHp(_player.Creature);
+        int deathSaveRelicHpRestored = combat.DeathSaveRelicHpRestored;
+        int deathSavePotionHpRestored = combat.DeathSavePotionHpRestored;
+        int deathSaveHpRestored = deathSaveRelicHpRestored + deathSavePotionHpRestored;
         double hpWeight = SolverWeights.Hp;
         double score = dead || projectedHp <= 0
             ? SolverWeights.DeathPenalty
             : projectedHp * hpWeight;
         score += (player.MaxHp - root.InitialPlayerMaxHp) * hpWeight;
         score -= cumulativePlayerHpLost * hpWeight;
+        // A one-shot death save is a cross-combat resource. The HP it puts back is still sitting in
+        // projectedHp, so it is taken out again and charged a second time as the price of spending it. The
+        // projected part is included because walking into a lethal intent has to look as expensive as
+        // actually taking it, or retention keeps the route that plans to die and drops the one that does not.
+        score -= ActEndingBossPolicy.DeathSaveBeamCost(
+            deathSaveHpRestored + threat.DeathSaveHpRestored) * hpWeight;
         int exhaustedTheHunts = playerState.ExhaustPile.Cards.Count(card => card.Preview is TheHunt);
         int rewardedTheHunts = Math.Max(0, combat.GetAmount<TheHuntPower>(_player.Creature));
         int missedTheHuntRewards = Math.Max(0, exhaustedTheHunts - rewardedTheHunts);
-        int realizedLongTermResourceValue = combat.LongTermResourceValue;
-        int longTermResourceValue = realizedLongTermResourceValue
-            - missedTheHuntRewards * CorePowerSupport.TheHuntLongTermResourceValue;
-        score += realizedLongTermResourceValue * SolverWeights.LongTermResourceBeamValue;
+        // 「不考虑局外收益」在快照源头把这两个量清零，下游十几处读到的是同一个 0。
+        //
+        // 不逐处判断是有理由的：局外收益既是分数项，也是终局排序键、Beam 保路泳道、必留泳道、
+        // Pareto 维度、循环进展信号和 BeamRetentionPolicy.CompareFinalCandidates 的比较键。
+        // 逐处列举漏过两次（先漏了终局排序里排在结束回合之前的 GrowthRewards.Total，后漏了
+        // CompareFinalCandidates），每次的表现都是「开了开关还是拿钱」。源头清零按构造不会漏。
+        //
+        // 早先这么做过一次，搜索会卡死：分道结构一并塌掉之后，Beam 名额被同一类候选占满，预算
+        // 全烧在同一个回合层里出牌、推不到下一回合。那条现在由「节点预算按回合层分配」兜住——
+        // 单层再也吃不掉整份节点预算，塌掉分道只会让某一层内部少一点多样性，不会再拖住整场搜索。
+        int realizedLongTermResourceValue = _ignoreLongTermRewards ? 0 : combat.LongTermResourceValue;
+        int longTermResourceValue = _ignoreLongTermRewards
+            ? 0
+            : realizedLongTermResourceValue
+                - missedTheHuntRewards * CorePowerSupport.TheHuntLongTermResourceValue;
+        GrowthValues growthRewards = _ignoreLongTermRewards ? default : combat.GrowthRewards;
+        score += Math.Min(
+            realizedLongTermResourceValue * SolverWeights.LongTermResourceBeamValue,
+            SolverWeights.LongTermResourceBeamCap);
+        int growthHpCredit = _growthBudgets.Credit(growthRewards);
+        score += (double)growthHpCredit * hpWeight;
+        RelicCounterEvaluation relicCounters = combat.EvaluateRelicCounters(simulator, _player, _relicTargets);
+        if (won && (relicCounters.SatisfiedMask & (1UL << (int)RelicCounterId.MeatOnTheBone)) != 0)
+        {
+            int thresholdHeal = root.PostCombatRelicHeal.HealFor(player.CurrentHp, player.MaxHp)
+                - root.PostCombatRelicHeal.MonotoneHealFor(player.CurrentHp, player.MaxHp);
+            relicCounters = relicCounters with { HealingHpCredit =
+                ActEndingBossPolicy.PersistentValueOfRecoveredHp(thresholdHeal, _strategicBossHpRelief) };
+        }
+        score += (double)(relicCounters.HpCredit + relicCounters.HealingHpCredit) * hpWeight;
+        // Small, bounded tie guidance for free counter alignment; HP remains the primary cost.
+        score += relicCounters.SatisfiedPriority * 0.1 - relicCounters.Distance * 0.001;
         int angerCopiesGenerated = combat.AngerCopiesGenerated;
         score += angerCopiesGenerated * SolverWeights.AngerCopyBeamPenalty;
         if (won && !uncertainVictory)
             score += SolverWeights.VictoryBonus;
         score += enemyHp * SolverWeights.EnemyHp;
-        int liveDeckClutter = liveCards.Count(card =>
-            card.Preview.Type is CardType.Status or CardType.Curse);
+        // 负偏置登记过的牌和状态牌、诅咒同样按牌库杂质计。
+        //
+        // 少了这一条，消耗一张非状态非诅咒的牌在打分里的收益**正好是零**：牌库里少一张不进任何
+        // 项（retainedAttackValue 有上限，攻击牌多的时候早就顶满，少一张也不掉），于是「打出净化
+        // 消耗两张废牌」严格劣于「不打净化」——省下那点能量总是更划算。移除估值的偏置只排选择
+        // 分支的先后，排不出一个本来就没有的收益。这就是玩家实测里净化根本不被打出的原因。
+        int liveDeckClutter = 0;
+        foreach (PredictedCard card in liveCards)
+        {
+            if ((card.Preview.Type is CardType.Status or CardType.Curse
+                    || CardRemovalValueMirrors.Offset(card.Preview) < 0d)
+                && !LeavesHandAtTurnEnd(simulator, playerState, card))
+                liveDeckClutter = checked(liveDeckClutter + 1);
+        }
         score += liveDeckClutter * SolverWeights.LiveDeckClutterPenalty;
         int outstandingStolenResource = TheftEncounterStrategy.OutstandingStolenResource(simulator, combat);
         if (_theftPolicy == SolverTheftPolicy.PreserveResources)
@@ -172,46 +236,125 @@ internal sealed partial class CombatBeamSolver
                 continue;
             retainedAttackValue += Math.Max(
                 1,
-                (int)Math.Round(CardChoiceSupport.CardValue(liveCard.Preview)));
+                (int)Math.Round(BranchCardValue(simulator, combat, liveCard)));
         }
         ThreatFocus focus = BuildThreatFocus(simulator, combat);
         IReadOnlyList<PowerModel> effectivePowers = combat.EffectivePowers();
+        // Requirements and evaluation inspect the same immutable snapshot. Native
+        // GetTypeForAmount boxes its enum comparisons, so keep this one-pass decision
+        // instead of asking Contributes again for every power during evaluation.
+        Span<bool> contributes = effectivePowers.Count <= 64
+            ? stackalloc bool[effectivePowers.Count]
+            : new bool[effectivePowers.Count];
         StrategicEffectRequirements strategicRequirements = StrategicEffectRequirements.None;
+        bool needsExhaustDrawTiming = false;
+        bool skillsExhaust = false;
+        bool hasPagestorm = false;
+        // Only Lethality consumes this native field. Registered evaluators may read any
+        // existing context field, so preserve the complete context when that table is used.
+        bool needsFirstAttackDamage = !StrategicEffectMirrors.IsEmpty;
+        bool hasRecurringEnergy = false;
+        int danseMacabreEnergyThreshold = 0;
+        int demesneAmount = 0;
         for (int powerIndex = 0; powerIndex < effectivePowers.Count; powerIndex++)
         {
             PowerModel power = effectivePowers[powerIndex];
-            if (!ReferenceEquals(power.Owner, _player.Creature)
-                || power.Amount <= 0
-                || power.TypeForCurrentAmount != PowerType.Buff
-                || power is ITemporaryPower)
-            {
+            contributes[powerIndex] = StrategicEffectMirrors.Contributes(power, _player.Creature);
+            if (!contributes[powerIndex])
                 continue;
+            needsFirstAttackDamage |= power is LethalityPower;
+            strategicRequirements |= StrategicEffectModel.Requirements(
+                power,
+                policy.Act3BossStrategy);
+            needsExhaustDrawTiming |= power is DarkEmbracePower;
+            skillsExhaust |= power is CorruptionPower && ReferenceEquals(power.Owner, _player.Creature);
+            hasRecurringEnergy |= power is OrbitPower or AutomationPower;
+            if (policy.Act3BossStrategy)
+            {
+                hasPagestorm |= power is PagestormPower;
+                if (power is DemesnePower) demesneAmount += Math.Max(0, power.Amount);
+                if (power is DanseMacabrePower danseMacabre)
+                {
+                    danseMacabreEnergyThreshold = Math.Max(
+                        danseMacabreEnergyThreshold,
+                        danseMacabre.DynamicVars.Energy.IntValue);
+                }
             }
-            strategicRequirements |= StrategicEffectModel.Requirements(power);
         }
         StrategicEffectContext? strategicContext = null;
         StrategicEffectVector strategicEffects = StrategicEffectVector.Zero;
         int offensivePersistentBuffValue = 0;
+        int refundEnergySpend = 0, refundEnergyCapacity = 0, refundDraws = 0;
         PersistentSetupTraits persistentSetupTraits = PersistentSetupTraits.None;
         for (int powerIndex = 0; powerIndex < effectivePowers.Count; powerIndex++)
         {
             PowerModel power = effectivePowers[powerIndex];
-            if (!ReferenceEquals(power.Owner, _player.Creature)
-                || power.Amount <= 0
-                || power.TypeForCurrentAmount != PowerType.Buff
-                || power is ITemporaryPower)
-            {
+            if (!contributes[powerIndex])
                 continue;
+            if (strategicContext is null)
+            {
+                StrategicEffectContext context = StrategicEffectContext.Build(
+                    liveCards, enemyHp, focus.TotalThreat, focus.IncomingHitCount, strategicRequirements, skillsExhaust) with
+                {
+                    Act3BossInteractions = policy.Act3BossStrategy,
+                    FirstAttackDamage = policy.Act3BossStrategy && needsFirstAttackDamage
+                        ? CaptureFirstAttackDamage(simulator, combat, playerState, liveCards) : 0,
+                };
+                if (hasRecurringEnergy)
+                {
+                    // Use the existing bounded card-access horizon, including future natural hand draws.
+                    // Refunds share only the energy demand left after current energy and normal turn resets.
+                    (refundEnergySpend, refundEnergyCapacity) = CaptureEnergyRefundWindow(
+                        simulator, combat, playerState, liveCards, context, skillsExhaust);
+                    refundDraws = Math.Max(0, context.ReachableCards - playerState.Hand.Cards.Count);
+                }
+                if (policy.Act3BossStrategy
+                    && (hasPagestorm || danseMacabreEnergyThreshold > 0 || demesneAmount > 0))
+                {
+                    var interactions =
+                        CaptureAct3BossInteractionPotential(
+                            simulator,
+                            combat,
+                            playerState,
+                            _player,
+                            liveCards,
+                            context.RemainingTurns,
+                            context.ReachableCards,
+                            hasPagestorm,
+                            skillsExhaust,
+                            demesneAmount,
+                            danseMacabreEnergyThreshold);
+                    context = context with
+                    {
+                        Act3BossInteractions = true,
+                        EtherealDrawTriggers = interactions.EtherealDrawTriggers,
+                        PagestormBonusDrawCapacity = interactions.PagestormBonusDrawCapacity,
+                        HighEnergyPlays = interactions.HighEnergyPlays,
+                        DemesneEnergyGain = interactions.DemesneEnergyGain,
+                        DemesneDrawGain = interactions.DemesneDrawGain,
+                    };
+                }
+                strategicContext = needsExhaustDrawTiming
+                    ? context.WithExhaustDrawTiming(effectivePowers, playerState.Hand.Cards, _player.Creature) : context;
             }
-            strategicContext ??= StrategicEffectContext.Build(
-                liveCards,
-                enemyHp,
-                focus.TotalThreat,
-                focus.IncomingHitCount,
-                strategicRequirements);
-            StrategicEffectVector effect = StrategicEffectModel.Evaluate(
-                power,
-                strategicContext.Value);
+            StrategicEffectContext effectContext = strategicContext.Value;
+            if (power is OrbitPower orbit)
+            {
+                int gain = (int)Math.Min(refundEnergyCapacity,
+                    ((long)refundEnergySpend + combat.GetOrbitEnergyRemainder(orbit)) / 4 * orbit.Amount);
+                refundEnergyCapacity -= gain;
+                effectContext = effectContext with { RecurringEnergyGain = gain };
+            }
+            else if (power is AutomationPower automation)
+            {
+                int cardsLeft = simulator.StateStore.Peek(automation,
+                    () => new AutomationPredictionState(automation)).CardsLeft;
+                int triggers = refundDraws < cardsLeft ? 0 : 1 + (refundDraws - cardsLeft) / 10;
+                int gain = (int)Math.Min(refundEnergyCapacity, (long)triggers * automation.Amount);
+                refundEnergyCapacity -= gain;
+                effectContext = effectContext with { RecurringEnergyGain = gain };
+            }
+            StrategicEffectVector effect = StrategicEffectModel.Evaluate(power, effectContext);
             strategicEffects += effect;
             offensivePersistentBuffValue += effect.DamagePotential + effect.ScalingPotential;
             persistentSetupTraits |= PersistentPowerSetupTrait(power);
@@ -238,12 +381,17 @@ internal sealed partial class CombatBeamSolver
                 latentSetupValue += LatentCardSetupValue(preview);
             }
         }
-        int replayPotentialValue = ReplayPotentialValue(liveCards);
-        int retainedHandValue = playerState.Hand.Cards
-            .Where(card => card.Preview.ShouldRetainThisTurn)
-            .Sum(card => Math.Max(
-                1,
-                (int)Math.Ceiling(CardChoiceSupport.CardValue(card.Preview) * 2d)));
+        int replayPotentialValue = ReplayPotentialValue(simulator, combat, liveCards);
+        int retainedHandValue = 0;
+        IReadOnlyList<PredictedCard> handCards = playerState.Hand.Cards;
+        for (int cardIndex = 0; cardIndex < handCards.Count; cardIndex++)
+        {
+            PredictedCard card = handCards[cardIndex];
+            if (card.Preview.ShouldRetainThisTurn)
+                retainedHandValue = checked(retainedHandValue + Math.Max(
+                    1,
+                    (int)Math.Ceiling(CardChoiceSupport.CardValue(card.Preview) * 2d)));
+        }
         int freeCardOpportunityValue = FreeCardOpportunityValue(
             simulator,
             combat,
@@ -273,20 +421,26 @@ internal sealed partial class CombatBeamSolver
             : simulator.State.GetCreature(currentOsty).CurrentHp;
         int ostyMaxHp = combat.GetOstyMaxHp(simulator, _player);
         persistentBuffValue += liveCards.Count(card => card.Preview is Soul);
-        int delayedDamageValue = combat.KnownEnemies
-            .Where(enemy => combat.ContainsCreature(enemy) && simulator.State.GetCreature(enemy).IsAlive)
-            .Sum(enemy =>
-            {
-                int poison = Math.Max(0, combat.GetAmount<PoisonPower>(enemy));
-                int demise = Math.Max(0, combat.GetAmount<DemisePower>(enemy));
-                int doom = Math.Max(0, combat.GetAmount<DoomPower>(enemy));
-                int currentHp = Math.Max(0, simulator.State.GetCreature(enemy).CurrentHp);
-                int cappedDoom = Math.Min(currentHp, doom);
-                int doomProgress = currentHp <= 0
-                    ? 0
-                    : (int)Math.Min(currentHp, (long)cappedDoom * cappedDoom / currentHp);
-                return poison + demise + doomProgress;
-            });
+        // Where + Sum 两个闭包加一个装箱的 ForkableList 枚举器，换成按下标累加：
+        // 筛选条件、累加顺序与每项的整数运算完全不变。
+        IReadOnlyList<Creature> knownEnemies = combat.KnownEnemies;
+        int delayedDamageValue = 0;
+        for (int enemyIndex = 0; enemyIndex < knownEnemies.Count; enemyIndex++)
+        {
+            Creature enemy = knownEnemies[enemyIndex];
+            if (!combat.ContainsCreature(enemy) || !simulator.State.GetCreature(enemy).IsAlive)
+                continue;
+            int poison = Math.Max(0, combat.GetAmount<PoisonPower>(enemy));
+            int demise = Math.Max(0, combat.GetAmount<DemisePower>(enemy));
+            int doom = Math.Max(0, combat.GetAmount<DoomPower>(enemy));
+            int currentHp = Math.Max(0, simulator.State.GetCreature(enemy).CurrentHp);
+            int cappedDoom = Math.Min(currentHp, doom);
+            int doomProgress = currentHp <= 0
+                ? 0
+                : (int)Math.Min(currentHp, (long)cappedDoom * cappedDoom / currentHp);
+            // Enumerable.Sum 对 int 是 checked 累加，这里照搬同样的溢出语义。
+            delayedDamageValue = checked(delayedDamageValue + poison + demise + doomProgress);
+        }
         int reactiveDamageValue = Math.Max(
             0,
             combat.GetAmount<SleightOfFleshPower>(_player.Creature));
@@ -302,8 +456,9 @@ internal sealed partial class CombatBeamSolver
         uint? mostVulnerableTargetCombatId = null;
         int mostVulnerableTurns = 0;
         StateFingerprintBuilder enemyControlDistribution = new();
-        foreach (Creature enemy in combat.KnownEnemies)
+        for (int enemyIndex = 0; enemyIndex < knownEnemies.Count; enemyIndex++)
         {
+            Creature enemy = knownEnemies[enemyIndex];
             if (!combat.ContainsCreature(enemy) || !simulator.State.GetCreature(enemy).IsAlive)
                 continue;
             int strengthSuppression = -combat.GetAmount<StrengthPower>(enemy);
@@ -325,11 +480,17 @@ internal sealed partial class CombatBeamSolver
             enemyControlDistribution.Add(vulnerableTurns);
         }
         StateFingerprint enemyControlDistributionKey = enemyControlDistribution.Finish();
-        int sandpitRemaining = combat.EffectivePowers()
-            .OfType<SandpitPower>()
-            .Where(power => ReferenceEquals(power.Target, _player.Creature)
+        int sandpitRemaining = 0;
+        IReadOnlyList<PowerModel> sandpitPowers = combat.EffectivePowers();
+        for (int powerIndex = 0; powerIndex < sandpitPowers.Count; powerIndex++)
+        {
+            if (sandpitPowers[powerIndex] is SandpitPower power
+                && ReferenceEquals(power.Target, _player.Creature)
                 && simulator.State.GetCreature(power.Owner).IsAlive)
-            .Sum(power => Math.Max(0, power.Amount));
+            {
+                sandpitRemaining = checked(sandpitRemaining + Math.Max(0, power.Amount));
+            }
+        }
         int vulnerableAttackWindow = Math.Min(
             SolverWeights.VulnerableAttackWindowCap,
             retainedAttackValue);
@@ -348,10 +509,18 @@ internal sealed partial class CombatBeamSolver
             out int pocketwatchCardsPlayedThisTurn,
             out int pocketwatchCardsPlayedLastTurn,
             out int pocketwatchCardThreshold);
-        int potionUseCount = combat.PotionUses.Count;
-        int potionStrategicCost = combat.PotionUses.Sum(use => use.StrategicHpCost);
-        int automaticPotionUseCount = combat.PotionUses.Count(use => use.Automatic);
-        (int reachableHandValue, int zeroCostPlayableCount) =
+        IReadOnlyList<PredictedPotionUse> potionUses = combat.PotionUses;
+        int potionUseCount = potionUses.Count;
+        int potionStrategicCost = 0;
+        int automaticPotionUseCount = 0;
+        for (int useIndex = 0; useIndex < potionUses.Count; useIndex++)
+        {
+            PredictedPotionUse use = potionUses[useIndex];
+            potionStrategicCost = checked(potionStrategicCost + use.StrategicHpCost);
+            if (use.Automatic)
+                automaticPotionUseCount = checked(automaticPotionUseCount + 1);
+        }
+        (int reachableHandValue, int zeroCostPlayableCount, int playableAttackCount) =
             CalculateReachableHandPotential(simulator, combat, playerState);
         StateFingerprint potionInventoryKey = BuildPotionInventoryKey(combat);
         StateFingerprint cycleShapeKey = BuildCycleShapeKey(
@@ -372,6 +541,8 @@ internal sealed partial class CombatBeamSolver
             player.CurrentHp,
             player.MaxHp,
             cumulativePlayerHpLost,
+            recoveredPlayerHp,
+            deathSaveRelicHpRestored,
             longTermResourceValue,
             angerCopiesGenerated,
             projectedHp,
@@ -409,7 +580,7 @@ internal sealed partial class CombatBeamSolver
             enemyControlDistributionKey,
             sandpitRemaining,
             liveDeckClutter,
-            liveCards.Count,
+            liveCardCount,
             outstandingStolenResource,
             offensiveProgressValue,
             playerState.Energy,
@@ -430,7 +601,37 @@ internal sealed partial class CombatBeamSolver
             processedEnemyDeaths,
             boundary,
             predictionGaps,
-            simulator);
+            simulator,
+            simulator.TerminalStamp)
+        {
+            DefensiveBlockValue = MeasureDefensiveBlockReserve(combat, player, threat),
+            ExplicitPotionStrategicCost = combat.PotionUses
+                .Where(use => !use.Automatic).Sum(use => use.StrategicHpCost),
+            GrowthHpCredit = growthHpCredit,
+            RelicCounters = relicCounters,
+            GrowthRewards = growthRewards,
+            FutureHealPotential = root.HasOnlyPostCombatHealing
+                ? Math.Max(0, root.PostCombatRelicHeal.UnconditionalHeal)
+                : int.MaxValue,
+            BrightestFlameMaxHpSpent = combat.BrightestFlameMaxHpSpent,
+            UnrecoveredGold = combat.UnrecoveredLoot(simulator).Gold,
+            UnrecoveredCards = combat.UnrecoveredLoot(simulator).Cards,
+            DeathSavePotionHpRestored = deathSavePotionHpRestored,
+            DeathSaveUseCount = combat.DeathSaveUseCount,
+            ProjectedDeathSaveUseCount = combat.DeathSaveUseCount + threat.DeathSaveUseCount,
+            PlayableAttackCount = playableAttackCount,
+        };
+    }
+
+    private int MeasureDefensiveBlockReserve(
+        SimulatedCombatState combat, SimCreatureState player, ThreatProjection threat)
+    {
+        int consumed = Math.Clamp(threat.BlockConsumed, 0, Math.Max(0, player.Block));
+        int remaining = Math.Max(0, player.Block - consumed);
+        if (remaining == 0 || combat.ShouldClearBlock(_player.Creature, out AbstractModel? preventer))
+            return consumed;
+        int retained = PersistentRelicSupport.BlockAfterPreventingClear(preventer, _player.Creature, remaining);
+        return consumed + Math.Min(Math.Max(0, retained), Math.Max(0, player.MaxHp));
     }
 
     private static StateFingerprint BuildCycleShapeKey(
@@ -503,29 +704,30 @@ internal sealed partial class CombatBeamSolver
         return key.Finish();
     }
 
-    private static (int Value, int ZeroCostPlayableCount) CalculateReachableHandPotential(
+    private static (int Value, int ZeroCostPlayableCount, int PlayableAttackCount) CalculateReachableHandPotential(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         SimPlayerCombatState playerState)
     {
-        List<(int Energy, int Stars, int Value)> playable = [];
-        int totalEnergyCost = 0;
-        int totalStarCost = 0;
+        int handCount = playerState.Hand.Cards.Count;
+        Span<(int Energy, int Stars, int Value)> playable = handCount <= 64
+            ? stackalloc (int, int, int)[handCount]
+            : new (int, int, int)[handCount];
+        int playableCount = 0;
         int zeroCostPlayableCount = 0;
+        int playableAttackCount = 0;
         foreach (PredictedCard card in playerState.Hand)
         {
-            if (!combat.CanPlayCard(simulator, card))
+            if (!combat.CanPlayCard(simulator, card, out int energyCost, out int starCost))
                 continue;
-            int energyCost = card.Preview.EnergyCost.CostsX
-                ? Math.Max(0, playerState.Energy)
-                : Math.Max(0, card.GetEnergyCostWithModifiers(simulator, playerState));
-            int starCost = card.Preview.HasStarCostX
-                ? Math.Max(0, playerState.Stars)
-                : Math.Max(0, card.GetStarCostWithModifiers(simulator, playerState));
-            int value = Math.Max(1, (int)Math.Ceiling(CardChoiceSupport.CardValue(card.Preview)));
-            playable.Add((energyCost, starCost, value));
-            totalEnergyCost += energyCost;
-            totalStarCost += starCost;
+            energyCost = Math.Max(0, energyCost);
+            starCost = Math.Max(0, starCost);
+            double cardValue = BranchCardValue(simulator, combat, card)
+                * (1 + Math.Max(0, card.Preview.GetEnchantedReplayCount()));
+            int value = Math.Max(1, (int)Math.Ceiling(cardValue));
+            playable[playableCount++] = (energyCost, starCost, value);
+            if (card.Preview.Type == CardType.Attack)
+                playableAttackCount++;
             if (energyCost == 0
                 && starCost == 0
                 && !card.Preview.EnergyCost.CostsX
@@ -535,20 +737,8 @@ internal sealed partial class CombatBeamSolver
             }
         }
 
-        int energyCapacity = Math.Min(Math.Max(0, playerState.Energy), totalEnergyCost);
-        int starCapacity = Math.Min(Math.Max(0, playerState.Stars), totalStarCost);
-        int[,] best = new int[energyCapacity + 1, starCapacity + 1];
-        foreach ((int energyCost, int starCost, int value) in playable)
-        {
-            for (int energy = energyCapacity; energy >= energyCost; energy--)
-            for (int stars = starCapacity; stars >= starCost; stars--)
-            {
-                best[energy, stars] = Math.Max(
-                    best[energy, stars],
-                    best[energy - energyCost, stars - starCost] + value);
-            }
-        }
-        return (best[energyCapacity, starCapacity], zeroCostPlayableCount);
+        return (ReachableHandValue.Calculate(playable[..playableCount], playerState.Energy, playerState.Stars),
+            zeroCostPlayableCount, playableAttackCount);
     }
 
     /// <summary>
@@ -638,10 +828,17 @@ internal sealed partial class CombatBeamSolver
         SimPlayerCombatState playerState,
         CardType cardType,
         int freeUses)
-    {
-        if (freeUses <= 0)
-            return 0;
+        // The lambdas below capture parameters, which allocates their closure on method entry.
+        // Keep the common no-free-uses case in a method without captures.
+        => freeUses <= 0 ? 0 : RankedFreeCardOpportunityValue(simulator, combat, playerState, cardType, freeUses);
 
+    private static int RankedFreeCardOpportunityValue(
+        CombatPredictionSimulator simulator,
+        SimulatedCombatState combat,
+        SimPlayerCombatState playerState,
+        CardType cardType,
+        int freeUses)
+    {
         return playerState.Hand.Cards
             .Where(card => card.Preview.Type == cardType
                 && !card.Preview.EnergyCost.CostsX
@@ -663,31 +860,45 @@ internal sealed partial class CombatBeamSolver
 
     private StateFingerprint BuildUnorderedPileKey(SimPlayerCombatState playerState)
     {
-        StateFingerprintBuilder key = new();
-        AppendUnorderedPile(ref key, playerState.Hand, 'H');
-        AppendUnorderedPile(ref key, playerState.DrawPile, 'D');
-        AppendUnorderedPile(ref key, playerState.DiscardPile, 'C');
-        AppendUnorderedPile(ref key, playerState.ExhaustPile, 'X');
-        return key.Finish();
+        StateFingerprintBuilder unordered = new();
+        AppendUnorderedPileKey(ref unordered, playerState.Hand, 'H');
+        AppendUnorderedPileKey(ref unordered, playerState.DrawPile, 'D');
+        AppendUnorderedPileKey(ref unordered, playerState.DiscardPile, 'C');
+        AppendUnorderedPileKey(ref unordered, playerState.ExhaustPile, 'X');
+        return unordered.Finish();
     }
 
-    private void AppendUnorderedPile(
-        ref StateFingerprintBuilder key,
+    private static int PileOrderInvariantBit(char marker) => marker switch
+    {
+        'H' => 1,
+        'D' => 2,
+        'C' => 4,
+        'X' => 8,
+        _ => 0,
+    };
+
+    private void AppendUnorderedPileKey(
+        ref StateFingerprintBuilder unordered,
         SimCardPile pile,
         char marker)
     {
-        ulong first = 0;
-        ulong second = 0;
-        foreach (PredictedCard card in pile)
+        if (!pile.TryGetCachedUnorderedFingerprint(out ulong first, out ulong second))
         {
-            StateFingerprint cardKey = BuildCardStateFingerprint(card);
-            first += StateFingerprintBuilder.MixFirst(cardKey.First);
-            second += StateFingerprintBuilder.MixSecond(cardKey.Second);
+            first = 0;
+            second = 0;
+            foreach (PredictedCard card in pile)
+            {
+                StateFingerprint cardKey = BuildCardStateFingerprint(card);
+                first += StateFingerprintBuilder.MixFirst(cardKey.First);
+                second += StateFingerprintBuilder.MixSecond(cardKey.Second);
+            }
+            pile.SetCachedUnorderedFingerprint(first, second);
         }
-        key.Add(marker);
-        key.Add(pile.Cards.Count);
-        key.Add(first);
-        key.Add(second);
+        // Keep the unordered key's values and append order exactly unchanged.
+        unordered.Add(marker);
+        unordered.Add(pile.Cards.Count);
+        unordered.Add(first);
+        unordered.Add(second);
     }
 
     private (StateFingerprint Key, int Value) BuildProjectedShuffleOrder(
@@ -697,11 +908,11 @@ internal sealed partial class CombatBeamSolver
         // StableShuffle sorts a second List copy before shuffling. This list is already private
         // to the snapshot, so performing the same sort and shuffle in place avoids
         // another deck-sized backing array without changing RNG consumption or ordering.
-        var shuffleRng = simulator.Rng.Shuffle.Clone();
+        var shuffleRng = simulator.Rng.ShuffleState.ToRng();
         StableShuffleProjection(cards, shuffleRng);
 
         StateFingerprintBuilder key = new();
-        key.Add(simulator.Rng.Shuffle.Counter());
+        key.Add(simulator.Rng.ShuffleState.Counter);
         key.Add(cards.Count);
         int value = 0;
         for (int index = 0; index < cards.Count; index++)
@@ -723,7 +934,30 @@ internal sealed partial class CombatBeamSolver
         cards.UnstableShuffle(rng);
     }
 
-    private static int ReplayPotentialValue(IEnumerable<PredictedCard> cards)
+    // The static choice value omits CalculatedDamage. Use only registered branch-local
+    // calculations here: an upgrade must also change attack and replay setup values.
+    // This is intermediate guidance, not a damage prediction or a final-plan policy.
+    private static double BranchCardValue(
+        CombatPredictionSimulator simulator, SimulatedCombatState combat, PredictedCard card)
+    {
+        double value = CardChoiceSupport.CardValue(card.Preview);
+        if (card.Preview.Type != CardType.Attack
+            || !card.Preview.DynamicVars.TryGetValue("CalculatedDamage", out var variable)
+            || variable is not MegaCrit.Sts2.Core.Localization.DynamicVars.CalculatedVar calculated
+            || !CalculatedVarSpecRegistry.SupportedTypes.Contains(card.Preview.GetType()))
+            return value;
+        decimal damage = 0m;
+        foreach (Creature enemy in combat.Enemies)
+        {
+            if (simulator.State.IsHittable(enemy)
+                && CalculatedVarSpecRegistry.TryCalculate(calculated, simulator, card, enemy, out decimal candidate))
+                damage = Math.Max(damage, candidate);
+        }
+        return value + (double)damage - CardChoiceSupport.DynamicVarBaseValue(card.Preview.DynamicVars, "Damage");
+    }
+
+    private static int ReplayPotentialValue(
+        CombatPredictionSimulator simulator, SimulatedCombatState combat, IEnumerable<PredictedCard> cards)
     {
         int total = 0;
         foreach (PredictedCard card in cards)
@@ -735,7 +969,7 @@ internal sealed partial class CombatBeamSolver
                 continue;
             }
 
-            double perPlayValue = Math.Max(4d, CardChoiceSupport.CardValue(card.Preview));
+            double perPlayValue = Math.Max(4d, BranchCardValue(simulator, combat, card));
             total += (int)Math.Ceiling(perPlayValue * replayCount);
             if (total >= SolverWeights.ReplayPotentialBeamCap)
                 return SolverWeights.ReplayPotentialBeamCap;
@@ -756,6 +990,175 @@ internal sealed partial class CombatBeamSolver
             _ => PersistentSetupTraits.None,
         };
 
+    private (int Spend, int Capacity) CaptureEnergyRefundWindow(
+        CombatPredictionSimulator simulator,
+        SimulatedCombatState combat,
+        SimPlayerCombatState playerState,
+        IReadOnlyList<PredictedCard> liveCards,
+        StrategicEffectContext context,
+        bool skillsExhaust)
+    {
+        if (liveCards.Count == 0 || context.ReachableCards == 0)
+            return (0, 0);
+        int maxEnergy = Math.Max(0, PersistentPowerSupport.GetModifiedMaxEnergy(combat, _player));
+        int futureTurns = Math.Min(Math.Max(0, context.RemainingTurns - 1),
+            (Math.Max(0, context.ReachableCards - playerState.Hand.Cards.Count)
+                + CombatManager.baseHandDrawCount - 1) / CombatManager.baseHandDrawCount);
+        long energySupply = Math.Max(0, playerState.Energy) + (long)maxEnergy * futureTurns;
+        double visits = (double)context.ReachableCards / liveCards.Count;
+        double energyDemand = 0;
+        foreach (PredictedCard card in liveCards)
+        {
+            if (card.HasKeyword(simulator.State, CardKeyword.Unplayable)
+                || skillsExhaust && card.Preview.Type == CardType.Skill)
+                continue;
+            int cost = card.Preview.EnergyCost.CostsX ? maxEnergy
+                : Math.Max(0, card.Preview.EnergyCost.GetWithModifiers(CostModifiers.Local));
+            bool singleUse = card.Preview.Type == CardType.Power
+                || card.HasKeyword(simulator.State, CardKeyword.Exhaust);
+            energyDemand += cost * (singleUse ? Math.Min(1, visits) : visits);
+        }
+        long demand = (long)Math.Ceiling(energyDemand);
+        return ((int)Math.Min(int.MaxValue, Math.Min(energySupply, demand)),
+            (int)Math.Min(int.MaxValue, Math.Max(0, demand - energySupply)));
+    }
+
+    private static (int EtherealDrawTriggers, int PagestormBonusDrawCapacity, int HighEnergyPlays,
+        int DemesneEnergyGain, int DemesneDrawGain)
+        CaptureAct3BossInteractionPotential(
+            CombatPredictionSimulator simulator,
+            SimulatedCombatState combat,
+            SimPlayerCombatState playerState,
+            Player player,
+            IReadOnlyList<PredictedCard> liveCards,
+            int remainingTurns,
+            int reachableCards,
+            bool hasPagestorm,
+            bool skillsExhaust,
+            int demesneAmount,
+            int danseMacabreEnergyThreshold)
+    {
+        int boundedTurns = Math.Max(1, remainingTurns);
+        int boundedReachableCards = Math.Max(0, reachableCards);
+        int etherealDrawTriggers = 0;
+        int pagestormBonusDrawCapacity = 0;
+        if (hasPagestorm)
+        {
+            int futurePileCards = playerState.DrawPile.Cards.Count
+                + playerState.DiscardPile.Cards.Count;
+            int futureEtherealCards = playerState.DrawPile.Cards.Count(card =>
+                    card.HasKeyword(simulator.State, CardKeyword.Ethereal))
+                + playerState.DiscardPile.Cards.Count(card =>
+                    card.HasKeyword(simulator.State, CardKeyword.Ethereal));
+            int drawPerTurn = PersistentPowerSupport.GetModifiedHandDraw(
+                combat,
+                player,
+                CombatManager.baseHandDrawCount);
+            if (futurePileCards > 0 && futureEtherealCards > 0 && drawPerTurn > 0)
+            {
+                int reachableFutureDraws = (int)Math.Min(
+                    (long)futurePileCards * 2,
+                    boundedReachableCards);
+                etherealDrawTriggers = (int)Math.Min(
+                    (long)futureEtherealCards * 2,
+                    ((long)futureEtherealCards * reachableFutureDraws
+                        + futurePileCards - 1) / futurePileCards);
+
+                bool futureBonusDrawBlocked = combat.RelicsOf(player)
+                    .Any(relic => relic is Fiddle && !relic.IsMelted);
+                if (!futureBonusDrawBlocked)
+                {
+                    int maxHandSize = simulator.GetMaxHandSize(player);
+                    int retainedCards = playerState.Hand.Cards.Count(card =>
+                        card.Preview.ShouldRetainThisTurn);
+                    int firstTurnSpace = Math.Max(0, maxHandSize - retainedCards);
+                    int firstTurnBonusSpace = Math.Max(
+                        0,
+                        firstTurnSpace - Math.Min(firstTurnSpace, drawPerTurn));
+                    int laterTurnBonusSpace = Math.Max(
+                        0,
+                        maxHandSize - Math.Min(maxHandSize, drawPerTurn));
+                    pagestormBonusDrawCapacity = (int)Math.Min(
+                        (long)futurePileCards * 2,
+                        (long)firstTurnBonusSpace
+                            + (long)Math.Max(0, boundedTurns - 1) * laterTurnBonusSpace);
+                }
+            }
+            // NoDrawPower blocks only non-hand draws in the current turn and is consumed at
+            // turn end. This estimate starts at the next hand draw, so it remains available.
+        }
+
+        int highEnergyPlays = 0;
+        if (danseMacabreEnergyThreshold > 0 && liveCards.Count > 0)
+        {
+            List<int> highEnergyCosts = [];
+            int highEnergyCards = 0;
+            foreach (PredictedCard card in liveCards)
+            {
+                if (card.HasKeyword(simulator.State, CardKeyword.Unplayable))
+                    continue;
+                int cost = card.GetEnergyCostWithModifiers(simulator, playerState);
+                if (cost < danseMacabreEnergyThreshold)
+                    continue;
+                highEnergyCards++;
+                highEnergyCosts.Add(cost);
+                if (card.Preview.Type != CardType.Power
+                    && !card.HasKeyword(simulator.State, CardKeyword.Exhaust)
+                    && !(skillsExhaust && card.Preview.Type == CardType.Skill))
+                    highEnergyCosts.Add(cost);
+            }
+            int reachableHighEnergyCards = (int)Math.Min(
+                highEnergyCosts.Count,
+                ((long)highEnergyCards * boundedReachableCards
+                    + liveCards.Count - 1) / liveCards.Count);
+            int futureMaxEnergy = PersistentPowerSupport.GetModifiedMaxEnergy(combat, player);
+            Span<int> turnEnergy = stackalloc int[boundedTurns];
+            turnEnergy[0] = Math.Max(0, playerState.Energy);
+            turnEnergy[1..].Fill(Math.Max(0, futureMaxEnergy));
+            highEnergyCosts.Sort();
+            for (int index = 0;
+                 index < reachableHighEnergyCards
+                    && index < highEnergyCosts.Count;
+                 index++)
+            {
+                for (int turn = 0; turn < turnEnergy.Length; turn++)
+                {
+                    if (turnEnergy[turn] < highEnergyCosts[index]) continue;
+                    turnEnergy[turn] -= highEnergyCosts[index];
+                    highEnergyPlays++;
+                    break;
+                }
+            }
+        }
+
+        int demesneEnergyGain = 0, demesneDrawGain = 0;
+        int futureTurns = Math.Max(0, boundedTurns - 1);
+        if (demesneAmount > 0 && futureTurns > 0 && liveCards.Count > 0)
+        {
+            long deckEnergyDemand = 0;
+            foreach (PredictedCard card in liveCards)
+                if (!card.HasKeyword(simulator.State, CardKeyword.Unplayable))
+                    deckEnergyDemand += Math.Max(0, card.GetEnergyCostWithModifiers(simulator, playerState));
+            long reachableEnergyDemand = (deckEnergyDemand * boundedReachableCards
+                + liveCards.Count - 1) / liveCards.Count;
+            int baseEnergy = Math.Max(0,
+                PersistentPowerSupport.GetModifiedMaxEnergy(combat, player) - demesneAmount);
+            long baseEnergySupply = Math.Max(0, playerState.Energy) + (long)baseEnergy * futureTurns;
+            demesneEnergyGain = (int)Math.Clamp(reachableEnergyDemand - baseEnergySupply,
+                0L, (long)demesneAmount * futureTurns);
+            int baseDraw = Math.Max(0, PersistentPowerSupport.GetModifiedHandDraw(
+                combat, player, CombatManager.baseHandDrawCount) - demesneAmount);
+            int retained = playerState.Hand.Cards.Count(card => card.Preview.ShouldRetainThisTurn);
+            int firstSpace = Math.Max(0, simulator.GetMaxHandSize(player) - retained - baseDraw);
+            int laterSpace = Math.Max(0, simulator.GetMaxHandSize(player) - baseDraw);
+            demesneDrawGain = (int)Math.Min((long)liveCards.Count * 2,
+                Math.Min(demesneAmount, firstSpace)
+                + (long)Math.Max(0, futureTurns - 1) * Math.Min(demesneAmount, laterSpace));
+        }
+        return (etherealDrawTriggers, pagestormBonusDrawCapacity, highEnergyPlays,
+            demesneEnergyGain, demesneDrawGain);
+    }
+
     private static int OrbRetentionValue(
         CombatPredictionSimulator simulator,
         IReadOnlyList<OrbModel> orbs,
@@ -773,6 +1176,50 @@ internal sealed partial class CombatBeamSolver
             };
         }
         return checked((int)Math.Ceiling(value));
+    }
+
+    /// <summary>手里这张牌会不会在本回合结束时自己消耗掉。</summary>
+    /// <remarks>
+    /// 虚无牌回合结束时若仍在手牌就自己消耗，判据与
+    /// <c>CombatPredictionSimulator.EndTurn</c> 的虚无分支一致。
+    ///
+    /// 这类牌不该计入牌库杂物：无论路线是否提前把它移除，到本回合边界它都已经不在了，
+    /// 同一笔杂物减少两边都会拿到。把它算进来等于给"提前移除"发一笔本来就会到账的钱，
+    /// 于是一次有限的消耗看上去比移除真正长期占位的牌更划算。
+    ///
+    /// 只排除手牌。抽牌堆和弃牌堆里的同一张牌本回合不会自己走，那时它确实是杂物。
+    /// </remarks>
+    private static bool LeavesHandAtTurnEnd(
+        CombatPredictionSimulator simulator,
+        SimPlayerCombatState playerState,
+        PredictedCard card)
+    {
+        if (card.GetPile(playerState)?.Type is not PileType.Hand)
+            return false;
+        if (card.Preview.HasTurnEndInHandEffect)
+            return false;
+        return card.HasKeyword(simulator.State, CardKeyword.Ethereal)
+            && Hook.ShouldEtherealTrigger(simulator.State.CombatState, card.Preview);
+    }
+
+    private int CaptureFirstAttackDamage(CombatPredictionSimulator simulator,
+        SimulatedCombatState combat, SimPlayerCombatState playerState, IReadOnlyList<PredictedCard> cards)
+    {
+        int energy = Math.Max(playerState.Energy, PersistentPowerSupport.GetModifiedMaxEnergy(combat, _player));
+        int best = 0;
+        foreach (PredictedCard card in cards)
+        {
+            if (card.Preview.Type != CardType.Attack || card.Preview.Tags.Contains(CardTag.OstyAttack)
+                || card.HasKeyword(simulator.State, CardKeyword.Unplayable)
+                || card.GetEnergyCostWithModifiers(simulator, playerState) > energy)
+                continue;
+            int hits = card.Preview is Eradicate ? Math.Max(0, energy)
+                : CardMechanismFacts.AttackHits(card.Preview.Id.Entry,
+                    card.Preview.DynamicVars.TryGetValue("Repeat", out var repeat) ? repeat.IntValue : 0);
+            int damage = (int)Math.Floor(CardChoiceSupport.DynamicVarBaseValue(card.Preview.DynamicVars, "Damage"));
+            best = Math.Max(best, damage * hits);
+        }
+        return best;
     }
 
     private static int LatentCardSetupValue(CardModel card)
@@ -820,8 +1267,10 @@ internal sealed partial class CombatBeamSolver
         int bestThreat = 0;
         int totalThreat = 0;
         int incomingHitCount = 0;
-        foreach (Creature enemy in combat.KnownEnemies)
+        IReadOnlyList<Creature> knownEnemies = combat.KnownEnemies;
+        for (int enemyIndex = 0; enemyIndex < knownEnemies.Count; enemyIndex++)
         {
+            Creature enemy = knownEnemies[enemyIndex];
             SimCreatureState enemyState = simulator.State.GetCreature(enemy);
             if (!combat.ContainsCreature(enemy)
                 || !enemyState.IsAlive
@@ -835,16 +1284,21 @@ internal sealed partial class CombatBeamSolver
             int currentThreat = 0;
             if (!combat.WillSkipNextMove(enemy))
             {
-                foreach (ForecastMove move in moves)
+                for (int moveIndex = 0; moveIndex < moves.Count; moveIndex++)
                 {
+                    ForecastMove move = moves[moveIndex];
                     if (!ReferenceEquals(move.Owner, enemy))
                         continue;
-                    foreach (ForecastAttackHit hit in move.AttackHits)
+                    IReadOnlyList<ForecastAttackHit> attackHits = move.AttackHits;
+                    for (int hitIndex = 0; hitIndex < attackHits.Count; hitIndex++)
                     {
                         incomingHitCount++;
                         currentThreat += Math.Max(
                             0,
-                            combat.AdjustMonsterMoveDamage(enemy, move.Move.Id, hit.BaseDamage));
+                            combat.AdjustMonsterMoveDamage(
+                                enemy,
+                                move.Move.Id,
+                                attackHits[hitIndex].BaseDamage));
                     }
                 }
             }
@@ -889,23 +1343,43 @@ internal sealed partial class CombatBeamSolver
         return summary;
     }
 
-    private int ProjectHpAfterThreat(
+    /// <summary>
+    /// What the incoming enemy intent leaves the player at, and which one-shot death saves must be spent to
+    /// get there.
+    /// </summary>
+    private readonly record struct ThreatProjection(int Hp, int DeathSaveHpRestored, int DeathSaveUseCount, int BlockConsumed = 0);
+
+    private ThreatProjection ProjectHpAfterThreat(
         CombatPredictionSimulator simulator,
-        SimCreatureState player,
-        int roundIndex)
+        SimCreatureState player)
     {
         int hp = player.CurrentHp;
         int block = player.Block;
         SimulatedCombatState simulatedCombat = (SimulatedCombatState)simulator.State.CombatState;
+        // Sandpit expires after enemy turn start and forces death before the attack intent.
+        // Block and one-shot death saves cannot make standing pat survive that boundary.
+        foreach (PowerModel power in simulatedCombat.EffectivePowers())
+        {
+            if (power is SandpitPower { Amount: 1 } sandpit
+                && ReferenceEquals(sandpit.Target, _player.Creature)
+                && simulator.State.GetCreature(sandpit.Owner).IsAlive)
+                return new ThreatProjection(0, 0, 0);
+        }
         Creature? osty = simulatedCombat.GetOsty(_player);
         int ostyHp = osty == null ? 0 : simulator.State.GetCreature(osty).CurrentHp;
+        ProjectedHpLossModifiers? projectedModifiers =
+            simulatedCombat.GetAmount<BufferPower>(_player.Creature) > 0
+            || osty != null && simulatedCombat.GetAmount<BufferPower>(osty) > 0
+                ? new ProjectedHpLossModifiers() : null;
         ProjectedDeathPrevention deathPrevention = BuildProjectedDeathPrevention(
             simulator,
             simulatedCombat,
             player.MaxHp);
+        bool gambitActive = simulatedCombat.GetAmount<TheGambitPower>(_player.Creature) > 0;
         IReadOnlyList<ForecastMove> moves = simulatedCombat.CurrentMonsterMoves();
-        foreach (ForecastMove move in moves)
+        for (int moveIndex = 0; moveIndex < moves.Count; moveIndex++)
         {
+            ForecastMove move = moves[moveIndex];
             if (!simulator.State.GetCreature(move.Owner).IsAlive)
                 continue;
             if (simulatedCombat.WillSkipNextMove(move.Owner))
@@ -926,12 +1400,18 @@ internal sealed partial class CombatBeamSolver
                     ref ostyHp,
                     ref block,
                     ref hp,
-                    ref deathPrevention);
+                    ref gambitActive,
+                    ref deathPrevention,
+                    projectedModifiers);
                 continue;
             }
-            foreach (ForecastAttackHit hit in move.AttackHits)
+            IReadOnlyList<ForecastAttackHit> attackHits = move.AttackHits;
+            for (int hitIndex = 0; hitIndex < attackHits.Count; hitIndex++)
             {
-                int baseDamage = simulatedCombat.AdjustMonsterMoveDamage(move.Owner, move.Move.Id, hit.BaseDamage);
+                int baseDamage = simulatedCombat.AdjustMonsterMoveDamage(
+                    move.Owner,
+                    move.Move.Id,
+                    attackHits[hitIndex].BaseDamage);
                 ProjectThreatHit(
                     simulator,
                     simulatedCombat,
@@ -941,10 +1421,43 @@ internal sealed partial class CombatBeamSolver
                     ref ostyHp,
                     ref block,
                     ref hp,
-                    ref deathPrevention);
+                    ref gambitActive,
+                    ref deathPrevention,
+                    projectedModifiers);
             }
         }
-        return hp;
+        return new ThreatProjection(hp, deathPrevention.DeathSaveHpRestored, deathPrevention.UseCount,
+            Math.Max(0, player.Block - block));
+    }
+
+    internal int ProjectDiagnosticHits(SimulationSnapshot snapshot, Creature attacker, params int[] hits)
+        => ProjectDiagnosticThreat(snapshot, attacker, hits).Hp;
+
+    internal (int Hp, int DeathSaveUseCount, int DeathSaveHpRestored) ProjectDiagnosticEnemyTurn(SimulationSnapshot snapshot)
+    {
+        ThreatProjection threat = ProjectHpAfterThreat((CombatPredictionSimulator)snapshot.Simulator,
+            snapshot.Simulator.State.GetCreature(_player.Creature));
+        return (threat.Hp, threat.DeathSaveUseCount, threat.DeathSaveHpRestored);
+    }
+
+    internal (int Hp, int DeathSaveUseCount, int DeathSaveHpRestored) ProjectDiagnosticThreat(
+        SimulationSnapshot snapshot,
+        Creature attacker,
+        params int[] hits)
+    {
+        var simulator = (CombatPredictionSimulator)snapshot.Simulator;
+        var combat = (SimulatedCombatState)simulator.State.CombatState;
+        var player = simulator.State.GetCreature(_player.Creature);
+        int hp = player.CurrentHp, block = player.Block;
+        Creature? osty = combat.GetOsty(_player);
+        int ostyHp = osty == null ? 0 : simulator.State.GetCreature(osty).CurrentHp;
+        var prevention = BuildProjectedDeathPrevention(simulator, combat, player.MaxHp);
+        var modifiers = new ProjectedHpLossModifiers();
+        bool gambitActive = combat.GetAmount<TheGambitPower>(_player.Creature) > 0;
+        foreach (int hit in hits)
+            ProjectThreatHit(simulator, combat, attacker, hit, osty,
+                ref ostyHp, ref block, ref hp, ref gambitActive, ref prevention, modifiers);
+        return (hp, prevention.UseCount, prevention.DeathSaveHpRestored);
     }
 
     private void ProjectThreatHit(
@@ -956,7 +1469,9 @@ internal sealed partial class CombatBeamSolver
         ref int ostyHp,
         ref int block,
         ref int playerHp,
-        ref ProjectedDeathPrevention deathPrevention)
+        ref bool gambitActive,
+        ref ProjectedDeathPrevention deathPrevention,
+        ProjectedHpLossModifiers? projectedModifiers)
     {
         int adjustedHit = CorePowerSupport.AdjustForecastAttack(
             simulator,
@@ -974,7 +1489,7 @@ internal sealed partial class CombatBeamSolver
             attacker,
             null,
             HpLossHookPhase.BeforeOsty,
-            out _);
+            out _, projectedModifiers?.Filter);
         Creature target = Hook.ModifyUnblockedDamageTarget(
             combat,
             _player.Creature,
@@ -998,18 +1513,56 @@ internal sealed partial class CombatBeamSolver
             attacker,
             null,
             HpLossHookPhase.AfterOsty,
-            out _);
+            out var appliedModifiers, projectedModifiers?.Filter);
+        projectedModifiers?.Consume(appliedModifiers);
         int loss = Math.Max(0, (int)Math.Floor(hpLoss));
         if (ReferenceEquals(target, osty))
         {
             int absorbed = Math.Min(ostyHp, loss);
             ostyHp -= absorbed;
-            playerHp -= loss - absorbed;
+            // Native redirected damage applies the original target's AfterOsty hooks
+            // to overkill as a separate loss. Player Buffer must also protect spillover.
+            decimal overflow = HookMirrors.ModifyHpLost(
+                simulator, _player.Creature, loss - absorbed, ValueProp.Move,
+                attacker, null, HpLossHookPhase.AfterOsty, out var overflowModifiers,
+                projectedModifiers?.Filter);
+            projectedModifiers?.Consume(overflowModifiers);
+            int playerLoss = Math.Max(0, (int)Math.Floor(overflow));
+            playerHp -= playerLoss;
+            if (playerLoss > 0 && gambitActive)
+            {
+                gambitActive = false;
+                playerHp = 0;
+            }
             deathPrevention.TryRevive(ref playerHp);
             return;
         }
         playerHp -= loss;
+        if (loss > 0 && gambitActive)
+        {
+            gambitActive = false;
+            playerHp = 0;
+        }
         deathPrevention.TryRevive(ref playerHp);
+    }
+
+    // Forecasts consume finite protection locally; they never decrement live or branch Powers.
+    private sealed class ProjectedHpLossModifiers
+    {
+        private readonly Dictionary<BufferPower, int> _remaining = [];
+        public Func<AbstractModel, bool> Filter { get; }
+
+        public ProjectedHpLossModifiers() => Filter = Includes;
+
+        private bool Includes(AbstractModel model) => model is not BufferPower buffer
+            || (_remaining.TryGetValue(buffer, out int count) ? count : buffer.Amount) > 0;
+
+        public void Consume(IEnumerable<AbstractModel> modifiers)
+        {
+            foreach (AbstractModel model in modifiers)
+                if (model is BufferPower buffer)
+                    _remaining[buffer] = (_remaining.TryGetValue(buffer, out int count) ? count : buffer.Amount) - 1;
+        }
     }
 
     private ProjectedDeathPrevention BuildProjectedDeathPrevention(
@@ -1024,9 +1577,17 @@ internal sealed partial class CombatBeamSolver
                 fairyCount++;
         }
 
-        LizardTail? lizardTail = combat.RelicsOf(_player)
-            .OfType<LizardTail>()
-            .FirstOrDefault(relic => !LizardTailMirrors.WasUsed(relic, simulator));
+        LizardTail? lizardTail = null;
+        IReadOnlyList<RelicModel> relics = combat.RelicsOf(_player);
+        for (int index = 0; index < relics.Count; index++)
+        {
+            if (relics[index] is LizardTail candidate
+                && !LizardTailMirrors.WasUsed(candidate, simulator))
+            {
+                lizardTail = candidate;
+                break;
+            }
+        }
         return new ProjectedDeathPrevention(
             fairyCount,
             (int)FairyInABottleMirrors.HealAmount(playerMaxHp),
@@ -1040,6 +1601,9 @@ internal sealed partial class CombatBeamSolver
         bool lizardTailAvailable,
         int lizardTailHeal)
     {
+        public int DeathSaveHpRestored { get; private set; }
+        public int UseCount { get; private set; }
+
         public void TryRevive(ref int hp)
         {
             if (hp > 0)
@@ -1048,11 +1612,17 @@ internal sealed partial class CombatBeamSolver
             {
                 fairyCount--;
                 hp = fairyHeal;
+                DeathSaveHpRestored += fairyHeal;
+                UseCount++;
                 return;
             }
             if (!lizardTailAvailable)
                 return;
             lizardTailAvailable = false;
+            // Projected HP can run below zero; the real revive heals from zero, so the restored amount is
+            // the full heal either way.
+            DeathSaveHpRestored += lizardTailHeal;
+            UseCount++;
             hp = lizardTailHeal;
         }
     }
@@ -1072,6 +1642,7 @@ internal sealed partial class CombatBeamSolver
         key.Add(player.MaxHp);
         key.Add(player.Block);
         key.Add(playerState.Energy);
+        key.Add((int)playerState.Phase);
         key.Add(playerState.Stars);
         key.Add(shufflesCrossed);
         Player owner = _player;
@@ -1087,8 +1658,10 @@ internal sealed partial class CombatBeamSolver
             key.Add(0);
             key.Add(false);
         }
-        foreach (Creature enemy in simulatedCombat.KnownEnemies)
+        IReadOnlyList<Creature> knownEnemies = simulatedCombat.KnownEnemies;
+        for (int enemyIndex = 0; enemyIndex < knownEnemies.Count; enemyIndex++)
         {
+            Creature enemy = knownEnemies[enemyIndex];
             SimCreatureState enemyState = simulator.State.GetCreature(enemy);
             key.Add(enemy.Monster?.Id.Entry);
             key.Add(enemy.CombatId ?? uint.MaxValue);
@@ -1104,15 +1677,15 @@ internal sealed partial class CombatBeamSolver
         AppendPile(ref key, playerState.ExhaustPile, 'X');
         AppendOrbs(ref key, simulator, playerState.OrbQueue);
         _run.Performance.End(SearchMetricPhase.PileFingerprint, pileFingerprintMeasurement);
-        AppendRngState(ref key, simulator.Rng.Shuffle);
-        AppendRngState(ref key, simulator.Rng.CombatCardGeneration);
-        AppendRngState(ref key, simulator.Rng.CombatPotionGeneration);
-        AppendRngState(ref key, simulator.Rng.CombatCardSelection);
-        AppendRngState(ref key, simulator.Rng.CombatEnergyCosts);
-        AppendRngState(ref key, simulator.Rng.CombatTargets);
-        AppendRngState(ref key, simulator.Rng.CombatOrbGeneration);
-        AppendRngState(ref key, simulator.Rng.MonsterAi);
-        AppendRngState(ref key, simulator.Rng.Niche);
+        AppendRngState(ref key, simulator.Rng.ShuffleState);
+        AppendRngState(ref key, simulator.Rng.CombatCardGenerationState);
+        AppendRngState(ref key, simulator.Rng.CombatPotionGenerationState);
+        AppendRngState(ref key, simulator.Rng.CombatCardSelectionState);
+        AppendRngState(ref key, simulator.Rng.CombatEnergyCostsState);
+        AppendRngState(ref key, simulator.Rng.CombatTargetsState);
+        AppendRngState(ref key, simulator.Rng.CombatOrbGenerationState);
+        AppendRngState(ref key, simulator.Rng.MonsterAiState);
+        AppendRngState(ref key, simulator.Rng.NicheState);
         ulong deathsFirst = 0;
         ulong deathsSecond = 0;
         foreach (uint combatId in processedEnemyDeaths)
@@ -1123,15 +1696,35 @@ internal sealed partial class CombatBeamSolver
         key.Add(processedEnemyDeaths.Count);
         key.Add(deathsFirst);
         key.Add(deathsSecond);
+        if (_historyDependencies != CombatHistoryDependencies.None)
+            CombatHistoryCounterKey.Append(ref key, simulator, _player, _historyDependencies);
         SearchMeasurement combatFingerprintMeasurement = _run.Performance.Begin();
         simulatedCombat.AppendFingerprint(ref key, simulator);
         _run.Performance.End(SearchMetricPhase.CombatFingerprint, combatFingerprintMeasurement);
-        return key.Finish();
+        return ApplyStateKeySalt(key.Finish());
+    }
+
+    /// <summary>
+    /// 状态键是若干个排序与分组的下游键（同一指纹值既当相等判据又当决胜序）。异或常量是双射，
+    /// 所以只动数值、不动相等关系，可以把「键的编码方式影响决策」单独量出来。
+    /// </summary>
+    private StateFingerprint ApplyStateKeySalt(StateFingerprint fingerprint)
+    {
+        int salt = policy.StateKeySalt;
+        if (salt == 0)
+            return fingerprint;
+        return new StateFingerprint(
+            fingerprint.First ^ unchecked((ulong)salt * 0x9E3779B97F4A7C15UL + 0xD1B54A32D192ED03UL),
+            fingerprint.Second ^ unchecked((ulong)salt * 0xC2B2AE3D27D4EB4FUL + 0x165667B19E3779F9UL));
     }
 
     private static void AppendRngState(ref StateFingerprintBuilder key, Rng rng)
     {
-        PredictionRngState state = rng.CaptureState();
+        AppendRngState(ref key, rng.CaptureState());
+    }
+
+    private static void AppendRngState(ref StateFingerprintBuilder key, PredictionRngState state)
+    {
         key.Add(state.Counter);
         key.Add(state.State0);
         key.Add(state.State1);
@@ -1186,10 +1779,12 @@ internal sealed partial class CombatBeamSolver
         key.Add(preview.EnergyCost.GetWithModifiers(CostModifiers.Local));
         key.Add(preview.HasStarCostX);
         key.Add(preview.CurrentStarCost);
+        CardCostStateSupport.Append(ref key, preview);
         key.Add(preview.BaseReplayCount);
         key.Add(preview.ExhaustOnNextPlay);
         key.Add(preview.IsSlyThisTurn);
         key.Add(preview.ShouldRetainThisTurn);
+        AppendLocalCardKeywords(ref key, preview);
         key.Add(preview.DeckVersion != null);
         key.Add(preview.HasBeenRemovedFromState);
         EnchantmentStateSupport.Append(ref key, preview.Enchantment);
@@ -1199,20 +1794,20 @@ internal sealed partial class CombatBeamSolver
         switch (preview)
         {
             case Claw claw:
-                key.Add(GameRef.Get<int>(claw, "ExtraDamageFromClawPlays"));
+                key.Add(T44PrivateAccess.Claw_ExtraDamageFromClawPlays(claw));
                 break;
             case GeneticAlgorithm geneticAlgorithm:
                 key.Add(geneticAlgorithm.IncreasedBlock);
                 break;
             case Maul maul:
-                key.Add(GameRef.Get<decimal>(maul, "_extraDamageFromMaulPlays"));
+                key.Add(T44PrivateAccess.Maul_ExtraDamageFromMaulPlays(maul));
                 break;
             case MadScience madScience:
                 key.Add((int)madScience.TinkerTimeType);
                 key.Add((int)madScience.TinkerTimeRider);
                 break;
             case Rampage rampage:
-                key.Add(GameRef.Get<int>(rampage, "ExtraDamageFromPlays"));
+                key.Add(T44PrivateAccess.Rampage_ExtraDamageFromPlays(rampage));
                 break;
             case TheScythe scythe:
                 key.Add(scythe.IncreasedDamage);
@@ -1221,6 +1816,30 @@ internal sealed partial class CombatBeamSolver
         if (card.HasExternallyMutableAttachedModels)
             AppendBaseLibCardModifiers(ref key, preview);
         return key.Finish();
+    }
+
+    private static void AppendLocalCardKeywords(
+        ref StateFingerprintBuilder key,
+        CardModel card)
+    {
+        ulong commonKeywordMask = 0;
+        SortedSet<int>? overflowKeywords = null;
+        foreach (CardKeyword keyword in card.GetKeywordsWithSources(KeywordSources.Local))
+        {
+            int value = (int)keyword;
+            if ((uint)value < 64)
+            {
+                commonKeywordMask |= 1UL << value;
+                continue;
+            }
+            (overflowKeywords ??= []).Add(value);
+        }
+        key.Add(commonKeywordMask);
+        key.Add(overflowKeywords?.Count ?? 0);
+        if (overflowKeywords == null)
+            return;
+        foreach (int keyword in overflowKeywords)
+            key.Add(keyword);
     }
 
     private static void AppendBaseLibCardModifiers(
@@ -1258,6 +1877,11 @@ internal sealed partial class CombatBeamSolver
 
     private void AppendPile(ref StateFingerprintBuilder key, SimCardPile pile, char marker)
     {
+        if ((policy.PileOrderInvariantMask & PileOrderInvariantBit(marker)) != 0)
+        {
+            AppendUnorderedPileKey(ref key, pile, marker);
+            return;
+        }
         key.Add(marker);
         key.Add(pile.Cards.Count);
         if (pile.TryGetCachedFingerprint(out ulong cachedFirst, out ulong cachedSecond))

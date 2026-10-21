@@ -173,7 +173,7 @@ internal static class ModifyHpLostMirrors
         }
 
         var state = context.StateStore.Get(relic, () => new BeatingRemnantPredictionState(relic));
-        var damageCap = relic.DynamicVars[GameRef.GetStatic<string>(typeof(BeatingRemnant), "_maxHpLossKey")].BaseValue;
+        var damageCap = relic.DynamicVars[T44PrivateAccess.BeatingRemnant_MaxHpLossKey()].BaseValue;
         return Math.Min(context.Amount, damageCap - state.DamageReceivedThisTurn);
     }
 

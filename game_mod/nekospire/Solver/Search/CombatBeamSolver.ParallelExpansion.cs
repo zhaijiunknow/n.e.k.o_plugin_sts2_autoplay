@@ -1,8 +1,8 @@
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models;
-using MegaCrit.Sts2.Core.Models.Cards;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Simulation;
 
@@ -10,9 +10,15 @@ namespace CombatSolver;
 
 internal sealed partial class CombatBeamSolver
 {
-    private CancellationToken SearchCancellationToken => cancellationToken;
+    private CancellationToken SearchCancellationToken => ReplayCancellationToken;
     private SearchMemoryPressureSignal SearchMemoryPressure => policy.MemoryPressureSignal;
     private object? _parallelActionReplayForkGate;
+
+    private void ReportParallelWork(ParallelExpansionWorkProfile profile)
+    {
+        foreach (string distribution in profile.Describe())
+            policy.Diagnostics.Info($"[CombatSolver] SEARCH_PARALLEL_WORK {distribution}");
+    }
 
     private readonly record struct RawCardCandidate(
         SearchNode Node,
@@ -26,11 +32,16 @@ internal sealed partial class CombatBeamSolver
         bool RequiresUnsupportedExistingChoice,
         PlanCardChoice? RequiredEmptyChoice);
 
+    private readonly record struct PreparedPotionAction(PlanAction Action, PotionModel Potion);
+
     private sealed class DeferredCardActionProbe(
         PreparedCardAction action,
-        SimulationSnapshot snapshot) : IDisposable
+        SimulationSnapshot snapshot, CardChoiceReplayCheckpoint? checkpoint = null) : IDisposable
     {
         private SimulationSnapshot? _snapshot = snapshot;
+        private CardChoiceReplayCheckpoint? _checkpoint = checkpoint;
+        public CardChoiceReplayCheckpoint? TakeCheckpoint() => Interlocked.Exchange(ref _checkpoint, null);
+        public void AttachCheckpoint(CardChoiceReplayCheckpoint? value) => _checkpoint = value;
 
         public PreparedCardAction Action { get; } = action;
 
@@ -40,14 +51,11 @@ internal sealed partial class CombatBeamSolver
                     "并行卡牌动作的 deferred probe 已被消费或释放。");
 
         public void Dispose()
-            => Interlocked.Exchange(ref _snapshot, null)?.ReleaseSimulator();
+        {
+            Interlocked.Exchange(ref _snapshot, null)?.ReleaseSimulator();
+            Interlocked.Exchange(ref _checkpoint, null)?.Dispose();
+        }
     }
-
-    private sealed record DeferredRoundChoiceFrontier(
-        PreparedCardAction PreparedAction,
-        IReadOnlyList<PendingChoiceReplayBranch> Branches,
-        PrimaryChoiceMatch? UnresolvedPrimaryChoice,
-        int MaxFinalBranchesPerBranch);
 
     private sealed record PreparedCardActionEvaluation(
         ExpansionBatch? Batch,
@@ -55,8 +63,8 @@ internal sealed partial class CombatBeamSolver
 
     /// <summary>
     /// A parent simulator cannot be forked concurrently: prediction history seals its mutable
-    /// tail and several COW containers publish a shared bit during Fork. The coordinator creates
-    /// one seed at a time; exactly one worker then consumes and mutates that private fork.
+    /// tail and several COW containers publish a shared bit during Fork. Lanes serialize seed
+    /// creation through the parent's gate; each worker then consumes only its private fork.
     /// </summary>
     private sealed class ReplayForkSeed(
         CombatPredictionSimulator simulator,
@@ -83,138 +91,52 @@ internal sealed partial class CombatBeamSolver
         }
     }
 
-    private sealed class ExpansionBatch : IDisposable
+    private ExpansionBatch RentExpansionBatch() => new(_run.ExpansionBatchPool);
+
+    private sealed class ExpansionBatch(
+        OwnedExpansionBatch<SimulationSnapshot, RawCardCandidate, SearchNode>.Pool pool)
+        : OwnedExpansionBatch<SimulationSnapshot, RawCardCandidate, SearchNode>(pool)
     {
-        private readonly HashSet<SimulationSnapshot> _owned =
-            new(ReferenceEqualityComparer.Instance);
-        private readonly HashSet<SimulationSnapshot> _transferred =
-            new(ReferenceEqualityComparer.Instance);
-
-        public List<RawCardCandidate> Cards { get; } = new(16);
-        public List<SearchNode> Potions { get; } = [];
-        public List<SearchNode> EndTurns { get; } = [];
-
         public void Add(RawCardCandidate candidate)
-        {
-            Own(candidate.Node.Snapshot);
-            Cards.Add(candidate);
-        }
-
-        public void Adopt(RawCardCandidate candidate)
-        {
-            Own(candidate.Node.Snapshot);
-            try
-            {
-                Cards.Add(candidate);
-            }
-            catch
-            {
-                _owned.Remove(candidate.Node.Snapshot);
-                throw;
-            }
-        }
+            => AddCard(candidate.Node.Snapshot, candidate);
 
         public void TransferTo(ExpansionBatch target, RawCardCandidate candidate)
-        {
-            if (!_owned.Contains(candidate.Node.Snapshot))
-                throw new InvalidOperationException("并行展开快照没有可移交的所有权。");
-            target.Adopt(candidate);
-            if (!_owned.Remove(candidate.Node.Snapshot))
-            {
-                target.Release(candidate.Node.Snapshot);
-                throw new InvalidOperationException("并行展开快照移交时丢失所有权。");
-            }
-        }
+            => base.TransferTo(target, candidate.Node.Snapshot, candidate);
 
         public void AddPotion(SearchNode candidate)
-        {
-            Own(candidate.Snapshot);
-            Potions.Add(candidate);
-        }
+            => base.AddPotion(candidate.Snapshot, candidate);
+
+        public void TransferPotionTo(ExpansionBatch target, SearchNode candidate)
+            => base.TransferPotionTo(target, candidate.Snapshot, candidate);
 
         public void AddEndTurn(SearchNode candidate)
-        {
-            Own(candidate.Snapshot);
-            EndTurns.Add(candidate);
-        }
+            => base.AddEndTurn(candidate.Snapshot, candidate);
 
-        public void Transfer(SimulationSnapshot snapshot)
-        {
-            if (_owned.Contains(snapshot))
-            {
-                // Register the transfer before dropping batch ownership. If growing the
-                // bookkeeping set throws (for example under memory pressure), Dispose still
-                // owns and releases the simulator instead of leaking it across the failed wave.
-                _transferred.Add(snapshot);
-                _owned.Remove(snapshot);
-                return;
-            }
-            if (!_transferred.Contains(snapshot))
-                throw new InvalidOperationException("并行展开快照没有可移交的所有权。");
-        }
-
-        public void Release(SimulationSnapshot snapshot)
-        {
-            if (!_owned.Remove(snapshot))
-                throw new InvalidOperationException("并行展开快照被重复释放或已经移交。");
-            snapshot.ReleaseSimulator();
-        }
-
-        public void Dispose()
-        {
-            foreach (SimulationSnapshot snapshot in _owned)
-                snapshot.ReleaseSimulator();
-            _owned.Clear();
-            _transferred.Clear();
-            Cards.Clear();
-            Potions.Clear();
-            EndTurns.Clear();
-        }
-
-        private void Own(SimulationSnapshot snapshot)
-        {
-            if (!_owned.Add(snapshot))
-                throw new InvalidOperationException("并行展开生成了共享的子快照所有权。");
-        }
+        public void TransferEndTurnTo(ExpansionBatch target, SearchNode candidate)
+            => base.TransferEndTurnTo(target, candidate.Snapshot, candidate);
     }
 
     private sealed record ExpansionWorkerOutcome(
         CombatBeamSolver? Worker,
         ExpansionBatch? Batch,
         ExceptionDispatchInfo? Error,
-        long AllocatedBytes);
-
-    private sealed record ActionReplayWorkerOutcome(
-        CombatBeamSolver? Worker,
-        ExpansionBatch? Batch,
-        DeferredCardActionProbe? DeferredProbe,
-        ExceptionDispatchInfo? Error,
-        long WorkerAllocatedBytes,
-        long OutcomeAllocatedBytes);
+        long AllocatedBytes,
+        long ElapsedTicks = 0);
 
     /// <summary>
-    /// 一次 Solve 复用固定数量的后台 lane；coordinator 自己执行 lane 0，避免为每个父节点
-    /// 创建 Task 和 worker。候选只在各 lane 内物化，transposition/dominance 仍由 coordinator
-    /// 按父节点原顺序提交，因此 DOP 不改变搜索结果。
+    /// 一次 Solve 复用固定数量的后台 lane，消费已准入父节点的动作/选择作业。
+    /// coordinator 独占按序提交；自然单父节点使用同一调度器，不嵌套线程池。
+    /// 候选只在各 lane 内物化，transposition/dominance 仍按父节点原序提交。
     /// </summary>
-    private sealed class ParallelExpansionExecutor : IDisposable
+    private sealed partial class ParallelExpansionExecutor : IExpansionExecutor, IDisposable
     {
-        private const long InitialActionReplayAllocationHighWater = 16L * 1024 * 1024;
-        private const long InitialRoundChoiceReplayAllocationHighWater = 16L * 1024 * 1024;
-
         private readonly CombatBeamSolver _coordinator;
-        private readonly object _actionReplayForkGate = new();
+        private readonly ParallelExpansionWorkProfile _workProfile = new();
         private ExpansionLane[]? _backgroundLanes;
-        private long _actionReplayAllocatedHighWater;
-        private long _roundChoiceReplayAllocatedHighWater;
-        private bool _actionReplayAllocationObserved;
-        private bool _roundChoiceReplayAllocationObserved;
-        private int _activeWorkers;
-        private int _maximumActiveWorkers;
-        private int _activeActionReplayWorkers;
-        private int _maximumActiveActionReplayWorkers;
-        private int _activeRoundChoiceReplayWorkers;
-        private int _maximumActiveRoundChoiceReplayWorkers;
+        internal int _activeWorkers;
+        internal int _maximumActiveWorkers;
+        internal int _activeActionReplayWorkers;
+        internal int _maximumActiveActionReplayWorkers;
         private bool _disposed;
 
         public ParallelExpansionExecutor(CombatBeamSolver coordinator, int degreeOfParallelism)
@@ -222,52 +144,59 @@ internal sealed partial class CombatBeamSolver
             ArgumentOutOfRangeException.ThrowIfLessThan(degreeOfParallelism, 2);
             _coordinator = coordinator;
             DegreeOfParallelism = degreeOfParallelism;
+            if (coordinator._run.ActiveParallelExpansion != null)
+                throw new InvalidOperationException("同一搜索不能嵌套并行执行器。");
+            coordinator._run.ActiveParallelExpansion = this;
         }
 
         public int DegreeOfParallelism { get; }
 
+        public int MaximumQueuedParents => SearchWaveMemoryPolicy.MaximumQueuedParents(DegreeOfParallelism);
+
+        public ExpansionWorkerOutcome[] Execute(
+            IReadOnlyList<SearchNode> nodes,
+            Action<SearchNode, SearchNode> acceptChild,
+            Action<SearchNode> finishParent,
+            Action<int, ExpansionBatch>? beforeCommit = null)
+        {
+            ArgumentNullException.ThrowIfNull(beforeCommit);
+            return Evaluate(nodes, (index, batch) =>
+            {
+                beforeCommit(index, batch);
+                SearchNode parent = nodes[index];
+                _coordinator.CommitExpansionBatch(parent, batch,
+                    child => acceptChild(parent, child));
+                batch.Dispose();
+                finishParent(parent);
+            });
+        }
+
         public ExpansionWorkerOutcome[] Evaluate(
             IReadOnlyList<SearchNode> nodes,
-            bool enableSingleParentActionReplay)
+            Action<int, ExpansionBatch> commitOrdered)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (nodes.Count == 0)
                 return [];
-            if (nodes.Count > DegreeOfParallelism)
+            if (nodes.Count > MaximumQueuedParents)
+                throw new ArgumentOutOfRangeException(nameof(nodes));
+            long startedAt = Stopwatch.GetTimestamp();
+            long commitTicks = 0;
+            try
             {
-                throw new ArgumentOutOfRangeException(
-                    nameof(nodes),
-                    $"并行展开 wave={nodes.Count} 超过 lane={DegreeOfParallelism}。");
+                return EvaluateQueuedParents(nodes, (index, batch) =>
+                {
+                    long commitStarted = Stopwatch.GetTimestamp();
+                    try { commitOrdered(index, batch); }
+                    finally { commitTicks += Stopwatch.GetTimestamp() - commitStarted; }
+                });
             }
-
-            ExpansionLane[] backgroundLanes = EnsureBackgroundLanes();
-            using ExpansionWave wave = new(nodes.Count);
-            for (int index = 1; index < nodes.Count; index++)
+            finally
             {
-                backgroundLanes[index - 1].Dispatch(
-                    new ExpansionWorkItem(nodes[index], wave, index));
+                _workProfile.Record(ParallelExpansionWorkProfile.Kind.Wave,
+                    Stopwatch.GetTimestamp() - startedAt);
+                _workProfile.Record(ParallelExpansionWorkProfile.Kind.Commit, commitTicks);
             }
-
-            Execute(
-                _coordinator,
-                nodes[0],
-                wave,
-                outcomeIndex: 0,
-                includeWorkerMetrics: false,
-                actionReplayExecutor: enableSingleParentActionReplay && nodes.Count == 1
-                    ? this
-                    : null);
-            wave.BackgroundCompleted.Wait();
-
-            if (nodes.Count > 1)
-            {
-                _coordinator._run.ParallelExpansionWaves++;
-                _coordinator._run.ParallelExpansionWorkItems += nodes.Count;
-                _coordinator._run.MaxParallelExpansionConcurrency = Math.Max(
-                    _coordinator._run.MaxParallelExpansionConcurrency,
-                    Volatile.Read(ref _maximumActiveWorkers));
-            }
-            return wave.Outcomes;
         }
 
         public void Dispose()
@@ -275,11 +204,13 @@ internal sealed partial class CombatBeamSolver
             if (_disposed)
                 return;
             _disposed = true;
+            _coordinator._run.ActiveParallelExpansion = null;
             if (_backgroundLanes != null)
             {
                 foreach (ExpansionLane lane in _backgroundLanes)
                     lane.Dispose();
             }
+            _coordinator.ReportParallelWork(_workProfile);
         }
 
         public void ResetRebuildableCaches()
@@ -294,10 +225,10 @@ internal sealed partial class CombatBeamSolver
         {
             if (_backgroundLanes != null)
                 return _backgroundLanes;
-            List<ExpansionLane> lanes = new(DegreeOfParallelism - 1);
+            List<ExpansionLane> lanes = new(DegreeOfParallelism);
             try
             {
-                for (int index = 1; index < DegreeOfParallelism; index++)
+                for (int index = 1; index <= DegreeOfParallelism; index++)
                     lanes.Add(new ExpansionLane(this, _coordinator.CreateExpansionWorker(), index));
                 _backgroundLanes = lanes.ToArray();
                 return _backgroundLanes;
@@ -310,640 +241,10 @@ internal sealed partial class CombatBeamSolver
             }
         }
 
-        private void Execute(
-            CombatBeamSolver worker,
-            SearchNode node,
-            ExpansionWave wave,
-            int outcomeIndex,
-            bool includeWorkerMetrics,
-            ParallelExpansionExecutor? actionReplayExecutor = null)
-        {
-            int activeWorkers = Interlocked.Increment(ref _activeWorkers);
-            UpdateMaximum(ref _maximumActiveWorkers, activeWorkers);
-            long allocatedAtStart = GC.GetAllocatedBytesForCurrentThread();
-            try
-            {
-                ExpansionBatch batch = worker.EvaluateRawExpansion(node, actionReplayExecutor);
-                long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedAtStart;
-                wave.Outcomes[outcomeIndex] = new ExpansionWorkerOutcome(
-                    includeWorkerMetrics ? worker : null,
-                    batch,
-                    null,
-                    allocatedBytes);
-            }
-            // Background lanes cannot throw across a Thread boundary. Capture the original stack;
-            // the coordinator always rethrows it after every lane reaches the completion barrier.
-            catch (System.Exception error)
-            {
-                long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedAtStart;
-                wave.Outcomes[outcomeIndex] = new ExpansionWorkerOutcome(
-                    includeWorkerMetrics ? worker : null,
-                    null,
-                    ExceptionDispatchInfo.Capture(error),
-                    allocatedBytes);
-            }
-            finally
-            {
-                Interlocked.Decrement(ref _activeWorkers);
-            }
-        }
-
-        public ExpansionBatch EvaluateCardActions(
-            SearchNode parent,
-            IReadOnlyList<PreparedCardAction> actions)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (actions.Count < 2)
-            {
-                throw new ArgumentException(
-                    "并行卡牌动作回放要求至少两个已预枚举 action/target。",
-                    nameof(actions));
-            }
-
-            ExpansionLane[] backgroundLanes = EnsureBackgroundLanes();
-            ExpansionBatch aggregate = new();
-            bool completed = false;
-            try
-            {
-                int actionIndex = 0;
-                while (actionIndex < actions.Count)
-                {
-                    _coordinator.SearchCancellationToken.ThrowIfCancellationRequested();
-                    int workItemCount = ResolveActionReplayMicrobatchCapacity(
-                        actions.Count - actionIndex);
-                    using ActionReplayWave wave = new(workItemCount);
-
-                    for (int offset = 0; offset < workItemCount; offset++)
-                    {
-                        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
-                        try
-                        {
-                            ReplayForkSeed seed = _coordinator.PrepareReplayForkSeed(
-                                parent.Snapshot,
-                                _actionReplayForkGate);
-                            wave.SetSeed(
-                                offset,
-                                seed,
-                                Math.Max(
-                                    0,
-                                    GC.GetAllocatedBytesForCurrentThread() - allocatedBefore));
-                        }
-                        catch (System.Exception error)
-                        {
-                            long seedAllocatedBytes = Math.Max(
-                                0,
-                                GC.GetAllocatedBytesForCurrentThread() - allocatedBefore);
-                            wave.Outcomes[offset] = new ActionReplayWorkerOutcome(
-                                null,
-                                null,
-                                null,
-                                ExceptionDispatchInfo.Capture(error),
-                                WorkerAllocatedBytes: 0,
-                                OutcomeAllocatedBytes: seedAllocatedBytes);
-                            wave.StopDispatchAt(offset + 1);
-                            break;
-                        }
-                    }
-
-                    for (int offset = 1; offset < wave.OutcomeCount; offset++)
-                    {
-                        if (wave.Outcomes[offset] != null)
-                            break;
-                        ReplayForkSeed? seed = wave.TakeSeed(offset);
-                        bool backgroundRegistered = false;
-                        try
-                        {
-                            wave.RegisterBackgroundWork();
-                            backgroundRegistered = true;
-                            backgroundLanes[offset - 1].Dispatch(
-                                new ActionReplayWorkItem(
-                                    parent,
-                                    actions[actionIndex + offset],
-                                    seed,
-                                    wave,
-                                    offset));
-                            seed = null;
-                        }
-                        catch (System.Exception error)
-                        {
-                            seed?.Dispose();
-                            if (backgroundRegistered)
-                                wave.CancelBackgroundRegistration();
-                            wave.Outcomes[offset] = new ActionReplayWorkerOutcome(
-                                null,
-                                null,
-                                null,
-                                ExceptionDispatchInfo.Capture(error),
-                                WorkerAllocatedBytes: 0,
-                                OutcomeAllocatedBytes: wave.SeedAllocatedBytes[offset]);
-                            wave.StopDispatchAt(offset + 1);
-                            break;
-                        }
-                    }
-
-                    if (wave.Outcomes[0] == null)
-                    {
-                        ReplayForkSeed seed = wave.TakeSeed(0);
-                        ExecuteActionReplay(
-                            _coordinator,
-                            parent,
-                            actions[actionIndex],
-                            seed,
-                            wave,
-                            outcomeIndex: 0,
-                            includeWorkerMetrics: false,
-                            trackActiveWorker: false);
-                    }
-                    wave.CompleteDispatch();
-                    wave.BackgroundCompleted.Wait();
-                    int executedWorkItems = wave.ExecutedWorkItemCount;
-                    try
-                    {
-                        if (executedWorkItems > 1)
-                        {
-                            _coordinator._run.ParallelExpansionWaves++;
-                            _coordinator._run.ParallelExpansionWorkItems += executedWorkItems;
-                            _coordinator._run.ParallelActionReplayWaves++;
-                            _coordinator._run.ParallelActionReplayWorkItems += executedWorkItems;
-                            _coordinator._run.MaxParallelExpansionConcurrency = Math.Max(
-                                _coordinator._run.MaxParallelExpansionConcurrency,
-                                Volatile.Read(ref _maximumActiveWorkers));
-                            _coordinator._run.MaxParallelActionReplayConcurrency = Math.Max(
-                                _coordinator._run.MaxParallelActionReplayConcurrency,
-                                Volatile.Read(ref _maximumActiveActionReplayWorkers));
-                        }
-
-                        for (int offset = 0; offset < wave.OutcomeCount; offset++)
-                        {
-                            ActionReplayWorkerOutcome? outcome = wave.Outcomes[offset];
-                            if (outcome != null)
-                            {
-                                _coordinator.MergeExpansionWorker(
-                                    outcome.Worker,
-                                    outcome.WorkerAllocatedBytes);
-                            }
-                        }
-
-                        ObserveActionReplayAllocation(wave.Outcomes, wave.OutcomeCount);
-                        for (int offset = 0; offset < wave.OutcomeCount; offset++)
-                        {
-                            ActionReplayWorkerOutcome outcome = wave.Outcomes[offset]
-                                ?? throw new InvalidOperationException(
-                                    "并行卡牌动作没有返回 worker outcome。");
-                            outcome.Error?.Throw();
-                            if (outcome.Batch != null && outcome.DeferredProbe != null)
-                            {
-                                throw new InvalidOperationException(
-                                    "并行卡牌动作同时返回了候选批次与 deferred probe。");
-                            }
-                            using ExpansionBatch? deferredBatch = outcome.DeferredProbe == null
-                                ? null
-                                : EvaluateDeferredCardAction(parent, outcome.DeferredProbe);
-                            ExpansionBatch batch = outcome.Batch
-                                ?? deferredBatch
-                                ?? throw new InvalidOperationException(
-                                    "并行卡牌动作既没有候选批次，也没有 deferred probe。");
-                            foreach (RawCardCandidate candidate in batch.Cards)
-                                batch.TransferTo(aggregate, candidate);
-                        }
-                    }
-                    finally
-                    {
-                        foreach (ActionReplayWorkerOutcome? outcome in wave.Outcomes)
-                        {
-                            outcome?.Batch?.Dispose();
-                            outcome?.DeferredProbe?.Dispose();
-                        }
-                    }
-
-                    actionIndex += wave.OutcomeCount;
-                }
-
-                completed = true;
-                return aggregate;
-            }
-            finally
-            {
-                if (!completed)
-                    aggregate.Dispose();
-            }
-        }
-
-        private ExpansionBatch EvaluateDeferredCardAction(
-            SearchNode parent,
-            DeferredCardActionProbe deferredProbe)
-        {
-            ExpansionBatch aggregate = new();
-            bool completed = false;
-            try
-            {
-                DeferredRoundChoiceFrontier? frontier =
-                    _coordinator.PrepareDeferredRoundChoiceFrontier(
-                        parent,
-                        deferredProbe,
-                        aggregate);
-                if (frontier == null)
-                {
-                    completed = true;
-                    return aggregate;
-                }
-
-                ExpansionLane[] backgroundLanes = EnsureBackgroundLanes();
-                int branchIndex = 0;
-                while (branchIndex < frontier.Branches.Count)
-                {
-                    _coordinator.SearchCancellationToken.ThrowIfCancellationRequested();
-                    int workItemCount = ResolveRoundChoiceReplayMicrobatchCapacity(
-                        frontier.Branches.Count - branchIndex);
-                    if (workItemCount < 2)
-                    {
-                        List<PendingChoiceReplayBranch> remainingBranches = new(
-                            frontier.Branches.Count - branchIndex);
-                        for (; branchIndex < frontier.Branches.Count; branchIndex++)
-                            remainingBranches.Add(frontier.Branches[branchIndex]);
-                        _coordinator.AddResolvedCardCandidates(
-                            parent,
-                            frontier.PreparedAction,
-                            _coordinator.ResolveDeferredRoundChoiceBranchesSerially(
-                                parent,
-                                frontier,
-                                remainingBranches),
-                            aggregate);
-                        break;
-                    }
-
-                    using ActionReplayWave wave = new(workItemCount);
-                    for (int offset = 0; offset < workItemCount; offset++)
-                    {
-                        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
-                        try
-                        {
-                            ReplayForkSeed seed = _coordinator.PrepareReplayForkSeed(
-                                parent.Snapshot,
-                                _actionReplayForkGate);
-                            wave.SetSeed(
-                                offset,
-                                seed,
-                                Math.Max(
-                                    0,
-                                    GC.GetAllocatedBytesForCurrentThread() - allocatedBefore));
-                        }
-                        catch (System.Exception error)
-                        {
-                            long seedAllocatedBytes = Math.Max(
-                                0,
-                                GC.GetAllocatedBytesForCurrentThread() - allocatedBefore);
-                            wave.Outcomes[offset] = new ActionReplayWorkerOutcome(
-                                null,
-                                null,
-                                null,
-                                ExceptionDispatchInfo.Capture(error),
-                                WorkerAllocatedBytes: 0,
-                                OutcomeAllocatedBytes: seedAllocatedBytes);
-                            wave.StopDispatchAt(offset + 1);
-                            break;
-                        }
-                    }
-
-                    for (int offset = 1; offset < wave.OutcomeCount; offset++)
-                    {
-                        if (wave.Outcomes[offset] != null)
-                            break;
-                        ReplayForkSeed? seed = wave.TakeSeed(offset);
-                        bool backgroundRegistered = false;
-                        try
-                        {
-                            wave.RegisterBackgroundWork();
-                            backgroundRegistered = true;
-                            backgroundLanes[offset - 1].Dispatch(
-                                new RoundChoiceReplayWorkItem(
-                                    parent,
-                                    frontier,
-                                    frontier.Branches[branchIndex + offset],
-                                    seed,
-                                    wave,
-                                    offset));
-                            seed = null;
-                        }
-                        catch (System.Exception error)
-                        {
-                            seed?.Dispose();
-                            if (backgroundRegistered)
-                                wave.CancelBackgroundRegistration();
-                            wave.Outcomes[offset] = new ActionReplayWorkerOutcome(
-                                null,
-                                null,
-                                null,
-                                ExceptionDispatchInfo.Capture(error),
-                                WorkerAllocatedBytes: 0,
-                                OutcomeAllocatedBytes: wave.SeedAllocatedBytes[offset]);
-                            wave.StopDispatchAt(offset + 1);
-                            break;
-                        }
-                    }
-
-                    if (wave.Outcomes[0] == null)
-                    {
-                        ReplayForkSeed seed = wave.TakeSeed(0);
-                        ExecuteRoundChoiceReplay(
-                            _coordinator,
-                            parent,
-                            frontier,
-                            frontier.Branches[branchIndex],
-                            seed,
-                            wave,
-                            outcomeIndex: 0,
-                            includeWorkerMetrics: false,
-                            trackActiveWorker: false);
-                    }
-                    wave.CompleteDispatch();
-                    wave.BackgroundCompleted.Wait();
-                    int executedWorkItems = wave.ExecutedWorkItemCount;
-                    try
-                    {
-                        if (executedWorkItems > 1)
-                        {
-                            _coordinator._run.ParallelExpansionWaves++;
-                            _coordinator._run.ParallelExpansionWorkItems += executedWorkItems;
-                            _coordinator._run.ParallelRoundChoiceReplayWaves++;
-                            _coordinator._run.ParallelRoundChoiceReplayWorkItems += executedWorkItems;
-                            _coordinator._run.MaxParallelExpansionConcurrency = Math.Max(
-                                _coordinator._run.MaxParallelExpansionConcurrency,
-                                Volatile.Read(ref _maximumActiveWorkers));
-                            _coordinator._run.MaxParallelRoundChoiceReplayConcurrency = Math.Max(
-                                _coordinator._run.MaxParallelRoundChoiceReplayConcurrency,
-                                Volatile.Read(ref _maximumActiveRoundChoiceReplayWorkers));
-                        }
-
-                        for (int offset = 0; offset < wave.OutcomeCount; offset++)
-                        {
-                            ActionReplayWorkerOutcome? outcome = wave.Outcomes[offset];
-                            if (outcome != null)
-                            {
-                                _coordinator.MergeExpansionWorker(
-                                    outcome.Worker,
-                                    outcome.WorkerAllocatedBytes);
-                            }
-                        }
-                        ObserveRoundChoiceReplayAllocation(wave.Outcomes, wave.OutcomeCount);
-                        for (int offset = 0; offset < wave.OutcomeCount; offset++)
-                        {
-                            ActionReplayWorkerOutcome outcome = wave.Outcomes[offset]
-                                ?? throw new InvalidOperationException(
-                                    "并行 round-choice 没有返回 worker outcome。");
-                            outcome.Error?.Throw();
-                            if (outcome.DeferredProbe != null)
-                            {
-                                throw new InvalidOperationException(
-                                    "round-choice worker 不得再次请求嵌套并行。");
-                            }
-                            ExpansionBatch batch = outcome.Batch
-                                ?? throw new InvalidOperationException(
-                                    "并行 round-choice 没有返回候选批次。");
-                            foreach (RawCardCandidate candidate in batch.Cards)
-                                batch.TransferTo(aggregate, candidate);
-                        }
-                    }
-                    finally
-                    {
-                        foreach (ActionReplayWorkerOutcome? outcome in wave.Outcomes)
-                        {
-                            outcome?.Batch?.Dispose();
-                            outcome?.DeferredProbe?.Dispose();
-                        }
-                    }
-
-                    branchIndex += wave.OutcomeCount;
-                }
-
-                completed = true;
-                return aggregate;
-            }
-            finally
-            {
-                if (!completed)
-                    aggregate.Dispose();
-            }
-        }
-
-        private int ResolveRoundChoiceReplayMicrobatchCapacity(int remainingBranches)
-        {
-            if (remainingBranches < 2)
-                return 0;
-            int capacity = Math.Min(DegreeOfParallelism, remainingBranches);
-            SearchMemoryPressureSignal signal = _coordinator.SearchMemoryPressure;
-            if (!signal.IsEnabled)
-            {
-                return signal.ConservativeParallelismRequired
-                    ? Math.Min(capacity, 2)
-                    : capacity;
-            }
-
-            if (!_roundChoiceReplayAllocationObserved)
-                capacity = Math.Min(capacity, 2);
-            long observedHighWater = _roundChoiceReplayAllocationObserved
-                ? Math.Max(1, Volatile.Read(ref _roundChoiceReplayAllocatedHighWater))
-                : InitialRoundChoiceReplayAllocationHighWater;
-            long reserve = AddAllocationSafetyMargin(observedHighWater);
-            long remainingBytes = signal.RemainingBytes;
-            if (remainingBytes != long.MaxValue && remainingBytes < reserve)
-                return 0;
-            int memoryCapacity = remainingBytes == long.MaxValue
-                ? capacity
-                : (int)Math.Min(capacity, remainingBytes / reserve);
-            return memoryCapacity >= 2 ? memoryCapacity : 0;
-        }
-
-        private void ObserveRoundChoiceReplayAllocation(
-            IReadOnlyList<ActionReplayWorkerOutcome?> outcomes,
-            int outcomeCount)
-        {
-            long maximum = 0;
-            for (int index = 0; index < outcomeCount; index++)
-                maximum = Math.Max(maximum, outcomes[index]?.OutcomeAllocatedBytes ?? 0);
-            if (maximum > _roundChoiceReplayAllocatedHighWater)
-                _roundChoiceReplayAllocatedHighWater = maximum;
-            _roundChoiceReplayAllocationObserved = true;
-        }
-
-        private static long AddAllocationSafetyMargin(long value)
-            => value > long.MaxValue / 3
-                ? long.MaxValue
-                : Math.Max(1, (value * 3 + 1) / 2);
-
-        private int ResolveActionReplayMicrobatchCapacity(int remainingActions)
-        {
-            int capacity = Math.Min(DegreeOfParallelism, remainingActions);
-            SearchMemoryPressureSignal signal = _coordinator.SearchMemoryPressure;
-            if (!signal.IsEnabled)
-            {
-                return signal.ConservativeParallelismRequired
-                    ? Math.Min(capacity, 2)
-                    : capacity;
-            }
-
-            if (!_actionReplayAllocationObserved)
-                capacity = Math.Min(capacity, 2);
-            long reserve = _actionReplayAllocationObserved
-                ? Math.Max(1, Volatile.Read(ref _actionReplayAllocatedHighWater))
-                : InitialActionReplayAllocationHighWater;
-            long remainingBytes = signal.RemainingBytes;
-            int memoryCapacity = reserve <= 0 || remainingBytes == long.MaxValue
-                ? capacity
-                : (int)Math.Min(capacity, remainingBytes / reserve);
-            return memoryCapacity >= 2 ? memoryCapacity : 1;
-        }
-
-        private void ObserveActionReplayAllocation(
-            IReadOnlyList<ActionReplayWorkerOutcome?> outcomes,
-            int outcomeCount)
-        {
-            long maximum = 0;
-            for (int index = 0; index < outcomeCount; index++)
-                maximum = Math.Max(maximum, outcomes[index]?.OutcomeAllocatedBytes ?? 0);
-            if (maximum > _actionReplayAllocatedHighWater)
-                _actionReplayAllocatedHighWater = maximum;
-            _actionReplayAllocationObserved = true;
-        }
-
-        private void ExecuteActionReplay(
-            CombatBeamSolver worker,
-            SearchNode parent,
-            PreparedCardAction action,
-            ReplayForkSeed seed,
-            ActionReplayWave wave,
-            int outcomeIndex,
-            bool includeWorkerMetrics,
-            bool trackActiveWorker)
-        {
-            wave.RecordExecutedWorkItem();
-            int activeActionReplayWorkers = Interlocked.Increment(
-                ref _activeActionReplayWorkers);
-            UpdateMaximum(
-                ref _maximumActiveActionReplayWorkers,
-                activeActionReplayWorkers);
-            if (trackActiveWorker)
-            {
-                int activeWorkers = Interlocked.Increment(ref _activeWorkers);
-                UpdateMaximum(ref _maximumActiveWorkers, activeWorkers);
-            }
-            long allocatedAtStart = GC.GetAllocatedBytesForCurrentThread();
-            try
-            {
-                PreparedCardActionEvaluation evaluation = worker.EvaluatePreparedCardAction(
-                    parent,
-                    action,
-                    seed,
-                    _actionReplayForkGate);
-                long workerAllocatedBytes = Math.Max(
-                    0,
-                    GC.GetAllocatedBytesForCurrentThread() - allocatedAtStart);
-                wave.Outcomes[outcomeIndex] = new ActionReplayWorkerOutcome(
-                    includeWorkerMetrics ? worker : null,
-                    evaluation.Batch,
-                    evaluation.DeferredProbe,
-                    null,
-                    workerAllocatedBytes,
-                    SaturatingAdd(
-                        wave.SeedAllocatedBytes[outcomeIndex],
-                        workerAllocatedBytes));
-            }
-            catch (System.Exception error)
-            {
-                long workerAllocatedBytes = Math.Max(
-                    0,
-                    GC.GetAllocatedBytesForCurrentThread() - allocatedAtStart);
-                wave.Outcomes[outcomeIndex] = new ActionReplayWorkerOutcome(
-                    includeWorkerMetrics ? worker : null,
-                    null,
-                    null,
-                    ExceptionDispatchInfo.Capture(error),
-                    workerAllocatedBytes,
-                    SaturatingAdd(
-                        wave.SeedAllocatedBytes[outcomeIndex],
-                        workerAllocatedBytes));
-            }
-            finally
-            {
-                seed.Dispose();
-                if (trackActiveWorker)
-                    Interlocked.Decrement(ref _activeWorkers);
-                Interlocked.Decrement(ref _activeActionReplayWorkers);
-            }
-        }
-
-        private void ExecuteRoundChoiceReplay(
-            CombatBeamSolver worker,
-            SearchNode parent,
-            DeferredRoundChoiceFrontier frontier,
-            PendingChoiceReplayBranch branch,
-            ReplayForkSeed seed,
-            ActionReplayWave wave,
-            int outcomeIndex,
-            bool includeWorkerMetrics,
-            bool trackActiveWorker)
-        {
-            wave.RecordExecutedWorkItem();
-            int activeRoundChoiceReplayWorkers = Interlocked.Increment(
-                ref _activeRoundChoiceReplayWorkers);
-            UpdateMaximum(
-                ref _maximumActiveRoundChoiceReplayWorkers,
-                activeRoundChoiceReplayWorkers);
-            if (trackActiveWorker)
-            {
-                int activeWorkers = Interlocked.Increment(ref _activeWorkers);
-                UpdateMaximum(ref _maximumActiveWorkers, activeWorkers);
-            }
-            long allocatedAtStart = GC.GetAllocatedBytesForCurrentThread();
-            try
-            {
-                ExpansionBatch batch = worker.EvaluateDeferredRoundChoiceBranch(
-                    parent,
-                    frontier,
-                    branch,
-                    seed,
-                    _actionReplayForkGate);
-                long workerAllocatedBytes = Math.Max(
-                    0,
-                    GC.GetAllocatedBytesForCurrentThread() - allocatedAtStart);
-                wave.Outcomes[outcomeIndex] = new ActionReplayWorkerOutcome(
-                    includeWorkerMetrics ? worker : null,
-                    batch,
-                    null,
-                    null,
-                    workerAllocatedBytes,
-                    SaturatingAdd(
-                        wave.SeedAllocatedBytes[outcomeIndex],
-                        workerAllocatedBytes));
-            }
-            catch (System.Exception error)
-            {
-                long workerAllocatedBytes = Math.Max(
-                    0,
-                    GC.GetAllocatedBytesForCurrentThread() - allocatedAtStart);
-                wave.Outcomes[outcomeIndex] = new ActionReplayWorkerOutcome(
-                    includeWorkerMetrics ? worker : null,
-                    null,
-                    null,
-                    ExceptionDispatchInfo.Capture(error),
-                    workerAllocatedBytes,
-                    SaturatingAdd(
-                        wave.SeedAllocatedBytes[outcomeIndex],
-                        workerAllocatedBytes));
-            }
-            finally
-            {
-                seed.Dispose();
-                if (trackActiveWorker)
-                    Interlocked.Decrement(ref _activeWorkers);
-                Interlocked.Decrement(ref _activeRoundChoiceReplayWorkers);
-            }
-        }
-
-        private static long SaturatingAdd(long left, long right)
+        internal static long SaturatingAdd(long left, long right)
             => left > long.MaxValue - right ? long.MaxValue : left + right;
 
-        private static void UpdateMaximum(ref int target, int value)
+        internal static void UpdateMaximum(ref int target, int value)
         {
             int observed = Volatile.Read(ref target);
             while (observed < value)
@@ -955,126 +256,10 @@ internal sealed partial class CombatBeamSolver
             }
         }
 
-        private sealed class ExpansionWave(int workItemCount) : IDisposable
-        {
-            public ExpansionWorkerOutcome[] Outcomes { get; } = new ExpansionWorkerOutcome[workItemCount];
-            public CountdownEvent BackgroundCompleted { get; } = new(Math.Max(0, workItemCount - 1));
-
-            public void Dispose()
-            {
-                BackgroundCompleted.Dispose();
-            }
-        }
-
-        private interface IExpansionLaneWorkItem
+        internal interface IExpansionLaneWorkItem
         {
             void Execute(ParallelExpansionExecutor owner, CombatBeamSolver worker);
             void Signal();
-        }
-
-        private sealed record ExpansionWorkItem(
-            SearchNode Node,
-            ExpansionWave Wave,
-            int OutcomeIndex) : IExpansionLaneWorkItem
-        {
-            public void Execute(ParallelExpansionExecutor owner, CombatBeamSolver worker)
-                => owner.Execute(
-                    worker,
-                    Node,
-                    Wave,
-                    OutcomeIndex,
-                    includeWorkerMetrics: true);
-
-            public void Signal() => Wave.BackgroundCompleted.Signal();
-        }
-
-        private sealed class ActionReplayWave(int workItemCount) : IDisposable
-        {
-            private readonly ReplayForkSeed?[] _seeds = new ReplayForkSeed?[workItemCount];
-            private int _executedWorkItemCount;
-
-            public ActionReplayWorkerOutcome?[] Outcomes { get; } =
-                new ActionReplayWorkerOutcome?[workItemCount];
-            public long[] SeedAllocatedBytes { get; } = new long[workItemCount];
-            public CountdownEvent BackgroundCompleted { get; } = new(1);
-            public int OutcomeCount { get; private set; } = workItemCount;
-            public int ExecutedWorkItemCount => Volatile.Read(ref _executedWorkItemCount);
-
-            public void SetSeed(int outcomeIndex, ReplayForkSeed seed, long allocatedBytes)
-            {
-                if (Interlocked.CompareExchange(ref _seeds[outcomeIndex], seed, null) != null)
-                    throw new InvalidOperationException("并行动作 seed 被重复设置。");
-                SeedAllocatedBytes[outcomeIndex] = allocatedBytes;
-            }
-
-            public ReplayForkSeed TakeSeed(int outcomeIndex)
-                => Interlocked.Exchange(ref _seeds[outcomeIndex], null)
-                    ?? throw new InvalidOperationException("并行动作 seed 缺失或已移交。");
-
-            public void RecordExecutedWorkItem()
-                => Interlocked.Increment(ref _executedWorkItemCount);
-
-            public void RegisterBackgroundWork()
-                => BackgroundCompleted.AddCount();
-
-            public void CancelBackgroundRegistration()
-                => BackgroundCompleted.Signal();
-
-            public void StopDispatchAt(int outcomeCount)
-                => OutcomeCount = Math.Min(OutcomeCount, outcomeCount);
-
-            public void CompleteDispatch() => BackgroundCompleted.Signal();
-
-            public void Dispose()
-            {
-                foreach (ReplayForkSeed? seed in _seeds)
-                    seed?.Dispose();
-                BackgroundCompleted.Dispose();
-            }
-        }
-
-        private sealed record ActionReplayWorkItem(
-            SearchNode Parent,
-            PreparedCardAction Action,
-            ReplayForkSeed Seed,
-            ActionReplayWave Wave,
-            int OutcomeIndex) : IExpansionLaneWorkItem
-        {
-            public void Execute(ParallelExpansionExecutor owner, CombatBeamSolver worker)
-                => owner.ExecuteActionReplay(
-                    worker,
-                    Parent,
-                    Action,
-                    Seed,
-                    Wave,
-                    OutcomeIndex,
-                    includeWorkerMetrics: true,
-                    trackActiveWorker: true);
-
-            public void Signal() => Wave.BackgroundCompleted.Signal();
-        }
-
-        private sealed record RoundChoiceReplayWorkItem(
-            SearchNode Parent,
-            DeferredRoundChoiceFrontier Frontier,
-            PendingChoiceReplayBranch Branch,
-            ReplayForkSeed Seed,
-            ActionReplayWave Wave,
-            int OutcomeIndex) : IExpansionLaneWorkItem
-        {
-            public void Execute(ParallelExpansionExecutor owner, CombatBeamSolver worker)
-                => owner.ExecuteRoundChoiceReplay(
-                    worker,
-                    Parent,
-                    Frontier,
-                    Branch,
-                    Seed,
-                    Wave,
-                    OutcomeIndex,
-                    includeWorkerMetrics: true,
-                    trackActiveWorker: true);
-
-            public void Signal() => Wave.BackgroundCompleted.Signal();
         }
 
         private sealed class ExpansionLane : IDisposable
@@ -1203,18 +388,7 @@ internal sealed partial class CombatBeamSolver
     private bool TryPrepareParallelExpansion(SearchNode node)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (node.IsTerminal
-            || node.Snapshot.PlayerDead
-            || node.Snapshot.AllEnemiesDead
-            || node.Snapshot.BoundaryReason != SearchBoundaryReason.None)
-        {
-            throw new InvalidOperationException("终结搜索节点不应进入并行展开阶段。");
-        }
-        _run.ReusedNodeSnapshots++;
-        if (!TryMarkExpandedState(node))
-            return false;
-        _run.Expanded++;
-        return true;
+        return TryAdmitExpansionParent(node, node.Snapshot, parallel: true);
     }
 
     private CombatBeamSolver CreateExpansionWorker()
@@ -1227,45 +401,31 @@ internal sealed partial class CombatBeamSolver
             cancellationToken,
             progressCallback: null,
             searchProfile: _profile,
-            shortCheckpointMilliseconds: _shortCheckpointMilliseconds,
             potionPolicyOverride: _potionPolicy,
             potionFreePolicyBaseline: _potionFreePolicyBaseline,
-            maximumPotionUses: _maximumPotionUses);
+            maximumPotionUses: _maximumPotionUses,
+            earliestPotionTurn: _earliestPotionTurn,
+            planCommitment: _planCommitment);
         worker._run.InitialPersistentBuffValue = _run.InitialPersistentBuffValue;
         worker._run.InitialEnemyStrengthSuppression = _run.InitialEnemyStrengthSuppression;
         worker._run.InitialEnemyWeakTurns = _run.InitialEnemyWeakTurns;
         worker._run.InitialRetainedAttackValue = _run.InitialRetainedAttackValue;
+        worker._run.PathDiagnosticsSolverId = _run.PathDiagnosticsSolverId;
+        worker._disableCardChoiceContinuationsForTesting = _disableCardChoiceContinuationsForTesting;
+        worker._disablePotionChoiceContinuationsForTesting = _disablePotionChoiceContinuationsForTesting;
+        worker._disableExecutionChoiceContinuationsForTesting = _disableExecutionChoiceContinuationsForTesting;
+        worker._verifyChoiceContinuationStepsForTesting = _verifyChoiceContinuationStepsForTesting;
         return worker;
-    }
-
-    private ExpansionBatch EvaluateRawExpansion(
-        SearchNode node,
-        ParallelExpansionExecutor? actionReplayExecutor)
-    {
-        ExpansionBatch batch = new();
-        bool completed = false;
-        try
-        {
-            GenerateRawCardCandidates(node, batch, actionReplayExecutor);
-            GenerateRawPotionCandidates(node, batch);
-            GenerateRawEndTurnCandidates(node, batch);
-            completed = true;
-            return batch;
-        }
-        finally
-        {
-            if (!completed)
-                batch.Dispose();
-        }
     }
 
     private PreparedCardActionEvaluation EvaluatePreparedCardAction(
         SearchNode parent,
         PreparedCardAction action,
         ReplayForkSeed? seed,
-        object replayForkGate)
+        object replayForkGate,
+        bool allowPendingChoiceDeferral = true)
     {
-        ExpansionBatch batch = new();
+        ExpansionBatch batch = RentExpansionBatch();
         bool completed = false;
         try
         {
@@ -1275,7 +435,7 @@ internal sealed partial class CombatBeamSolver
                 seed,
                 replayForkGate,
                 batch,
-                allowPendingChoiceDeferral: true);
+                allowPendingChoiceDeferral);
             if (deferredProbe != null)
             {
                 batch.Dispose();
@@ -1292,120 +452,13 @@ internal sealed partial class CombatBeamSolver
         }
     }
 
-    private void GenerateRawCardCandidates(
-        SearchNode node,
-        ExpansionBatch batch,
-        ParallelExpansionExecutor? actionReplayExecutor)
+    private List<PreparedCardAction> PrepareCardActions(
+        SearchNode node, bool cardNameFirst = true)
     {
-        List<PreparedCardAction> actions = PrepareCardActions(node);
-        if (actionReplayExecutor != null && actions.Count >= 2)
-        {
-            using ExpansionBatch replayed = actionReplayExecutor.EvaluateCardActions(node, actions);
-            foreach (RawCardCandidate candidate in replayed.Cards)
-                replayed.TransferTo(batch, candidate);
-            return;
-        }
-        foreach (PreparedCardAction action in actions)
-        {
-            DeferredCardActionProbe? deferredProbe = GeneratePreparedCardAction(
-                node,
-                action,
-                seed: null,
-                replayForkGate: null,
-                batch,
-                allowPendingChoiceDeferral: false);
-            if (deferredProbe != null)
-            {
-                deferredProbe.Dispose();
-                throw new InvalidOperationException(
-                    "串行卡牌展开意外返回 deferred choice probe。");
-            }
-        }
-    }
-
-    private List<PreparedCardAction> PrepareCardActions(SearchNode node)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        SimulationSnapshot snapshot = node.Snapshot;
-        CombatPredictionSimulator simulator = (CombatPredictionSimulator)snapshot.Simulator;
-        SimulatedCombatState simulatedCombat = (SimulatedCombatState)simulator.State.CombatState;
-        if (snapshot.PlayerDead || snapshot.AllEnemiesDead)
-            return [];
-
-        SimPlayerCombatState playerState = simulator.State.GetPlayerCombatState(_player);
-        IReadOnlyList<PredictedCard> hand = playerState.Hand.Cards;
-        List<PreparedCardAction> actions = new(hand.Count);
-        HandFingerprintBuffer seenCards = default;
-        int seenCardCount = 0;
-        for (int handIndex = 0; handIndex < hand.Count; handIndex++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            PredictedCard card = hand[handIndex];
-            string cardId = card.Preview.Id.Entry;
-            int occurrence = 0;
-            for (int priorIndex = 0; priorIndex < handIndex; priorIndex++)
-            {
-                if (string.Equals(hand[priorIndex].Preview.Id.Entry, cardId, StringComparison.Ordinal))
-                    occurrence++;
-            }
-            if (!simulatedCombat.CanPlayCard(simulator, card))
-                continue;
-            StateFingerprint playableKey = BuildPlayableCardKey(card);
-            bool duplicate = false;
-            for (int seenIndex = 0; seenIndex < seenCardCount; seenIndex++)
-            {
-                if (seenCards[seenIndex] == playableKey)
-                {
-                    duplicate = true;
-                    break;
-                }
-            }
-            if (duplicate)
-            {
-                _run.DuplicateCardBranchesPruned++;
-                continue;
-            }
-            seenCards[seenCardCount++] = playableKey;
-            string cardStateKey = CardChoiceSupport.ChoiceCardKey(card);
-            bool requiresUnsupportedExistingChoice =
-                CardChoiceSupport.RequiresUnsupportedExistingChoice(card.Preview);
-            PlanCardChoice? requiredEmptyChoice =
-                CardChoiceSupport.BuildRequiredEmptyChoice(card.Preview);
-            int cardStateOccurrence = 0;
-            for (int priorIndex = 0; priorIndex < handIndex; priorIndex++)
-            {
-                if (string.Equals(
-                        CardChoiceSupport.ChoiceCardKey(hand[priorIndex]),
-                        cardStateKey,
-                        StringComparison.Ordinal))
-                {
-                    cardStateOccurrence++;
-                }
-            }
-            foreach ((int targetIndex, Creature? target) in TargetsFor(card, simulator))
-            {
-                if (node.ActionCount == 0 && !card.Original.CanPlayTargeting(target))
-                    continue;
-                PlanAction planAction = new(
-                    PlanActionKind.PlayCard,
-                    node.Turn,
-                    card.Preview.Id.Entry,
-                    occurrence,
-                    targetIndex,
-                    target?.CombatId,
-                    displayNames.Card(card.Preview),
-                    displayNames.Creature(target),
-                    ReplayCount: Math.Max(0, card.Preview.GetEnchantedReplayCount()),
-                    CardStateKey: cardStateKey,
-                    CardStateOccurrence: cardStateOccurrence);
-                actions.Add(new PreparedCardAction(
-                    planAction,
-                    card.Preview.Type,
-                    target?.CombatId,
-                    requiresUnsupportedExistingChoice,
-                    requiredEmptyChoice));
-            }
-        }
+        List<PreparedCardAction> actions = [];
+        foreach (PreparedCardAction action in EnumeratePlannedCardActions(
+                     new ExpansionPlan(node, CardNameFirst: cardNameFirst)))
+            actions.Add(action);
         return actions;
     }
 
@@ -1424,13 +477,16 @@ internal sealed partial class CombatBeamSolver
         {
             cancellationToken.ThrowIfCancellationRequested();
             SimulationSnapshot snapshot = node.Snapshot;
-            SimulationSnapshot probeSnapshot = ReplayAction(node, action.Action, seed);
+            using CardChoiceReplayCapture? cardCapture = PrepareCardChoiceCapture(node, action.Action);
+            SimulationSnapshot probeSnapshot = ReplayAction(node, action.Action, seed, cardChoiceCapture: cardCapture);
             if (allowPendingChoiceDeferral
                 && probeSnapshot.BoundaryReason == SearchBoundaryReason.PendingChoice)
             {
                 try
                 {
-                    return new DeferredCardActionProbe(action, probeSnapshot);
+                    var probe = new DeferredCardActionProbe(action, probeSnapshot);
+                    probe.AttachCheckpoint(cardCapture?.Take());
+                    return probe;
                 }
                 catch
                 {
@@ -1441,32 +497,11 @@ internal sealed partial class CombatBeamSolver
                     throw;
                 }
             }
-            CardChoiceSpec? choiceSpec = BuildPrimaryCardChoiceSpec(probeSnapshot);
-            if (choiceSpec == null && action.RequiresUnsupportedExistingChoice)
-            {
-                probeSnapshot.ReleaseSimulator();
+            if (!TryResolvePlannedCardChoices(node, action, probeSnapshot,
+                    out IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> resolvedBranches))
                 return null;
-            }
-            CardChoiceSpec? primaryChoiceSpec = choiceSpec
-                ?? BuildRequiredEmptyChoiceSpec(action.RequiredEmptyChoice);
-            int actionChoiceBranchLimit = ResolveWholeActionChoiceBranchLimit(
-                action.Action,
-                primaryChoiceSpec);
-            IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> resolvedBranches =
-                HasChoiceBeforePrimary(probeSnapshot, primaryChoiceSpec)
-                    ? ResolveRoundChoiceBranches(
-                        node,
-                        action.Action,
-                        probeSnapshot,
-                        BuildPrimaryChoiceMatch(primaryChoiceSpec),
-                        actionChoiceBranchLimit)
-                    : ResolvePrimaryCardChoiceBranches(
-                        node,
-                        action.Action,
-                        probeSnapshot,
-                        choiceSpec,
-                        action.RequiredEmptyChoice);
-            AddResolvedCardCandidates(node, action, resolvedBranches, batch);
+            AddResolvedCardCandidates(node, action,
+                WithCardChoiceCheckpoint(cardCapture?.Take(), resolvedBranches), batch);
             return null;
         }
         finally
@@ -1481,238 +516,112 @@ internal sealed partial class CombatBeamSolver
         IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> resolvedBranches,
         ExpansionBatch batch)
     {
-        SimulationSnapshot snapshot = node.Snapshot;
         foreach ((PlanAction finalAction, SimulationSnapshot finalSnapshot) in resolvedBranches)
         {
-            bool forcedTurnEnd = finalSnapshot.Turn > node.Turn;
-            PlanAction nodeAction = finalAction with { EndsPlayerTurn = forcedTurnEnd };
-            bool terminal = finalSnapshot.PlayerDead
-                || finalSnapshot.AllEnemiesDead
-                || finalSnapshot.BoundaryReason != SearchBoundaryReason.None;
-            SearchNode child = new(
-                nodeAction,
-                node.ActionCount + 1,
-                finalSnapshot.PotionUseCount,
-                finalSnapshot.PotionStrategicCost,
-                forcedTurnEnd ? node.Turn + 1 : node.Turn,
-                node.Traits,
-                node.FutureSoldHp,
-                ApplySoldHpPenalty(finalSnapshot.Score, node.FutureSoldHp),
-                finalSnapshot.StateKey,
-                finalSnapshot.HasRisk,
-                finalSnapshot.BoundaryReason,
-                terminal,
-                node,
-                finalSnapshot,
-                forcedTurnEnd
-                    ? node.CombatProgress.Advance(finalSnapshot)
-                    : node.CombatProgress)
+            bool published = false;
+            try
             {
-                CumulativeEnemyHpLost = AccumulateEnemyHpLost(node, finalSnapshot),
-            };
-            child = AttachCycleSchedulingEvidence(child);
-            batch.Add(new RawCardCandidate(
-                child,
-                action.CardType,
-                action.TargetCombatId));
+                SearchNode child = CreatePlannedCardChild(node, finalAction, finalSnapshot);
+                RawCardCandidate candidate = new(
+                    child, action.CardType, action.TargetCombatId);
+                batch.Add(candidate);
+                published = true;
+            }
+            finally
+            {
+                if (!published)
+                    finalSnapshot.ReleaseSimulator();
+            }
         }
     }
 
-    private DeferredRoundChoiceFrontier? PrepareDeferredRoundChoiceFrontier(
+    private PrimaryChoiceReplayFrontier? ResolveDeferredRoundChoiceAction(
         SearchNode node,
         DeferredCardActionProbe deferredProbe,
         ExpansionBatch completedBatch)
     {
+        // Physical-occurrence slots are selected only after every semantic branch of this action
+        // has had a chance to expose an identity-sensitive frontier. Keep that two-phase collector
+        // with one exclusive choice-job owner: different actions may run on different lanes,
+        // while each action uses the same ordered algorithm as DOP1 without shared atomic quota.
         _run.DeferredRoundChoiceActions++;
         PreparedCardAction preparedAction = deferredProbe.Action;
-        SimulationSnapshot? currentSnapshot = deferredProbe.TakeSnapshot();
-        PlanAction currentAction = preparedAction.Action;
-        PrimaryChoiceMatch? unresolvedPrimaryChoice = null;
-        int lastLayerWidth = 0;
+        SimulationSnapshot? snapshot = deferredProbe.TakeSnapshot();
+        CardChoiceReplayCheckpoint? checkpoint = deferredProbe.TakeCheckpoint();
         try
         {
-            CardChoiceSpec? choiceSpec = BuildPrimaryCardChoiceSpec(currentSnapshot);
+            CardChoiceSpec? choiceSpec = BuildPrimaryCardChoiceSpec(snapshot);
             if (choiceSpec == null && preparedAction.RequiresUnsupportedExistingChoice)
             {
-                currentSnapshot.ReleaseSimulator();
-                currentSnapshot = null;
+                snapshot.ReleaseSimulator();
+                snapshot = null;
                 RecordDeferredRoundChoiceLayer(width: 0);
                 return null;
             }
 
             CardChoiceSpec? primaryChoiceSpec = choiceSpec
                 ?? BuildRequiredEmptyChoiceSpec(preparedAction.RequiredEmptyChoice);
-            if (HasChoiceBeforePrimary(currentSnapshot, primaryChoiceSpec))
+            IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> resolvedBranches;
+            SimulationSnapshot ownedSnapshot = snapshot;
+            if (HasChoiceBeforePrimary(ownedSnapshot, primaryChoiceSpec))
             {
-                unresolvedPrimaryChoice = BuildPrimaryChoiceMatch(primaryChoiceSpec);
-                int maxFinalBranches = ResolveWholeActionChoiceBranchLimit(
-                    currentAction,
-                    primaryChoiceSpec);
-                PendingChoiceReplayLayer layer = BuildPendingChoiceReplayLayer(
+                resolvedBranches = ResolveRoundChoiceBranches(
                     node,
-                    currentAction,
-                    currentSnapshot,
-                    unresolvedPrimaryChoice,
-                    maxFinalBranches);
-                lastLayerWidth = layer.Branches.Count;
-                currentSnapshot.ReleaseSimulator();
-                currentSnapshot = null;
-                if (maxFinalBranches != int.MaxValue)
-                {
-                    RecordDeferredRoundChoiceLayer(
-                        lastLayerWidth,
-                        finitePendingFallback: true);
-                    AddResolvedCardCandidates(
-                        node,
-                        preparedAction,
-                        ResolvePendingChoiceReplayLayer(
-                            node,
-                            layer,
-                            unresolvedPrimaryChoice,
-                            maxFinalBranches,
-                            CreateChoiceReplayBudget(maxFinalBranches)),
-                        completedBatch);
-                    return null;
-                }
-                if (layer.Branches.Count >= 2)
-                {
-                    RecordDeferredRoundChoiceLayer(lastLayerWidth);
-                    return new DeferredRoundChoiceFrontier(
-                        preparedAction,
-                        layer.Branches,
-                        unresolvedPrimaryChoice,
-                        MaxFinalBranchesPerBranch: int.MaxValue);
-                }
-                if (layer.Branches.Count == 0)
-                {
-                    RecordDeferredRoundChoiceLayer(lastLayerWidth);
-                    return null;
-                }
-                PendingChoiceReplayBranch onlyBranch = layer.Branches[0];
-                currentAction = onlyBranch.Action;
-                currentSnapshot = ReplayPendingChoiceBranch(node, onlyBranch);
+                    preparedAction.Action,
+                    ownedSnapshot,
+                    BuildPrimaryChoiceMatch(primaryChoiceSpec),
+                    budgetPrimaryChoiceSpec: primaryChoiceSpec);
+                RecordDeferredRoundChoiceLayer(
+                    width: 1,
+                    finitePendingFallback: true);
             }
             else
             {
                 PrimaryCardChoiceLayer layer = BuildPrimaryCardChoiceLayer(
-                    currentAction,
-                    currentSnapshot,
+                    preparedAction.Action,
+                    ownedSnapshot,
                     choiceSpec,
                     preparedAction.RequiredEmptyChoice);
-                lastLayerWidth = layer.Choices.Count;
-                bool finitePrimaryLayer =
-                    layer.DownstreamChoiceBranchQuota != int.MaxValue;
                 if (layer.UnregisteredPendingChoice)
                 {
-                    currentSnapshot.ReleaseSimulator();
-                    currentSnapshot = null;
                     throw new InvalidOperationException(
-                        $"卡牌 {currentAction.CardId} 产生了未登记的分支选择，不能静默回退到原生重扫。");
+                        $"卡牌 {preparedAction.Action.CardId} 产生了未登记的分支选择，" +
+                        "不能静默回退到原生重扫。");
                 }
-                if (layer.Choices.Count >= 2)
+                RecordDeferredRoundChoiceLayer(layer.Choices.Count, finitePrimaryLayer: true);
+                PrimaryChoiceReplayFrontier? frontier = PreparePrimaryChoiceReplays(
+                    layer, card: preparedAction, cardCheckpoint: checkpoint);
+                if (frontier != null)
                 {
-                    List<PendingChoiceReplayBranch> branches = new(layer.Choices.Count);
-                    foreach (PlanCardChoice? choice in layer.Choices)
-                    {
-                        if (choice == null)
-                        {
-                            throw new InvalidOperationException(
-                                "多分支 primary choice 不能包含复用 probe 的空分支。");
-                        }
-                        branches.Add(new PendingChoiceReplayBranch(
-                            currentAction with { Choice = choice },
-                            PruneInvalidBranch: true));
-                    }
-                    currentSnapshot.ReleaseSimulator();
-                    currentSnapshot = null;
-                    RecordDeferredRoundChoiceLayer(
-                        lastLayerWidth,
-                        finitePrimaryLayer: finitePrimaryLayer);
-                    return new DeferredRoundChoiceFrontier(
-                        preparedAction,
-                        branches,
-                        UnresolvedPrimaryChoice: null,
-                        MaxFinalBranchesPerBranch: layer.DownstreamChoiceBranchQuota);
+                    snapshot.ReleaseSimulator();
+                    snapshot = null;
+                    checkpoint = null; // The frontier now owns the checkpoint until all lanes drain.
+                    return frontier;
                 }
-                if (finitePrimaryLayer)
-                {
-                    RecordDeferredRoundChoiceLayer(
-                        lastLayerWidth,
-                        finitePrimaryLayer: true);
-                    SimulationSnapshot ownedProbe = currentSnapshot;
-                    currentSnapshot = null;
-                    AddResolvedCardCandidates(
-                        node,
-                        preparedAction,
-                        ResolvePrimaryCardChoiceLayer(
-                            node,
-                            currentAction,
-                            ownedProbe,
-                            layer),
-                        completedBatch);
-                    return null;
-                }
-                PlanCardChoice? onlyChoice = layer.Choices[0];
-                currentAction = currentAction with { Choice = onlyChoice };
-                if (onlyChoice != null)
-                {
-                    currentSnapshot.ReleaseSimulator();
-                    currentSnapshot = null;
-                    currentSnapshot = ReplayPlannedChoiceBranch(node, currentAction);
-                }
-            }
-
-            while (currentSnapshot != null)
-            {
-                if (currentSnapshot.BoundaryReason != SearchBoundaryReason.PendingChoice)
-                {
-                    SimulationSnapshot finalSnapshot = currentSnapshot;
-                    currentSnapshot = null;
-                    AddResolvedCardCandidates(
-                        node,
-                        preparedAction,
-                        [(currentAction, finalSnapshot)],
-                        completedBatch);
-                    RecordDeferredRoundChoiceLayer(lastLayerWidth);
-                    return null;
-                }
-
-                PendingChoiceReplayLayer layer = BuildPendingChoiceReplayLayer(
+                resolvedBranches = ResolvePrimaryCardChoiceLayer(
                     node,
-                    currentAction,
-                    currentSnapshot,
-                    unresolvedPrimaryChoice,
-                    int.MaxValue);
-                lastLayerWidth = layer.Branches.Count;
-                currentSnapshot.ReleaseSimulator();
-                currentSnapshot = null;
-                if (layer.Branches.Count >= 2)
-                {
-                    RecordDeferredRoundChoiceLayer(lastLayerWidth);
-                    return new DeferredRoundChoiceFrontier(
-                        preparedAction,
-                        layer.Branches,
-                        unresolvedPrimaryChoice,
-                        MaxFinalBranchesPerBranch: int.MaxValue);
-                }
-                if (layer.Branches.Count == 0)
-                {
-                    RecordDeferredRoundChoiceLayer(lastLayerWidth);
-                    return null;
-                }
-                PendingChoiceReplayBranch onlyBranch = layer.Branches[0];
-                currentAction = onlyBranch.Action;
-                currentSnapshot = ReplayPendingChoiceBranch(node, onlyBranch);
+                    preparedAction.Action,
+                    ownedSnapshot,
+                    layer);
             }
 
-            RecordDeferredRoundChoiceLayer(lastLayerWidth);
+            resolvedBranches = WithCardChoiceCheckpoint(checkpoint, resolvedBranches);
+            checkpoint = null;
+            snapshot = null; // The iterator now owns the original probe, including early failure.
+            AddResolvedCardCandidates(
+                node,
+                preparedAction,
+                resolvedBranches,
+                completedBatch);
             return null;
         }
         finally
         {
-            currentSnapshot?.ReleaseSimulator();
+            snapshot?.ReleaseSimulator();
+            checkpoint?.Dispose();
         }
     }
+
 
     private void RecordDeferredRoundChoiceLayer(
         int width,
@@ -1734,218 +643,138 @@ internal sealed partial class CombatBeamSolver
         }
     }
 
-    private IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)>
-        ResolveDeferredRoundChoiceBranchesSerially(
-            SearchNode node,
-            DeferredRoundChoiceFrontier frontier,
-            IReadOnlyList<PendingChoiceReplayBranch> branches)
-    {
-        foreach (PendingChoiceReplayBranch branch in branches)
-        {
-            ChoiceReplayBudget replayBudget = CreateChoiceReplayBudget(
-                frontier.MaxFinalBranchesPerBranch);
-            if (!TrySpendChoiceReplayBudget(replayBudget))
-                continue;
-            SimulationSnapshot? branchSnapshot = ReplayPendingChoiceBranch(node, branch);
-            if (branchSnapshot == null)
-                continue;
-            foreach ((PlanAction finalAction, SimulationSnapshot finalSnapshot) in
-                     ResolveRoundChoiceBranches(
-                         node,
-                         branch.Action,
-                         branchSnapshot,
-                         frontier.UnresolvedPrimaryChoice,
-                         frontier.MaxFinalBranchesPerBranch,
-                         replayBudget))
-            {
-                yield return (finalAction, finalSnapshot);
-            }
-        }
-    }
-
-    private ExpansionBatch EvaluateDeferredRoundChoiceBranch(
-        SearchNode node,
-        DeferredRoundChoiceFrontier frontier,
-        PendingChoiceReplayBranch branch,
-        ReplayForkSeed? seed,
-        object? replayForkGate)
-    {
-        if (_parallelActionReplayForkGate != null)
-            throw new InvalidOperationException("不能嵌套并行 round-choice replay 上下文。");
-        _parallelActionReplayForkGate = replayForkGate;
-        ExpansionBatch batch = new();
-        bool completed = false;
-        try
-        {
-            ChoiceReplayBudget replayBudget = CreateChoiceReplayBudget(
-                frontier.MaxFinalBranchesPerBranch);
-            SimulationSnapshot? branchSnapshot = TrySpendChoiceReplayBudget(replayBudget)
-                ? ReplayPendingChoiceBranch(node, branch, seed)
-                : null;
-            if (branchSnapshot != null)
-            {
-                AddResolvedCardCandidates(
-                    node,
-                    frontier.PreparedAction,
-                    ResolveRoundChoiceBranches(
-                        node,
-                        branch.Action,
-                        branchSnapshot,
-                        frontier.UnresolvedPrimaryChoice,
-                        frontier.MaxFinalBranchesPerBranch,
-                        replayBudget),
-                    batch);
-            }
-            completed = true;
-            return batch;
-        }
-        finally
-        {
-            _parallelActionReplayForkGate = null;
-            if (!completed)
-                batch.Dispose();
-        }
-    }
 
     private void GenerateRawPotionCandidates(SearchNode node, ExpansionBatch batch)
     {
-        SimulationSnapshot snapshot = node.Snapshot;
-        if (snapshot.PlayerDead || snapshot.AllEnemiesDead
-            || _maximumPotionUses != null
-                && ExplicitPotionUseCount(node) >= _maximumPotionUses.Value)
+        foreach (PreparedPotionAction action in PreparePotionActions(node))
         {
-            return;
-        }
-
-        CombatPredictionSimulator simulator = (CombatPredictionSimulator)snapshot.Simulator;
-        SimulatedCombatState simulatedCombat = (SimulatedCombatState)simulator.State.CombatState;
-        for (int potionSlot = 0; potionSlot < root.PotionSlotCount; potionSlot++)
-        {
-            PotionModel? potion = simulatedCombat.GetPotionAtSlot(_player, potionSlot);
-            if (potion == null
-                || !simulatedCombat.IsPotionAvailable(_player, potionSlot)
-                || !PotionOnUseSupport.CanSearch(potion)
-                || !AllowsPotionUse(potionSlot, potion.Id.Entry)
-                || PotionUsePolicy.RequiresOpeningUse(potion)
-                    && node.Actions.Any(action => action.Kind != PlanActionKind.UsePotion))
-            {
-                continue;
-            }
-
-            foreach ((int targetIndex, Creature? target) in TargetsForPotion(potion, simulator))
-            {
-                PlanAction baseAction = new(
-                    PlanActionKind.UsePotion,
-                    node.Turn,
-                    TargetIndex: targetIndex,
-                    TargetCombatId: target?.CombatId,
-                    TargetName: displayNames.Creature(target),
-                    PotionSlot: potionSlot,
-                    PotionId: potion.Id.Entry,
-                    PotionTitle: displayNames.Potion(potion));
-                SimulationSnapshot? probeSnapshot = null;
-                IReadOnlyList<PlanCardChoice?> choices;
-                CardChoiceSpec? choiceSpec = null;
-                if (PotionChoiceSupport.RequiresChoice(potion))
-                {
-                    CombatPredictionSimulator choiceSimulator = simulator;
-                    if (PotionChoiceSupport.GeneratesCardChoice(potion))
-                    {
-                        probeSnapshot = ReplayAction(node, baseAction);
-                        choiceSimulator = (CombatPredictionSimulator)probeSnapshot.Simulator;
-                    }
-                    choiceSpec = PotionChoiceSupport.GetSpec(choiceSimulator, potion);
-                    choices = CardChoiceSupport.BuildChoices(
-                            choiceSpec,
-                            displayNames,
-                            _profile.MaxPileChoiceBranchesPerAction,
-                            _profile.MaxHandChoiceBranchesPerAction)
-                        .Select(choice => choice with { SourceId = potion.Id.Entry })
-                        .Cast<PlanCardChoice?>()
-                        .ToList();
-                    _run.ChoiceBranchesEvaluated += choices.Count;
-                    probeSnapshot?.ReleaseSimulator();
-                }
-                else
-                {
-                    probeSnapshot = ReplayAction(node, baseAction);
-                    choices = [null];
-                }
-                int maxFinalBranches = ResolveWholeActionChoiceBranchLimit(
-                    baseAction,
-                    choiceSpec);
-                ChoiceReplayBudget replayBudget = CreateChoiceReplayBudget(maxFinalBranches);
-
-                foreach (PlanCardChoice? choice in choices)
-                {
-                    PlanAction action = baseAction with { Choice = choice };
-                    SimulationSnapshot childSnapshot;
-                    if (choice == null)
-                    {
-                        childSnapshot = probeSnapshot
-                            ?? throw new InvalidOperationException("无选牌药水缺少动作快照。");
-                    }
-                    else
-                    {
-                        if (!TrySpendChoiceReplayBudget(replayBudget))
-                            break;
-                        SimulationSnapshot? replayedChoice = ReplayPlannedChoiceBranch(node, action);
-                        if (replayedChoice == null)
-                            continue;
-                        childSnapshot = replayedChoice;
-                    }
-
-                    foreach ((PlanAction finalAction, SimulationSnapshot finalSnapshot) in
-                             ResolveRoundChoiceBranches(
-                                 node,
-                                 action,
-                                 childSnapshot,
-                                 maxFinalBranches: maxFinalBranches,
-                                 replayBudget: replayBudget))
-                    {
-                        bool terminal = finalSnapshot.PlayerDead
-                            || finalSnapshot.AllEnemiesDead
-                            || finalSnapshot.BoundaryReason != SearchBoundaryReason.None;
-                        SearchNode child = new(
-                            finalAction,
-                            node.ActionCount + 1,
-                            finalSnapshot.PotionUseCount,
-                            finalSnapshot.PotionStrategicCost,
-                            node.Turn,
-                            ClassifyPotionTraits(node.Traits, snapshot, finalSnapshot),
-                            node.FutureSoldHp,
-                            ApplySoldHpPenalty(finalSnapshot.Score, node.FutureSoldHp),
-                            finalSnapshot.StateKey,
-                            finalSnapshot.HasRisk,
-                            finalSnapshot.BoundaryReason,
-                            terminal,
-                            node,
-                            finalSnapshot,
-                            node.CombatProgress)
-                        {
-                            CumulativeEnemyHpLost = AccumulateEnemyHpLost(node, finalSnapshot),
-                        };
-                        child = AttachCycleSchedulingEvidence(child);
-                        batch.AddPotion(child);
-                    }
-                }
-            }
+            if (GeneratePreparedPotionAction(node, action, batch) != null)
+                throw new InvalidOperationException("串行药水展开意外返回了并行选择 frontier。");
         }
     }
 
-    private void GenerateRawEndTurnCandidates(SearchNode node, ExpansionBatch batch)
+    private List<PreparedPotionAction> PreparePotionActions(SearchNode node)
+    {
+        List<PreparedPotionAction> actions = [];
+        foreach (PreparedPotionAction action in EnumeratePlannedPotionActions(
+                     new ExpansionPlan(node, CardNameFirst: true)))
+            actions.Add(action);
+        return actions;
+    }
+
+    private sealed class PreparedPotionChoiceWork(
+        SimulationSnapshot? probe,
+        IReadOnlyList<PlanCardChoice?> choices,
+        CardChoiceSpec? choiceSpec,
+        PotionChoiceReplayCheckpoint? checkpoint) : IDisposable
+    {
+        private SimulationSnapshot? _probe = probe;
+        private PotionChoiceReplayCheckpoint? _checkpoint = checkpoint;
+
+        public IReadOnlyList<PlanCardChoice?> Choices { get; } = choices;
+        public CardChoiceSpec? ChoiceSpec { get; } = choiceSpec;
+        public PotionChoiceReplayCheckpoint? Checkpoint => _checkpoint;
+
+        public void TransferCheckpoint() => _checkpoint = null;
+
+        public IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> Resolve(
+            CombatBeamSolver solver, SearchNode parent, PlanAction action)
+        {
+            SimulationSnapshot? ownedProbe = _probe;
+            PotionChoiceReplayCheckpoint? ownedCheckpoint = _checkpoint;
+            _probe = null;
+            _checkpoint = null;
+            foreach (var branch in solver.WithPotionChoiceCheckpoint(ownedCheckpoint,
+                         solver.ResolveExplicitCardChoiceBranches(parent, action,
+                             ownedProbe, Choices, ChoiceSpec)))
+                yield return branch;
+        }
+
+        public void Dispose()
+        {
+            _probe?.ReleaseSimulator();
+            _checkpoint?.Dispose();
+        }
+    }
+
+    private PreparedPotionChoiceWork PreparePotionChoiceWork(
+        SearchNode parent, PreparedPotionAction action)
+    {
+        PotionChoiceReplayCheckpoint? checkpoint = PreparePotionChoiceOptions(
+            parent, action.Action, action.Potion,
+            out SimulationSnapshot? probe,
+            out IReadOnlyList<PlanCardChoice?> choices,
+            out CardChoiceSpec? choiceSpec);
+        try
+        {
+            return new PreparedPotionChoiceWork(probe, choices, choiceSpec, checkpoint);
+        }
+        catch
+        {
+            probe?.ReleaseSimulator();
+            checkpoint?.Dispose();
+            throw;
+        }
+    }
+
+    private PrimaryChoiceReplayFrontier? GeneratePreparedPotionAction(
+        SearchNode node,
+        PreparedPotionAction action,
+        ExpansionBatch batch,
+        bool allowPrimaryReplays = false)
+    {
+        PlanAction baseAction = action.Action;
+        using PreparedPotionChoiceWork work = PreparePotionChoiceWork(node, action);
+        if (allowPrimaryReplays && work.Choices.Count >= 2)
+        {
+            bool identityChangingLayer = work.ChoiceSpec != null
+                && CardChoiceSupport.IsIdentityChangingPersistentChoiceEffect(work.ChoiceSpec.Effect);
+            int semanticCount = identityChangingLayer
+                ? CardChoiceSupport.CountSemanticChoices(
+                    work.Choices.Where(choice => choice != null).Cast<PlanCardChoice>().ToList())
+                : work.Choices.Count;
+            PrimaryCardChoiceLayer layer = new(work.Choices, UnregisteredPendingChoice: false,
+                semanticCount, identityChangingLayer,
+                CreateWholeActionChoiceBudget(work.ChoiceSpec, semanticCount));
+            PrimaryChoiceReplayFrontier? frontier = PreparePrimaryChoiceReplays(
+                layer, potion: action, potionCheckpoint: work.Checkpoint);
+            if (frontier != null)
+            {
+                work.TransferCheckpoint(); // The frontier owns it until all lanes drain.
+                return frontier;
+            }
+        }
+        AddResolvedPotionCandidates(node, work.Resolve(this, node, baseAction), batch);
+        return null;
+    }
+
+    private void AddResolvedPotionCandidates(
+        SearchNode node,
+        IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> resolvedBranches,
+        ExpansionBatch batch)
+    {
+        foreach ((PlanAction finalAction, SimulationSnapshot finalSnapshot) in resolvedBranches)
+        {
+            SearchNode child = CreatePlannedPotionChild(node, finalAction, finalSnapshot);
+            batch.AddPotion(child);
+        }
+    }
+
+    private IReadOnlyList<CrossTurnStandPatBaseline>? GenerateRawEndTurnCandidates(
+        SearchNode node, ExpansionBatch batch, bool publishBaselines = true,
+        IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)>? resolvedBranches = null)
     {
         SimulationSnapshot snapshot = node.Snapshot;
         if (snapshot.PlayerDead || snapshot.AllEnemiesDead)
-            return;
+            return null;
 
         List<CrossTurnStandPatBaseline>? directStandPatBaselines =
             ReferenceEquals(FindTurnStart(node), node)
             ? []
             : null;
-        foreach ((PlanAction endAction, SimulationSnapshot endSnapshot) in BuildEndTurnBranches(node, []))
+        foreach ((PlanAction endAction, SimulationSnapshot endSnapshot) in resolvedBranches ?? BuildEndTurnBranches(node, []))
         {
-            int nextTurn = node.Turn + 1;
+            int nextTurn = endSnapshot.Turn;
             bool combatEnded = endSnapshot.PlayerDead || endSnapshot.AllEnemiesDead;
             bool endTerminal = combatEnded || endSnapshot.BoundaryReason != SearchBoundaryReason.None;
             SearchNode endNode = new(
@@ -1977,8 +806,9 @@ internal sealed partial class CombatBeamSolver
             }
             batch.AddEndTurn(endNode);
         }
-        if (directStandPatBaselines != null)
+        if (publishBaselines && directStandPatBaselines != null)
             PublishCrossTurnStandPatBaselines(node, directStandPatBaselines);
+        return directStandPatBaselines;
     }
 
     private void MergeExpansionWorker(ExpansionWorkerOutcome outcome)
@@ -1996,11 +826,24 @@ internal sealed partial class CombatBeamSolver
         _run.ChoiceBranchesEvaluated += source.ChoiceBranchesEvaluated;
         _run.ChoiceReplayAttempts += source.ChoiceReplayAttempts;
         _run.ChoiceReplayBudgetExhaustions += source.ChoiceReplayBudgetExhaustions;
+        _run.ChoiceBranchesDroppedByBudget += source.ChoiceBranchesDroppedByBudget;
         _run.ShuffleBranchesPruned += source.ShuffleBranchesPruned;
         _run.SoldHpBranchesPruned += source.SoldHpBranchesPruned;
         _run.HpInvestmentBranchesProtected += source.HpInvestmentBranchesProtected;
         _run.ReplayCount += source.ReplayCount;
         _run.ForkCount += source.ForkCount;
+        _run.RoundReplayPrefixCaptures += source.RoundReplayPrefixCaptures;
+        _run.RoundReplayPrefixReuses += source.RoundReplayPrefixReuses;
+        _run.ExecutionChoiceCaptures += source.ExecutionChoiceCaptures;
+        _run.ExecutionChoiceReuses += source.ExecutionChoiceReuses;
+        _run.CardChoicePrefixAttempts += source.CardChoicePrefixAttempts;
+        _run.CardChoicePrefixCaptures += source.CardChoicePrefixCaptures;
+        _run.CardChoicePrefixReuses += source.CardChoicePrefixReuses;
+        _run.CardChoicePrefixFallbacks += source.CardChoicePrefixFallbacks;
+        _run.PotionChoicePrefixForks += source.PotionChoicePrefixForks;
+        _run.PotionChoicePrefixCaptures += source.PotionChoicePrefixCaptures;
+        _run.PotionChoicePrefixReuses += source.PotionChoicePrefixReuses;
+        _run.PotionChoicePrefixFallbacks += source.PotionChoicePrefixFallbacks;
         _run.TransitionCount += source.TransitionCount;
         _run.RepeatableNoProgressBranchesPruned +=
             source.RepeatableNoProgressBranchesPruned;
@@ -2008,6 +851,18 @@ internal sealed partial class CombatBeamSolver
         _run.CycleProbeContinuationsExpanded += source.CycleProbeContinuationsExpanded;
         _run.CycleCandidatesProtected += source.CycleCandidatesProtected;
         _run.CycleContinuationsStopped += source.CycleContinuationsStopped;
+        _run.CycleReplayAttempts += source.CycleReplayAttempts;
+        _run.CycleReplayActions += source.CycleReplayActions;
+        _run.CycleReplayVictories += source.CycleReplayVictories;
+        _run.CycleReplayContinuations += source.CycleReplayContinuations;
+        _run.CycleStoppedUnproductive += source.CycleStoppedUnproductive;
+        _run.CycleStoppedRepetitionBudget += source.CycleStoppedRepetitionBudget;
+        _run.CycleStoppedFamilyBudget += source.CycleStoppedFamilyBudget;
+        _run.CycleStoppedExitBudget += source.CycleStoppedExitBudget;
+        _run.TurnLayerBudgetStops += source.TurnLayerBudgetStops;
+        _run.TurnLayerTimeBudgetStops += source.TurnLayerTimeBudgetStops;
+        _run.TurnLayerNodeBudgetStops += source.TurnLayerNodeBudgetStops;
+
         _run.CrossTurnCandidatesProtected += source.CrossTurnCandidatesProtected;
         _run.CrossTurnContinuationsStopped += source.CrossTurnContinuationsStopped;
         _run.StandPatProbes += source.StandPatProbes;
@@ -2028,17 +883,42 @@ internal sealed partial class CombatBeamSolver
         source.ChoiceBranchesEvaluated = 0;
         source.ChoiceReplayAttempts = 0;
         source.ChoiceReplayBudgetExhaustions = 0;
+        source.ChoiceBranchesDroppedByBudget = 0;
         source.ShuffleBranchesPruned = 0;
         source.SoldHpBranchesPruned = 0;
         source.HpInvestmentBranchesProtected = 0;
         source.ReplayCount = 0;
         source.ForkCount = 0;
+        source.RoundReplayPrefixCaptures = 0;
+        source.RoundReplayPrefixReuses = 0;
+        source.ExecutionChoiceCaptures = 0;
+        source.ExecutionChoiceReuses = 0;
+        source.CardChoicePrefixAttempts = 0;
+        source.CardChoicePrefixCaptures = 0;
+        source.CardChoicePrefixReuses = 0;
+        source.CardChoicePrefixFallbacks = 0;
+        source.PotionChoicePrefixForks = 0;
+        source.PotionChoicePrefixCaptures = 0;
+        source.PotionChoicePrefixReuses = 0;
+        source.PotionChoicePrefixFallbacks = 0;
         source.TransitionCount = 0;
         source.RepeatableNoProgressBranchesPruned = 0;
         source.CycleShapesDetected = 0;
         source.CycleProbeContinuationsExpanded = 0;
         source.CycleCandidatesProtected = 0;
         source.CycleContinuationsStopped = 0;
+        source.CycleReplayAttempts = 0;
+        source.CycleReplayActions = 0;
+        source.CycleReplayVictories = 0;
+        source.CycleReplayContinuations = 0;
+        source.CycleStoppedUnproductive = 0;
+        source.CycleStoppedRepetitionBudget = 0;
+        source.CycleStoppedFamilyBudget = 0;
+        source.CycleStoppedExitBudget = 0;
+        source.TurnLayerBudgetStops = 0;
+        source.TurnLayerTimeBudgetStops = 0;
+        source.TurnLayerNodeBudgetStops = 0;
+
         source.CrossTurnCandidatesProtected = 0;
         source.CrossTurnContinuationsStopped = 0;
         source.StandPatProbes = 0;
@@ -2057,45 +937,12 @@ internal sealed partial class CombatBeamSolver
         ExpansionBatch batch,
         Action<SearchNode> acceptChild)
     {
-        List<ActionCandidate> nonDominated = new(16);
+        // At most one candidate survives per raw card. Small batches need no 16-slot array.
+        List<ActionCandidate> nonDominated = new(Math.Min(16, batch.Cards.Count));
         List<ActionCandidate>? deferredCycleCandidates = null;
         foreach (RawCardCandidate raw in batch.Cards)
-        {
-            CommitCycleExitObservation(raw.Node);
-            if (ShouldPruneCrossTurnNoProgress(raw.Node))
-            {
-                _run.RepeatableNoProgressBranchesPruned++;
-                batch.Release(raw.Node.Snapshot);
-                continue;
-            }
-            bool deferTransposition = ShouldDeferCycleTranspositionUntilActionAdmission(
-                raw.Node);
-            if (deferTransposition)
-            {
-                deferredCycleCandidates ??= [];
-                deferredCycleCandidates.Add(BuildCandidate(
-                    parent.Snapshot,
-                    raw.Node.Snapshot,
-                    raw.Node,
-                    raw.CardType,
-                    raw.TargetCombatId));
-                continue;
-            }
-            if (!TryAcceptTransposition(raw.Node))
-            {
-                batch.Release(raw.Node.Snapshot);
-                continue;
-            }
-            AddNonDominatedParallelCandidate(
-                nonDominated,
-                BuildCandidate(
-                    parent.Snapshot,
-                    raw.Node.Snapshot,
-                    raw.Node,
-                    raw.CardType,
-                    raw.TargetCombatId),
-                batch);
-        }
+            ProcessExpandedCardCandidate(parent, raw, nonDominated,
+                ref deferredCycleCandidates, batch);
 
         PruneCommittedCrossTurnCandidates(batch.Potions, batch);
         PruneCommittedCrossTurnCandidates(batch.EndTurns, batch);
@@ -2103,13 +950,16 @@ internal sealed partial class CombatBeamSolver
             nonDominated,
             deferredCycleCandidates,
             batch);
-        if (parent.CycleProbeLease != null)
+        if (NeedsCycleExitAdmission(parent, nonDominated, batch.Potions, batch.EndTurns))
         {
             SearchNode[] directChildren = nonDominated.Select(candidate => candidate.Node)
                 .Concat(batch.Potions)
                 .Concat(batch.EndTurns)
                 .ToArray();
             AnnotateCycleExitProgress(parent, directChildren);
+            _ = MaterializeAdmittedCycleExitObservation(
+                directChildren,
+                _run.CycleFamilyLedger);
         }
         List<ActionCandidate> queuedCandidates = SelectActionCandidates(parent, nonDominated);
         AdmitCycleProbeCandidate(nonDominated, queuedCandidates);
@@ -2137,9 +987,7 @@ internal sealed partial class CombatBeamSolver
 
         foreach (SearchNode child in batch.Potions)
         {
-            EnsureBoundedCycleProbeLease(child);
-            if (ShouldRejectCycleCandidate(child)
-                || !TryAcceptTransposition(child))
+            if (!TryAdmitPlannedPotionChild(child, out _))
             {
                 batch.Release(child.Snapshot);
                 continue;
@@ -2148,16 +996,8 @@ internal sealed partial class CombatBeamSolver
             acceptChild(child);
         }
 
-        foreach (SearchNode child in batch.EndTurns)
-        {
-            if (!TryAcceptTransposition(child))
-            {
-                batch.Release(child.Snapshot);
-                continue;
-            }
-            batch.Transfer(child.Snapshot);
+        foreach (SearchNode child in AdmitPlannedEndTurnChildren(batch))
             acceptChild(child);
-        }
     }
 
     private void PruneCommittedCrossTurnCandidates(
@@ -2168,6 +1008,7 @@ internal sealed partial class CombatBeamSolver
         for (int readIndex = 0; readIndex < candidates.Count; readIndex++)
         {
             SearchNode child = candidates[readIndex];
+            PromoteOrderedMutationProgressTail(child);
             CommitCycleExitObservation(child);
             if (ShouldPruneCrossTurnNoProgress(child))
             {
@@ -2181,26 +1022,4 @@ internal sealed partial class CombatBeamSolver
             candidates.RemoveRange(writeIndex, candidates.Count - writeIndex);
     }
 
-    private void AddNonDominatedParallelCandidate(
-        List<ActionCandidate> candidates,
-        ActionCandidate candidate,
-        ExpansionBatch batch)
-    {
-        for (int index = candidates.Count - 1; index >= 0; index--)
-        {
-            ActionCandidate current = candidates[index];
-            if (Dominates(current, candidate))
-            {
-                _run.DominatedActionsPruned++;
-                batch.Release(candidate.Node.Snapshot);
-                return;
-            }
-            if (!Dominates(candidate, current))
-                continue;
-            candidates.RemoveAt(index);
-            _run.DominatedActionsPruned++;
-            batch.Release(current.Node.Snapshot);
-        }
-        candidates.Add(candidate);
-    }
 }

@@ -1,4 +1,3 @@
-using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
@@ -11,20 +10,27 @@ namespace CombatSolver;
 
 internal static partial class CardChoiceSupport
 {
-    public static void Apply(
+    internal const int NightmareCopyCount = 3;
+
+    public static bool Apply(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         PredictedCard playedCard,
         PlanCardChoice choice,
         ISet<uint>? processedEnemyDeaths = null)
     {
+        simulator.AcknowledgeExecutionDispatch();
         SimPlayerCombatState owner = simulator.State.GetPlayerCombatState(playedCard.Preview.Owner);
         List<PredictedCard> selected;
-        if (choice.Effect == PlanChoiceEffect.GenerateToHand)
+        if (choice.Effect == PlanChoiceEffect.ModDefined)
         {
-            CombatPredictionCardGenerationOptionsEntry entry = simulator.History
-                .OfType<CombatPredictionCardGenerationOptionsEntry>()
-                .LastOrDefault(candidate => playedCard.References(candidate.Trace?.Source))
+            // 登记方自己按令牌认选项。选项牌不在任何模拟牌堆里，求解器没有可解析的来源，
+            // 也不需要有——结算整体交给登记方。
+            selected = [];
+        }
+        else if (choice.Effect == PlanChoiceEffect.GenerateToHand)
+        {
+            CombatPredictionCardGenerationOptionsEntry entry = simulator.History.FindLatestCardGenerationOptions(playedCard)
                 ?? throw new InvalidOperationException($"卡牌 {playedCard.Preview.Id.Entry} 缺少生成选项。");
             selected = choice.Cards.Select(token => Find(entry.Options, token)).ToList();
         }
@@ -47,18 +53,25 @@ internal static partial class CardChoiceSupport
                 simulator.Discard(selected);
                 break;
             case PlanChoiceEffect.Exhaust:
-                foreach (PredictedCard card in selected)
-                    simulator.Exhaust(card);
+                TurnStartChoiceSupport.ContinueExhaustSelection(simulator, selected, 0);
                 break;
             case PlanChoiceEffect.Upgrade:
                 foreach (PredictedCard card in selected)
                     card.Upgrade();
                 break;
             case PlanChoiceEffect.Transform:
-                TransformSelectedCards(simulator, playedCard.Preview, selected);
+                if (!TransformSelectedCards(simulator, playedCard.Preview, selected))
+                {
+                    simulator.RejectExecutionContinuation();
+                    return false;
+                }
                 break;
             case PlanChoiceEffect.Duplicate:
-                DuplicateSelectedCard(simulator, playedCard.Preview, selected);
+                if (!DuplicateSelectedCard(simulator, playedCard.Preview, selected))
+                {
+                    simulator.RejectExecutionContinuation();
+                    return false;
+                }
                 break;
             case PlanChoiceEffect.Modify:
                 ModifySelectedCard(playedCard.Preview, selected);
@@ -79,30 +92,54 @@ internal static partial class CardChoiceSupport
                     card.MutablePreview.AddKeyword(CardKeyword.Retain);
                 break;
             case PlanChoiceEffect.AutoPlayRepeated:
-                AutoPlayRepeated(
-                    simulator,
-                    combat,
-                    playedCard.Preview,
-                    selected,
-                    processedEnemyDeaths ?? new HashSet<uint>());
+                AutoPlayRepeated(simulator, combat, playedCard, selected, processedEnemyDeaths ?? new HashSet<uint>());
                 break;
             case PlanChoiceEffect.GenerateToHand:
-                AddGeneratedSelectionToHand(simulator, playedCard.Preview, selected);
+                if (!AddGeneratedSelectionToHand(simulator, playedCard.Preview, selected))
+                {
+                    simulator.RejectExecutionContinuation();
+                    return false;
+                }
+                break;
+            case PlanChoiceEffect.ModDefined:
+                if (!CardChoiceMirrors.TryApply(
+                        simulator, combat, playedCard, choice, out bool modDefinedCompleted))
+                {
+                    // 效果说"由登记方结算"，却没有登记方认这张牌。静默空操作会让路线看起来
+                    // 可信而实际缺一整张牌的效果，所以在这里就报出来。
+                    throw new InvalidOperationException(
+                        $"卡牌 {playedCard.Preview.Id.Entry} 的选择用了 ModDefined，"
+                        + "但没有登记方为它登记结算。");
+                }
+                if (!modDefinedCompleted)
+                {
+                    simulator.RejectExecutionContinuation();
+                    return false;
+                }
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(choice));
         }
 
-        ApplyPostChoiceEffects(simulator, combat, playedCard);
+        // A selected card can synchronously reach a deeper selector through exhaust, discard,
+        // generation, transform, or repeated auto-play. Vanilla awaits that nested choice before
+        // continuing the outer card's post-choice effects. Search replays the whole action from its
+        // parent with the additional planned choice, then reaches this boundary again.
+        if (simulator.HasPendingChoice)
+        {
+            simulator.AppendExecutionContinuation(new PostSelectionExecutionFrame(playedCard));
+            return false;
+        }
+        return ApplyPostChoiceEffects(simulator, combat, playedCard);
     }
 
-    public static void ApplyNoChoiceEffects(
+    public static bool ApplyNoChoiceEffects(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         PredictedCard playedCard)
-        => ApplyPostChoiceEffects(simulator, combat, playedCard);
+        => !simulator.HasPendingChoice && ApplyPostChoiceEffects(simulator, combat, playedCard);
 
-    public static void TransformCards(
+    public static bool TransformCards(
         CombatPredictionSimulator simulator,
         IEnumerable<PredictedCard> cards,
         CardModel replacementCanonical,
@@ -113,15 +150,49 @@ internal static partial class CardChoiceSupport
             PredictedCard replacement = PredictedCard.Create(replacementCanonical, original.Preview.Owner);
             if (upgradeReplacement)
                 replacement.Upgrade();
-            ReplaceTransformedCard(
-                simulator,
-                original,
-                replacement,
-                CardGenerationResultKind.Fixed);
+            if (!ReplaceTransformedCard(simulator, original, replacement, CardGenerationResultKind.Fixed))
+                return false;
         }
+        return true;
     }
 
-    public static void TransformCardToGeneratedReplacement(
+    public static bool TransformCardBatch(
+        CombatPredictionSimulator simulator,
+        IEnumerable<PredictedCard> cards,
+        CardModel replacementCanonical,
+        bool upgradeReplacement)
+    {
+        List<(PredictedCard Original, PredictedCard Replacement, SimCardPile Pile, int Index)> transformations = [];
+        foreach (PredictedCard original in cards.ToList())
+        {
+            PredictedCard replacement = PredictedCard.Create(replacementCanonical, original.Preview.Owner);
+            if (upgradeReplacement)
+                replacement.Upgrade();
+            (SimCardPile pile, int index) = RemoveTransformedCard(simulator, original);
+            transformations.Add((original, replacement, pile, index));
+        }
+        // CardCmd.Transform removes every original before inserting the replacements, and records
+        // each index in the shrinking pile. Its pile/index sort determines insertion and hook order.
+        transformations.Sort(static (left, right) => left.Pile.Type != right.Pile.Type
+            ? left.Pile.Type.CompareTo(right.Pile.Type)
+            : left.Index.CompareTo(right.Index));
+        foreach (var transformation in transformations)
+        {
+            if (!AddTransformedCard(
+                simulator,
+                transformation.Original,
+                transformation.Replacement,
+                transformation.Pile,
+                transformation.Index,
+                CardGenerationResultKind.Fixed))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static bool TransformCardToGeneratedReplacement(
         CombatPredictionSimulator simulator,
         PredictedCard original,
         CardModel generatedReplacement)
@@ -131,28 +202,36 @@ internal static partial class CardChoiceSupport
             PredictedCard.FromGenerated(generatedReplacement),
             CardGenerationResultKind.Random);
 
-    private static void TransformSelectedCards(
+    private static bool TransformSelectedCards(
         CombatPredictionSimulator simulator,
         CardModel source,
         IReadOnlyList<PredictedCard> selected)
     {
         CardModel replacement = source switch
         {
-            Begone => ModelDb.Card<MinionStrike>(),
-            Charge => ModelDb.Card<MinionDiveBomb>(),
-            Guards => ModelDb.Card<MinionSacrifice>(),
-            Seance => ModelDb.Card<Soul>(),
+            Begone => CanonicalModels.Card<MinionStrike>(),
+            Charge => CanonicalModels.Card<MinionDiveBomb>(),
+            Guards => CanonicalModels.Card<MinionSacrifice>(),
+            Seance => CanonicalModels.Card<Soul>(),
             _ => throw new InvalidOperationException($"卡牌 {source.Id.Entry} 没有选牌变换定义。"),
         };
         bool upgrade = source.IsUpgraded && source is Begone or Charge or Guards;
-        TransformCards(simulator, selected, replacement, upgrade);
+        return TransformCards(simulator, selected, replacement, upgrade);
     }
 
-    private static void ReplaceTransformedCard(
+    private static bool ReplaceTransformedCard(
         CombatPredictionSimulator simulator,
         PredictedCard original,
         PredictedCard replacement,
         CardGenerationResultKind resultKind)
+    {
+        (SimCardPile pile, int index) = RemoveTransformedCard(simulator, original);
+        return AddTransformedCard(simulator, original, replacement, pile, index, resultKind);
+    }
+
+    private static (SimCardPile Pile, int Index) RemoveTransformedCard(
+        CombatPredictionSimulator simulator,
+        PredictedCard original)
     {
         SimCardPile pile = original.GetPile(simulator.State)
             ?? throw new InvalidOperationException($"变换时找不到 {original.Preview.Id.Entry} 所在牌堆。");
@@ -168,6 +247,17 @@ internal static partial class CardChoiceSupport
             throw new InvalidOperationException($"变换时找不到 {original.Preview.Id.Entry} 的牌堆位置。");
 
         simulator.RemoveFromCombat(original);
+        return (pile, index);
+    }
+
+    private static bool AddTransformedCard(
+        CombatPredictionSimulator simulator,
+        PredictedCard original,
+        PredictedCard replacement,
+        SimCardPile pile,
+        int index,
+        CardGenerationResultKind resultKind)
+    {
         replacement.MutablePreview.HasBeenRemovedFromState = false;
         replacement.NotifyHookListenerStructureChanged();
         pile.Insert(Math.Min(index, pile.Cards.Count), replacement);
@@ -176,23 +266,30 @@ internal static partial class CardChoiceSupport
             replacement.Preview.Owner,
             resultKind);
         if (simulator.State.CombatState is ICombatPredictionCardEventSink eventSink)
+        {
             eventSink.AfterCardEnteredCombat(simulator, replacement);
+            if (simulator.HasPendingChoice)
+                return false;
+        }
         original.MutablePreview.AfterTransformedFrom();
         replacement.MutablePreview.AfterTransformedTo();
         HookMirrors.AfterCardGeneratedForCombat(
             simulator,
             replacement,
             replacement.Preview.Owner);
+        if (simulator.HasPendingChoice)
+            return false;
         simulator.History.CardGenerationResolved(generation, replacement);
+        return true;
     }
 
-    private static void DuplicateSelectedCard(
+    private static bool DuplicateSelectedCard(
         CombatPredictionSimulator simulator,
         CardModel source,
         IReadOnlyList<PredictedCard> selected)
     {
         if (selected.Count == 0)
-            return;
+            return true;
         int count = source switch
         {
             DualWield => source.DynamicVars.Cards.IntValue,
@@ -208,39 +305,23 @@ internal static partial class CardChoiceSupport
             source.Owner,
             CardPilePosition.Bottom,
             CardGenerationResultKind.Fixed);
+        return !simulator.HasPendingChoice;
     }
 
-    private static void AutoPlayRepeated(
-        CombatPredictionSimulator simulator,
-        SimulatedCombatState combat,
-        CardModel source,
-        IReadOnlyList<PredictedCard> selected,
-        ISet<uint> processedEnemyDeaths)
+    private static bool AutoPlayRepeated(CombatPredictionSimulator simulator, SimulatedCombatState combat,
+        PredictedCard source, IReadOnlyList<PredictedCard> selected, ISet<uint> deaths)
     {
-        if (source is not DecisionsDecisions || selected.Count == 0)
-            return;
-        for (int index = 0; index < source.DynamicVars.Repeat.IntValue; index++)
-        {
-            if (!CardExecutionSupport.AutoPlay(
-                    simulator,
-                    combat,
-                    selected[0],
-                    target: null,
-                    processedEnemyDeaths,
-                    nestedChoiceSourceId: source.Id.Entry))
-            {
-                break;
-            }
-        }
+        if (source.Preview is not DecisionsDecisions || selected.Count == 0) return true;
+        return ContinueRepeatedSelection(simulator, combat, source, selected[0], deaths, 0, null);
     }
 
-    private static void AddGeneratedSelectionToHand(
+    private static bool AddGeneratedSelectionToHand(
         CombatPredictionSimulator simulator,
         CardModel source,
         IReadOnlyList<PredictedCard> selected)
     {
         if (selected.Count == 0)
-            return;
+            return true;
         PredictedCard generated = selected[0].Clone();
         if (source is Abundance or Discovery or Splash)
             generated.SetToFreeThisTurn();
@@ -249,6 +330,7 @@ internal static partial class CardChoiceSupport
             PileType.Hand,
             source.Owner,
             resultKind: CardGenerationResultKind.Random);
+        return !simulator.HasPendingChoice;
     }
 
     private static void ModifySelectedCard(CardModel source, IReadOnlyList<PredictedCard> selected)
@@ -270,12 +352,12 @@ internal static partial class CardChoiceSupport
             return;
         NightmarePower power = combat.AddPowerInstance<NightmarePower>(
             source.Owner.Creature,
-            3,
+            NightmareCopyCount,
             source.Owner.Creature);
         combat.SetNightmareSelection(power, selected[0]);
     }
 
-    private static void ApplyPostChoiceEffects(
+    private static bool ApplyPostChoiceEffects(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         PredictedCard playedCard)
@@ -289,27 +371,33 @@ internal static partial class CardChoiceSupport
                     source.Owner,
                     source.DynamicVars["Shivs"].IntValue,
                     source.IsUpgraded);
-                break;
+                return !simulator.HasPendingChoice;
             case Brand:
                 combat.Apply<StrengthPower>(
                     source.Owner.Creature,
                     source.DynamicVars.Strength.IntValue,
                     source.Owner.Creature);
-                break;
+                return true;
             case Scavenge:
                 combat.AddEnergyNextTurn(source.Owner, source.DynamicVars.Energy.IntValue);
-                break;
+                return true;
             case BurningPact:
             {
                 bool sourceAlreadyInDiscard = playedCard.GetPile(simulator.State)?.Type == PileType.Discard;
                 if (sourceAlreadyInDiscard)
                     simulator.AddToPile(playedCard, PileType.Play);
                 simulator.Draw(source.Owner, source.DynamicVars.Cards.IntValue);
+                if (simulator.HasPendingChoice)
+                {
+                    if (sourceAlreadyInDiscard) simulator.AppendExecutionContinuation(new RestoreBurningPactPileFrame(playedCard));
+                    return false;
+                }
                 if (sourceAlreadyInDiscard && playedCard.GetPile(simulator.State)?.Type == PileType.Play)
                     simulator.AddToPile(playedCard, PileType.Discard);
-                break;
+                return !simulator.HasPendingChoice;
             }
         }
+        return true;
     }
 
 }

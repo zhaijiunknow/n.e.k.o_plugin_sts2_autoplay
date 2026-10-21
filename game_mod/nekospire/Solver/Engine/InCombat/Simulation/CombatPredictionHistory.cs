@@ -11,7 +11,7 @@ namespace CombatSolver.Engine.InCombat.Simulation;
 /// Deferred events use separate original and resolved entries; the resolved entry carries the final snapshot and
 /// risk boundary while the original entry determines semantic order.
 /// </summary>
-internal sealed class CombatPredictionHistory(PredictionTrace trace)
+internal sealed partial class CombatPredictionHistory(PredictionTrace trace, Player? counterOwner = null)
     : IReadOnlyList<CombatPredictionHistoryEntry>
 {
     public readonly struct HistoryEntryRange
@@ -62,7 +62,14 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
     }
 
     private HistorySegment? _prefix;
+    // 前缀段是从叶到根的链表，每次枚举都要先把它翻过来。段链只在 SealTail 时变长，
+    // 所以把翻好的顺序缓存下来；SealTail 换新数组而不是就地改，正在跑的迭代器仍看到
+    // 它启动时抓到的那一份，与原来"枚举开始时建一个 Stack"的可见性完全一致。
+    private HistorySegment[]? _orderedSegments;
     private List<CombatPredictionHistoryEntry>? _tail;
+    // 上一段封存时的条目数。同一条搜索里相邻两段长度接近，用它给可变尾表预留容量，
+    // 省掉从 0 开始的多轮扩容。容量只影响分配，不影响任何内容或顺序。
+    private int _tailCapacityHint;
     private Dictionary<CombatPredictionHistoryEntry, CombatPredictionHistoryEntry>? _tailCompletions;
     private int _pendingDeferredEntries;
     private ulong _riskSignatureFirst;
@@ -70,6 +77,23 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
     private int _riskEntryCount;
     private int _cardDrawnEntryCount;
     private int _orbChanneledEntryCount;
+    private readonly Player? _counterOwner = counterOwner;
+    private CombatHistoryCounters _counters;
+
+    internal CombatHistoryCounters GetCounters(Player owner)
+    {
+        if (!ReferenceEquals(owner, _counterOwner))
+            throw new InvalidOperationException("History counters require the captured single-player owner.");
+        VerifyCounters();
+        return _counters;
+    }
+
+    [System.Diagnostics.Conditional("VERIFY_HISTORY_COUNTERS")]
+    private void VerifyCounters()
+    {
+        if (_counterOwner != null && _counters != CombatHistoryCounters.Scan(this, _counterOwner))
+            throw new InvalidOperationException($"Incremental history counters differ at event {EntryCount}.");
+    }
 
     private sealed class HistorySegment(
         HistorySegment? parent,
@@ -89,15 +113,20 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
         ulong riskSignatureSecond,
         int riskEntryCount,
         int cardDrawnEntryCount,
-        int orbChanneledEntryCount)
-        : this(trace)
+        int orbChanneledEntryCount,
+        int tailCapacityHint,
+        Player? counterOwner = null,
+        CombatHistoryCounters counters = default)
+        : this(trace, counterOwner)
     {
         _prefix = prefix;
+        _tailCapacityHint = tailCapacityHint;
         _riskSignatureFirst = riskSignatureFirst;
         _riskSignatureSecond = riskSignatureSecond;
         _riskEntryCount = riskEntryCount;
         _cardDrawnEntryCount = cardDrawnEntryCount;
         _orbChanneledEntryCount = orbChanneledEntryCount;
+        _counters = counters;
     }
 
     public IReadOnlyList<CombatPredictionHistoryEntry> Entries => this;
@@ -151,6 +180,24 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
             int segmentStart = segment.Parent?.Count ?? 0;
             return segment.Entries[index - segmentStart];
         }
+    }
+
+    // Choice resolution needs the latest matching publication. Walk the persistent
+    // history backwards without materializing chronological segments or LINQ iterators.
+    // A null card preserves potion lookups that intentionally do not filter by source.
+    internal CombatPredictionCardGenerationOptionsEntry? FindLatestCardGenerationOptions(PredictedCard? card = null)
+    {
+        if (_tail is { } tail)
+            for (int i = tail.Count - 1; i >= 0; i--)
+                if (tail[i] is CombatPredictionCardGenerationOptionsEntry entry
+                    && (card is null || card.References(entry.Trace?.Source)))
+                    return entry;
+        for (HistorySegment? segment = _prefix; segment is not null; segment = segment.Parent)
+            for (int i = segment.Entries.Length - 1; i >= 0; i--)
+                if (segment.Entries[i] is CombatPredictionCardGenerationOptionsEntry entry
+                    && (card is null || card.References(entry.Trace?.Source)))
+                    return entry;
+        return null;
     }
 
     public IEnumerable<TEntry> OfType<TEntry>()
@@ -252,16 +299,31 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
     {
         Record(new CombatPredictionCardPlayStartedEntry
         {
-            Card = card,
+            Card = CombatPredictionCardSnapshot.Capture(card),
             CardPlay = cardPlay
         });
+    }
+
+    internal bool HasCardPlayStartedSince(int startIndex, PredictionTraceFrame actionFrame)
+    {
+        foreach (CombatPredictionHistoryEntry entry in EntriesFrom(startIndex))
+        {
+            // Replays share their action frame; nested plays and plays in sibling forks do
+            // not, even when they use wrappers of the same original card instance.
+            if (entry is CombatPredictionCardPlayStartedEntry
+                && ReferenceEquals(entry.Trace, actionFrame))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void CardPlayFinished(PredictedCard card, CardPlay cardPlay, bool wasEthereal)
     {
         Record(new CombatPredictionCardPlayFinishedEntry
         {
-            Card = card,
+            Card = CombatPredictionCardSnapshot.Capture(card),
             CardPlay = cardPlay,
             WasEthereal = wasEthereal
         });
@@ -326,14 +388,20 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
         });
     }
 
-    public void DamageReceived(Creature receiver, Creature? dealer, DamageResult result, PredictedCard? cardSource)
+    public CombatPredictionDamageReceivedEntry DamageReceived(
+        Creature receiver,
+        Creature? dealer,
+        DamageResult result,
+        PredictedCard? cardSource,
+        CombatDamageSource source)
     {
-        Record(new CombatPredictionDamageReceivedEntry
+        return Record(new CombatPredictionDamageReceivedEntry
         {
             Receiver = receiver,
             Result = result,
             Dealer = dealer,
-            CardSource = cardSource
+            CardSource = cardSource is null ? null : CombatPredictionCardSnapshot.Capture(cardSource),
+            Source = source,
         });
     }
 
@@ -363,7 +431,10 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
     {
         entry.Index = EntryCount;
         entry.Trace = trace.Current;
-        (_tail ??= []).Add(entry);
+        (_tail ??= new List<CombatPredictionHistoryEntry>(_tailCapacityHint)).Add(entry);
+        if (_counterOwner != null)
+            _counters = _counters.After(entry, _counterOwner);
+        VerifyCounters();
         if (entry is CombatPredictionCardDrawnEntry)
             _cardDrawnEntryCount++;
         else if (entry is CombatPredictionOrbChanneledEntry)
@@ -409,14 +480,17 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
     {
         AssertForkable();
         SealTail();
-        return new CombatPredictionHistory(
+        var fork = new CombatPredictionHistory(
             forkTrace,
             _prefix,
             _riskSignatureFirst,
             _riskSignatureSecond,
             _riskEntryCount,
             _cardDrawnEntryCount,
-            _orbChanneledEntryCount);
+            _orbChanneledEntryCount,
+            _tailCapacityHint, _counterOwner, _counters);
+        fork.VerifyCounters();
+        return fork;
     }
 
     internal void AssertForkable()
@@ -429,13 +503,10 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
     {
         if (_prefix is not null)
         {
-            Stack<HistorySegment> segments = new();
-            for (HistorySegment? segment = _prefix; segment is not null; segment = segment.Parent)
-                segments.Push(segment);
-            while (segments.Count > 0)
+            HistorySegment[] ordered = GetOrderedSegments();
+            for (int segmentIndex = 0; segmentIndex < ordered.Length; segmentIndex++)
             {
-                HistorySegment segment = segments.Pop();
-                foreach (CombatPredictionHistoryEntry entry in segment.Entries)
+                foreach (CombatPredictionHistoryEntry entry in ordered[segmentIndex].Entries)
                     yield return entry;
             }
         }
@@ -447,6 +518,23 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
     }
 
     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+    // 原来每次枚举都新建一个 Stack（对象 + 逐轮扩容的数组）来把段链翻成从根到叶。
+    // 段链只在 SealTail 变长，翻好的顺序缓存起来即可，元素与顺序完全一致。
+    private HistorySegment[] GetOrderedSegments()
+    {
+        if (_orderedSegments is { } cached)
+            return cached;
+        int count = 0;
+        for (HistorySegment? segment = _prefix; segment is not null; segment = segment.Parent)
+            count++;
+        HistorySegment[] ordered = new HistorySegment[count];
+        int index = count;
+        for (HistorySegment? segment = _prefix; segment is not null; segment = segment.Parent)
+            ordered[--index] = segment;
+        _orderedSegments = ordered;
+        return ordered;
+    }
 
     private bool TryGetCompletion(
         CombatPredictionHistoryEntry originalEntry,
@@ -468,6 +556,8 @@ internal sealed class CombatPredictionHistory(PredictionTrace trace)
             _prefix,
             entries,
             _tailCompletions);
+        _orderedSegments = null;
+        _tailCapacityHint = entries.Length;
         _tail = null;
         _tailCompletions = null;
     }

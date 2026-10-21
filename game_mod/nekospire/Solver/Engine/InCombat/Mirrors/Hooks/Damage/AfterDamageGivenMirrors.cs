@@ -56,7 +56,7 @@ internal static class AfterDamageGivenMirrors
             context.Props.IsPoweredAttack() &&
             context.Result.UnblockedDamage > 0)
         {
-            Effects(context).ApplyPower(typeof(PoisonPower), context.Target, power.Amount, power.Owner);
+            Effects(context).ApplyPowerFromSource(typeof(PoisonPower), context.Target, power.Amount, power.Owner, cardSource: null);
         }
     }
 
@@ -66,7 +66,7 @@ internal static class AfterDamageGivenMirrors
             context.Props.IsPoweredAttack() &&
             context.Result.UnblockedDamage > 0)
         {
-            Effects(context).ApplyPower(typeof(PoisonPower), context.Target, power.Amount, power.Owner);
+            Effects(context).ApplyPowerFromSource(typeof(PoisonPower), context.Target, power.Amount, power.Owner, cardSource: null);
         }
     }
 
@@ -78,7 +78,8 @@ internal static class AfterDamageGivenMirrors
                 typeof(MonarchsGazeStrengthDownPower),
                 context.Target,
                 power.Amount,
-                power.Owner);
+                power.Owner,
+                cardSource: null);
         }
     }
 
@@ -89,11 +90,14 @@ internal static class AfterDamageGivenMirrors
             context.Props.IsPoweredAttack() &&
             context.Result.TotalDamage > 0)
         {
-            Effects(context).ApplyPower(
+            // 原版 ReaperFormPower／UnderworldPower 那两条都传 cardSource: null（来源是能力本身），
+            // 不能继承外层卡牌作用域：否则会被当成卡牌直接施加，误触发不安油灯一类卡牌来源判据。
+            Effects(context).ApplyPowerFromSource(
                 typeof(DoomPower),
                 context.Target,
                 context.Result.TotalDamage * power.Amount,
-                power.Owner);
+                power.Owner,
+                cardSource: null);
         }
     }
 
@@ -116,6 +120,8 @@ internal static class AfterDamageGivenMirrors
                 target.CurrentHp - newMaxHp,
                 ValueProp.Unblockable | ValueProp.Unpowered,
                 dealer: null);
+            if (context.Simulator.HasPendingChoice)
+                return;
         }
         target.SetMaxHp(Math.Max(1, newMaxHp));
     }
@@ -145,11 +151,14 @@ internal static class AfterDamageGivenMirrors
             context.Props.IsPoweredAttack() &&
             context.Result.TotalDamage > 0)
         {
-            Effects(context).ApplyPower(
+            // 原版 ReaperFormPower／UnderworldPower 那两条都传 cardSource: null（来源是能力本身），
+            // 不能继承外层卡牌作用域：否则会被当成卡牌直接施加，误触发不安油灯一类卡牌来源判据。
+            Effects(context).ApplyPowerFromSource(
                 typeof(DoomPower),
                 context.Target,
                 context.Result.TotalDamage * power.Amount,
-                power.Owner);
+                power.Owner,
+                cardSource: null);
         }
     }
 

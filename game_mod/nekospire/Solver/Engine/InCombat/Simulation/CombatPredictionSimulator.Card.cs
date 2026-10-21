@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -65,6 +66,11 @@ internal sealed partial class CombatPredictionSimulator
         if (State.CombatState is ICombatPredictionCardEventSink eventSink)
             eventSink.RecordCardDiscarded(card.Preview.Owner.Creature);
         HookMirrors.AfterCardDiscarded(this, card);
+        if (HasPendingChoice)
+        {
+            if (isSly) AppendExecutionContinuation(new DiscardSlyExecutionFrame(card));
+            return;
+        }
         if (isSly)
             AutoPlay(card, type: AutoPlayType.SlyDiscard, nestedChoiceSourceId: card.Preview.Id.Entry);
     }
@@ -84,34 +90,7 @@ internal sealed partial class CombatPredictionSimulator
             return;
         }
 
-        List<PredictedCard> slyCards = [];
-
-        foreach (var card in cardsToDiscard)
-        {
-            if (card.Preview.IsSlyThisTurn)
-            {
-                slyCards.Add(card);
-            }
-
-            AddToPile(card, PileType.Discard);
-            if (State.CombatState is ICombatPredictionCardEventSink eventSink)
-                eventSink.RecordCardDiscarded(card.Preview.Owner.Creature);
-            HookMirrors.AfterCardDiscarded(this, card);
-        }
-
-        if (cardsToDraw > 0)
-        {
-            Draw(cardsToDiscard[0].Preview.Owner, cardsToDraw);
-        }
-
-        foreach (var slyCard in slyCards)
-        {
-            AutoPlay(slyCard, type: AutoPlayType.SlyDiscard, nestedChoiceSourceId: slyCard.Preview.Id.Entry);
-            if (HasPendingChoice)
-            {
-                break;
-            }
-        }
+        ContinueDiscardAndDrawExecution(cardsToDiscard, cardsToDraw, [], DiscardExecutionStage.Discard, 0);
     }
 
     // Mirrors CardCmd.Exhaust.
@@ -140,30 +119,28 @@ internal sealed partial class CombatPredictionSimulator
     /// disposed and must be paired only with this simulator's history. Card playability and target validation checks
     /// are outside this entry point; callers must perform any required UI/target gating before invocation.
     /// </remarks>
-    public void ManualPlay(PredictedCard card, Creature? target, out PredictionTraceFrame frame)
+    public bool ManualPlay(
+        PredictedCard card,
+        Creature? target,
+        [NotNullWhen(true)] out PredictionTraceFrame? frame)
     {
         int historyEntryStart = History.Entries.Count;
         var resources = SpendResources(card, isAutoPlay: false);
+        if (HasPendingChoice)
+        {
+            frame = null;
+            return false;
+        }
         OnPlayWrapper(card, target, isAutoPlay: false, resources, out frame);
-        if (HasCardPlayStartedSince(historyEntryStart, card)
+        if (HasPendingChoice && History.HasCardPlayStartedSince(historyEntryStart, frame))
+            AppendExecutionContinuation(new FinishCardExecutionFrame());
+        if (History.HasCardPlayStartedSince(historyEntryStart, frame)
             && !HasPendingChoice
             && State.CombatState is ICombatPredictionCardExecutionSink sink)
         {
             sink.CompleteCardExecution(this);
         }
-    }
-
-    private bool HasCardPlayStartedSince(int historyEntryStart, PredictedCard card)
-    {
-        foreach (CombatPredictionHistoryEntry entry in History.EntriesFrom(historyEntryStart))
-        {
-            if (entry is CombatPredictionCardPlayStartedEntry started
-                && ReferenceEquals(started.Card, card))
-            {
-                return true;
-            }
-        }
-        return false;
+        return !HasPendingChoice;
     }
 
     /// <summary>
@@ -175,24 +152,33 @@ internal sealed partial class CombatPredictionSimulator
     /// already rejects null or dead ally targets.
     /// </remarks>
     public bool CanPlay(PredictedCard card)
+        => CanPlay(card, out _, out _);
+
+    // Return the queried costs before excess-energy conversion. Search valuation uses the
+    // unconverted prices too, and must not invoke the same read-only cost hooks a second time.
+    public bool CanPlay(PredictedCard card, out int energyCost, out int starCost)
     {
+        energyCost = 0;
+        starCost = 0;
         if (card.HasKeyword(State, CardKeyword.Unplayable))
         {
             return false;
         }
 
         var ownerState = State.GetPlayerCombatState(card.Preview.Owner);
-        var energyCost = card.GetEnergyCostWithModifiers(this, ownerState);
-        var starCost = card.GetStarCostWithModifiers(this, ownerState);
+        energyCost = card.GetEnergyCostWithModifiers(this, ownerState);
+        starCost = card.GetStarCostWithModifiers(this, ownerState);
+        int payableEnergy = energyCost;
+        int payableStars = starCost;
 
-        if (energyCost > ownerState.Energy &&
+        if (payableEnergy > ownerState.Energy &&
             Hook.ShouldPayExcessEnergyCostWithStars(State.CombatState, card.Preview.Owner))
         {
-            starCost += 2 * (energyCost - ownerState.Energy);
-            energyCost = ownerState.Energy;
+            payableStars += 2 * (payableEnergy - ownerState.Energy);
+            payableEnergy = ownerState.Energy;
         }
 
-        if (energyCost > ownerState.Energy || starCost > ownerState.Stars)
+        if (payableEnergy > ownerState.Energy || payableStars > ownerState.Stars)
         {
             return false;
         }
@@ -282,15 +268,16 @@ internal sealed partial class CombatPredictionSimulator
         bool isAutoPlay,
         ResourceInfo resources,
         out PredictionTraceFrame frame,
-        string? nestedChoiceSourceId = null)
+        string? nestedChoiceSourceId = null,
+        string? nestedChoiceContextId = null)
     {
         using var _ = PushActionSource(card.Original, PredictionActionKind.CardPlay);
         frame = CurrentFrame ?? throw new UnreachableException("No current frame after pushing action source.");
 
         var previewCard = card.MutablePreview;
         var originalOwner = previewCard.Owner;
-        GameRef.Set(previewCard, "CurrentTarget", target);
-        GameRef.Set(previewCard, "CurrentPlayIndex", 0);
+        T44PrivateAccess.SetCardModel_CurrentTarget(previewCard,  target);
+        T44PrivateAccess.SetCardModel_CurrentPlayIndex(previewCard,  0);
 
         if (isAutoPlay)
         {
@@ -309,11 +296,21 @@ internal sealed partial class CombatPredictionSimulator
             resources,
             resultLocation,
             out var resultLocationModifiers);
+        if (HasPendingChoice)
+        {
+            RejectExecutionContinuation();
+            return;
+        }
         HookMirrors.AfterModifyingCardPlayResultLocation(
             this,
             card,
             resultLocation,
             resultLocationModifiers);
+        if (HasPendingChoice)
+        {
+            RejectExecutionContinuation();
+            return;
+        }
 
         var playCount = card.GeneratePlayCount(this, target);
         var ownerCreature = State.GetCreature(originalOwner.Creature);
@@ -322,167 +319,28 @@ internal sealed partial class CombatPredictionSimulator
             return;
         }
 
-        for (var i = 0; i < playCount; i++)
-        {
-            if (IsOverOrEnding)
-            {
-                break;
-            }
-
-            GameRef.Set(previewCard, "CurrentPlayIndex", i);
-            int ownerBlockBeforePlay = ownerCreature.Block;
-            int playHistoryEntryStart = History.Entries.Count;
-
-            var cardPlay = new CardPlay
-            {
-                Card = previewCard,
-                Player = originalOwner,
-                Target = target,
-                ResultPile = resultLocation.pileType,
-                Resources = resources,
-                IsAutoPlay = isAutoPlay,
-                PlayIndex = i,
-                PlayCount = playCount
-            };
-
-            HookMirrors.BeforeCardPlayed(this, card, cardPlay);
-            SynchronizePowerAmountPredictionStates();
-            History.CardPlayStarted(card, cardPlay);
-            if (State.CombatState is ICombatPredictionCardExecutionSink startedSink)
-                startedSink.RecordCardPlayStarted(card, cardPlay);
-
-            ICombatPredictionCardExecutionSink? effectSink =
-                State.CombatState as ICombatPredictionCardExecutionSink;
-            decimal cardBlockGained;
-            using (effectSink?.BeginCardPowerApplication(card))
-            {
-                CardOnPlayMirrors.Invoke(this, card, cardPlay);
-                cardBlockGained = TakeBlockGained(cardPlay);
-                effectSink?.ApplyCardPlayEffects(
-                    this,
-                    card,
-                    cardPlay,
-                    target,
-                    ownerBlockBeforePlay,
-                    cardBlockGained,
-                    playHistoryEntryStart);
-            }
-
-            // OnPlay can suspend on a triggered choice before the card's own selector opens.
-            if (State.CombatState is ICombatPredictionPendingChoiceState { HasPendingChoice: true })
-            {
-                HookMirrors.AbortCardPlayed(this, cardPlay);
-                return;
-            }
-
-            if (!isAutoPlay
-                && State.CombatState is ICombatPredictionManualCardChoiceSink choiceSink
-                && !choiceSink.ResolveManualCardChoice(this, card))
-            {
-                HookMirrors.AbortCardPlayed(this, cardPlay);
-                return;
-            }
-
-            // Vanilla awaits an auto-played card's own selection inside OnPlay, so the selected card
-            // reaches its pile before this card moves to its result pile.
-            if (isAutoPlay
-                && nestedChoiceSourceId != null
-                && !ResolveNestedAutoPlayChoice(card, nestedChoiceSourceId))
-            {
-                HookMirrors.AbortCardPlayed(this, cardPlay);
-                return;
-            }
-
-            if (ownerCreature.IsDead)
-            {
-                HookMirrors.AbortCardPlayed(this, cardPlay);
-                return;
-            }
-
-            if (previewCard.Enchantment is { } enchantment)
-            {
-                EnchantmentOnPlayMirrors.Invoke(this, card, cardPlay, enchantment);
-
-                if (ownerCreature.IsDead)
-                {
-                    HookMirrors.AbortCardPlayed(this, cardPlay);
-                    return;
-                }
-            }
-
-            if (previewCard.Affliction is { } affliction)
-            {
-                AfflictionOnPlayMirrors.Invoke(this, card, target, affliction);
-
-                if (ownerCreature.IsDead)
-                {
-                    HookMirrors.AbortCardPlayed(this, cardPlay);
-                    return;
-                }
-            }
-
-            int completionHistoryEntryStart = History.Entries.Count;
-            History.CardPlayFinished(
-                card,
-                cardPlay,
-                card.HasKeyword(State, CardKeyword.Ethereal));
-            HookMirrors.AfterCardPlayed(this, card, cardPlay);
-            if (State.CombatState is ICombatPredictionCardExecutionSink completionSink)
-            {
-                completionSink.CompleteCardPlayEffects(
-                    this,
-                    card,
-                    ownerBlockBeforePlay,
-                    completionHistoryEntryStart);
-            }
-
-            if (ownerCreature.IsDead)
-            {
-                return;
-            }
-        }
-
-        if (originalOwner != resultLocation.player && resultLocation.pileType != PileType.None)
-        {
-            GiveToAnotherPlayer(
-                card,
-                originalOwner,
-                resultLocation.player,
-                resultLocation.pileType,
-                resultLocation.position);
-        }
-
-        if (card.GetPile(State)?.Type is PileType.Play)
-        {
-            switch (resultLocation.pileType)
-            {
-                case PileType.None:
-                    RemoveFromCombat(card);
-                    break;
-                case PileType.Exhaust:
-                    Exhaust(card);
-                    break;
-                default:
-                    AddToPile(card, resultLocation.pileType, resultLocation.position);
-                    break;
-            }
-        }
-
-        if (State.CombatState is ICombatPredictionCardEventSink handSink)
-            handSink.AfterHandEmptied(this, originalOwner);
-
-        previewCard.EnergyCost.AfterCardPlayedCleanup();
-        GameRef.Get<System.Collections.Generic.List<MegaCrit.Sts2.Core.Entities.Cards.TemporaryCardCost>>(previewCard, "_temporaryStarCosts").RemoveAll(cost => cost.ClearsWhenCardIsPlayed);
-
-        GameRef.Set(previewCard, "CurrentTarget", null);
-        GameRef.Set(previewCard, "CurrentPlayIndex", 0);
-        SynchronizePowerAmountPredictionStates();
+        bool completed;
+        using (BeginCardOrPotionEffect(originalOwner))
+            completed = ContinueCardPlayExecution(card, target, isAutoPlay, resources, resultLocation, playCount,
+                nestedChoiceSourceId, nestedChoiceContextId, 0);
+        if (HasPendingChoice)
+            AppendExecutionContinuation(new CardResultExecutionFrame(card, originalOwner, resultLocation, CardResultStage.Transfer));
+        else if (completed)
+            CompleteManualCardResultTail(card, originalOwner, resultLocation);
     }
+
+    private bool CompleteManualCardPlayTail(PredictedCard card, Creature? target, CardPlay cardPlay,
+        int ownerBlockBeforePlay)
+        => ContinueCardPlayTailExecution(card, target, cardPlay, ownerBlockBeforePlay, CardPlayTailStage.Enchantment, 0);
+
+    private void CompleteManualCardResultTail(PredictedCard card,
+        MegaCrit.Sts2.Core.Entities.Players.Player originalOwner, CardLocation resultLocation)
+        => ContinueCardResultExecution(card, originalOwner, resultLocation, CardResultStage.Transfer);
 
     // Mirrors CardModel.Afflict<T>.
     public T? Afflict<T>(PredictedCard card, decimal amount) where T : AfflictionModel
     {
-        return Afflict(ModelDb.Affliction<T>().ToMutable(), card, amount) as T;
+        return Afflict(CanonicalModels.Affliction<T>().ToMutable(), card, amount) as T;
     }
 
     /// <summary>
@@ -518,7 +376,7 @@ internal sealed partial class CombatPredictionSimulator
 
             // We don't use AfflictionModel.Amount here because its setter recalculates values through
             // the real owner PlayerCombatState even though this is only a preview card.
-            GameRef.Set(card.MutablePreview.Affliction, "_amount", GameRef.Get<int>(card.MutablePreview.Affliction, "_amount") + (int)amount);
+            T44PrivateAccess.SetAfflictionModel_Amount(card.MutablePreview.Affliction!, T44PrivateAccess.AfflictionModel_Amount(card.MutablePreview.Affliction!) + ( (int)amount));
         }
 
         History.CardAfflicted(card, affliction);

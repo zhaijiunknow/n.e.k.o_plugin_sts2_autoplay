@@ -19,6 +19,8 @@ internal static class MonsterMoveSemantics
     {
         SimCreatureState simulatedPlayer = simulator.State.GetCreature(player);
         MonsterMoveEffects.ApplyBeforeAttack(simulator, combat, move, player);
+        if (simulator.HasPendingChoice)
+            return simulatedPlayer.IsDead;
         bool fullyBlockedAttack = false;
         bool playerDied = false;
         AttackCommand? attackContext = move.AttackHits.Count > 0
@@ -28,43 +30,63 @@ internal static class MonsterMoveSemantics
                         ?? throw new InvalidOperationException("预测攻击的所有者不是怪物。"))
                     .WithHitCount(0))
             : null;
-        foreach (ForecastAttackHit hit in move.AttackHits)
+        bool attackCompleted = attackContext == null;
+        try
         {
-            int baseDamage = combat.AdjustMonsterMoveDamage(move.Owner, move.Move.Id, hit.BaseDamage);
-            IReadOnlyList<DamageResult> results = DamagePlayer(
-                simulator,
-                combat,
-                move.Owner,
-                player,
-                baseDamage);
-            simulator.AddAttackContextHit(attackContext!, results);
-            foreach (DamageResult result in results)
+            if (simulator.HasPendingChoice)
+                return simulatedPlayer.IsDead;
+
+            foreach (ForecastAttackHit hit in move.AttackHits)
             {
-                if (ReferenceEquals(result.Receiver, player) && result.WasFullyBlocked)
-                    fullyBlockedAttack = true;
+                int baseDamage = combat.AdjustMonsterMoveDamage(move.Owner, move.Move.Id, hit.BaseDamage);
+                IReadOnlyList<DamageResult> results = DamagePlayer(
+                    simulator,
+                    combat,
+                    move.Owner,
+                    player,
+                    baseDamage);
+                if (simulator.HasPendingChoice)
+                    return simulatedPlayer.IsDead;
+                simulator.AddAttackContextHit(attackContext!, results);
+                foreach (DamageResult result in results)
+                {
+                    if (result.WasFullyBlocked)
+                        fullyBlockedAttack = true;
+                }
+                CorePowerSupport.ApplyEnemyDeathPowers(
+                    simulator,
+                    combat,
+                    combat.KnownEnemies,
+                    processedEnemyDeaths);
+                if (simulator.HasPendingChoice)
+                    return simulatedPlayer.IsDead;
+                if (simulatedPlayer.IsDead)
+                {
+                    playerDied = true;
+                    break;
+                }
+                if (simulator.State.GetCreature(move.Owner).IsDead)
+                    break;
             }
-            CorePowerSupport.ApplyEnemyDeathPowers(
-                simulator,
-                combat,
-                combat.KnownEnemies,
-                processedEnemyDeaths);
-            if (simulatedPlayer.IsDead)
-            {
-                playerDied = true;
-                break;
-            }
-            if (simulator.State.GetCreature(move.Owner).IsDead)
-                break;
+
+            attackCompleted = true;
+        }
+        finally
+        {
+            if (attackContext != null)
+                simulator.EndAttackContext(attackContext, attackCompleted);
         }
 
-        if (attackContext != null)
-            simulator.EndAttackContext(attackContext);
+        if (simulator.HasPendingChoice)
+            return simulatedPlayer.IsDead;
         if (playerDied)
             return true;
         if (fullyBlockedAttack && combat.GetAmount<ImbalancedPower>(move.Owner) > 0)
         {
             if (move.Owner.Monster is BowlbugRock)
                 combat.ForceStunnedMove(move.Owner, "HEADBUTT_MOVE");
+            else
+                combat.ForceStunnedMove(move.Owner);
             combat.StunNextMove(move.Owner);
         }
         MonsterMoveEffects.Apply(
@@ -74,6 +96,8 @@ internal static class MonsterMoveSemantics
             player,
             out bool killedOwner,
             plannedChoices);
+        if (simulator.HasPendingChoice)
+            return simulatedPlayer.IsDead;
         if (killedOwner
             && move.Owner.CombatId is uint moveOwnerCombatId
             && !processedEnemyDeaths.Contains(moveOwnerCombatId))
@@ -83,6 +107,8 @@ internal static class MonsterMoveSemantics
                 combat,
                 combat.KnownEnemies,
                 processedEnemyDeaths);
+            if (simulator.HasPendingChoice)
+                return simulatedPlayer.IsDead;
         }
         simulator.SynchronizePowerAmountPredictionStates();
         PowerLifecycleSupport.ResolvePowerAmountChanges(simulator, combat);
@@ -110,7 +136,11 @@ internal static class MonsterMoveSemantics
 
         try
         {
-            return simulator.Damage(player, baseDamage, ValueProp.Move, attacker);
+            using (simulator.PushDamageSource(
+                CombatDamageSource.For(CombatDamageSourceKind.MonsterMove, attacker.Monster?.Id.Entry)))
+            {
+                return simulator.Damage(player, baseDamage, ValueProp.Move, attacker);
+            }
         }
         finally
         {

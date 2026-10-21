@@ -83,6 +83,7 @@ internal static partial class CardPowerOnPlaySupport
             case ForbiddenGrimoire:
                 combat.Apply<ForbiddenGrimoirePower>(owner, 1, owner);
                 combat.RecordLongTermResource(50);
+                combat.RecordGrowthReward(GrowthSource.ForbiddenGrimoire);
                 break;
             case Hailstorm:
                 combat.Apply<HailstormPower>(owner, card.DynamicVars["HailstormPower"].IntValue, owner);
@@ -168,7 +169,7 @@ internal static partial class CardPowerOnPlaySupport
                 }
                 break;
             case Panache:
-                combat.Apply<PanachePower>(owner, card.DynamicVars["PanacheDamage"].IntValue, owner);
+                combat.AddPowerInstance<PanachePower>(owner, card.DynamicVars["PanacheDamage"].IntValue, owner);
                 break;
             case Parry:
                 combat.Apply<ParryPower>(owner, card.DynamicVars["ParryPower"].IntValue, owner);
@@ -196,6 +197,7 @@ internal static partial class CardPowerOnPlaySupport
                 int gold = card.DynamicVars.Gold.IntValue;
                 combat.Apply<RoyaltiesPower>(owner, gold, owner);
                 combat.RecordLongTermResource(gold);
+                combat.RecordGrowthReward(GrowthSource.Royalties);
                 break;
             }
             case Rupture:

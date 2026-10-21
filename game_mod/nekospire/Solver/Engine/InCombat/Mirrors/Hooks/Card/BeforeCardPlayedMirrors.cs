@@ -31,6 +31,8 @@ internal static class BeforeCardPlayedMirrors
 
     public static void CompleteOrAbort(CombatPredictionSimulator simulator, CardPlay cardPlay)
     {
+        if (!simulator.StateStore.HasEntries<CardPlayPairPredictionState>())
+            return;
         foreach ((_, CardPlayPairPredictionState state) in
                  simulator.StateStore.ReadEntries<CardPlayPairPredictionState>())
         {
@@ -118,7 +120,7 @@ internal static class BeforeCardPlayedMirrors
             context.PreviewCard.Owner.Creature == power.Owner &&
             context.PreviewCard.Affliction is Bound)
         {
-            var state = context.StateStore.Get(power, () => new ChainsOfBindingPredictionState(power));
+            var state = context.StateStore.Get(power, static () => new ChainsOfBindingPredictionState());
             state.BoundCardPlayed = true;
         }
     }
@@ -164,6 +166,8 @@ internal static class BeforeCardPlayedMirrors
                 PileType.Hand,
                 power.Owner.Player,
                 resultKind: CardGenerationResultKind.Contextual);
+            if (context.Simulator.HasPendingChoice)
+                return;
         }
     }
 
@@ -171,7 +175,7 @@ internal static class BeforeCardPlayedMirrors
         ImitationLearningPower power,
         BeforeCardPlayedMirrorContext context)
     {
-        if (context.PreviewCard.Owner != GameRef.Get<MegaCrit.Sts2.Core.Entities.Players.Player>(power, "_playerTarget") ||
+        if (context.PreviewCard.Owner != T44PrivateAccess.ImitationLearningPower_PlayerTarget(power) ||
             context.PreviewCard.Type != CardType.Power ||
             !context.CardPlay.IsFirstInSeries ||
             power.Owner.Player is not { } owner)
@@ -218,7 +222,7 @@ internal static class BeforeCardPlayedMirrors
     {
         if (context.PreviewCard.Owner == power.Owner.Player)
         {
-            var state = context.StateStore.Get(power, () => new CounterPredictionState(GameRef.Get<int>(power, "_cardsPlayedThisTurn")));
+            var state = context.StateStore.Get(power, () => new CounterPredictionState(T44PrivateAccess.SlothPower_CardsPlayedThisTurn(power)));
             state.Value++;
         }
     }
@@ -389,14 +393,14 @@ internal sealed class CardPlayPairPredictionState : IPredictionStateForkable, IP
 internal sealed class JugglingPredictionState(JugglingPower power) : IPredictionStateForkable
 {
     public int AttacksPlayedThisTurn { get; set; } =
-        (int)((int)(GameRef.Get(GameRef.InvokeGeneric(power, "GetInternalData", "Data"), "attacksPlayedThisTurn")));
+        T44PrivateAccess.Read<int>(T44PrivateAccess.InternalData(power), "attacksPlayedThisTurn");
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }
 
 internal sealed class MusicBoxPredictionState(MusicBox relic) : IPredictionStateForkable, IPredictionForkBoundary
 {
-    public bool WasUsedThisTurn { get; set; } = GameRef.Get<bool>(relic, "_wasUsedThisTurn");
+    public bool WasUsedThisTurn { get; set; } = T44PrivateAccess.MusicBox_WasUsedThisTurn(relic);
 
     public CardModel? CardBeingPlayed { get; set; }
 

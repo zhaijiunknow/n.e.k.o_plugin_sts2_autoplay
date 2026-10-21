@@ -1,4 +1,3 @@
-using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Combat.History.Entries;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -43,57 +42,22 @@ internal sealed partial class SimulatedCombatState
             mayhem,
             CardPilePosition.Top);
         if (HasPendingChoice)
+        {
+            simulator.AppendExecutionContinuation(new ScheduledAutoPlayFrame(player, turnNumber,
+                processedEnemyDeaths, mayhemCards, 0));
             return true;
-        for (int index = 0; index < mayhemCards.Count; index++)
-        {
-            PredictedCard card = mayhemCards[index];
-            if (!AutoPlayWithChoice(
-                    simulator,
-                    card,
-                    MegaCrit.Sts2.Core.Models.ModelDb.Power<MegaCrit.Sts2.Core.Models.Powers.MayhemPower>().Id.Entry,
-                    $"{card.Preview.Id.Entry}+{card.Preview.CurrentUpgradeLevel}#{index}",
-                    choices,
-                    processedEnemyDeaths))
-            {
-                return true;
-            }
         }
-
-        if (turnNumber > 1)
-        {
-            PredictedCard? previousAttack = GetPreviousTurnAttack(simulator, player);
-            if (previousAttack != null)
-            {
-                foreach (HistoryCourse relic in RelicsOf(player)
-                             .OfType<HistoryCourse>()
-                             .Where(static relic => !relic.IsMelted))
-                {
-                    PredictedCard copy = previousAttack.CreateDupeForPlayer(player);
-                    if (!AutoPlayWithChoice(
-                            simulator,
-                            copy,
-                            relic.Id.Entry,
-                            $"{copy.Preview.Id.Entry}+{copy.Preview.CurrentUpgradeLevel}#0",
-                            choices,
-                            processedEnemyDeaths))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        return false;
+        return ContinueScheduledAutoPlays(simulator, player, turnNumber, processedEnemyDeaths, mayhemCards, 0);
     }
 
-    public void TriggerWhisperingEarring(
+    public bool TriggerWhisperingEarring(
         CombatPredictionSimulator simulator,
         Player player,
         int turnNumber,
         ISet<uint> processedEnemyDeaths)
     {
         if (turnNumber > 1)
-            return;
+            return true;
 
         foreach (WhisperingEarring relic in RelicsOf(player)
                      .OfType<WhisperingEarring>()
@@ -125,23 +89,29 @@ internal sealed partial class SimulatedCombatState
                     };
                     // The overridden cursor answers every request with the fixed Vakuu policy, so the
                     // card's own selection resolves inside the auto-play like any other nested choice.
-                    if (!CardExecutionSupport.AutoPlay(
+                    bool played = CardExecutionSupport.AutoPlay(
                             simulator,
                             this,
                             card,
                             target,
                             processedEnemyDeaths,
                             payResources: true,
-                            nestedChoiceSourceId: card.Preview.Id.Entry))
+                            nestedChoiceSourceId: card.Preview.Id.Entry);
+                    if (HasPendingChoice)
+                        return false;
+                    if (!played)
                     {
                         break;
                     }
 
-                    CorePowerSupport.ApplyEnemyDeathPowers(
-                        simulator,
-                        this,
-                        KnownEnemies,
-                        processedEnemyDeaths);
+                    if (!CorePowerSupport.ApplyEnemyDeathPowers(
+                            simulator,
+                            this,
+                            KnownEnemies,
+                            processedEnemyDeaths))
+                    {
+                        return false;
+                    }
                 }
             }
             finally
@@ -149,6 +119,7 @@ internal sealed partial class SimulatedCombatState
                 RestoreActionChoices(vakuuChoices, previous);
             }
         }
+        return true;
     }
 
     public bool AutoPlayWithChoice(
@@ -159,40 +130,22 @@ internal sealed partial class SimulatedCombatState
         TurnStartChoiceCursor choices,
         ISet<uint> processedEnemyDeaths)
     {
-        if (!CardExecutionSupport.AutoPlay(simulator, this, card, null, processedEnemyDeaths))
-            return true;
-        if (HasPendingChoice)
-            return false;
-        CardChoiceSpec? spec = CardChoiceSupport.GetSpec(simulator, card);
-        PlanCardChoice? emptyChoice = CardChoiceSupport.BuildRequiredEmptyChoice(card.Preview);
-        if (spec == null)
-        {
-            if (emptyChoice == null)
-                CardChoiceSupport.ApplyNoChoiceEffects(simulator, this, card);
-            else
-                CardChoiceSupport.Apply(simulator, this, card, emptyChoice, processedEnemyDeaths);
-            return true;
-        }
-
-        TurnStartChoiceRequest request = new(
-            sourceId,
-            spec.Effect,
-            spec.SourcePile,
-            spec.MinCount,
-            spec,
-            contextId,
-            ActiveActionChoiceTiming);
-        if (!choices.TryTake(request, out PlanCardChoice? choice))
-        {
-            SetPendingTurnStartChoice(request);
-            return false;
-        }
-        CardChoiceSupport.Apply(simulator, this, card, choice!, processedEnemyDeaths);
-        return true;
+        _ = choices;
+        _ = CardExecutionSupport.AutoPlay(
+            simulator,
+            this,
+            card,
+            target: null,
+            processedEnemyDeaths,
+            nestedChoiceSourceId: sourceId,
+            nestedChoiceContextId: contextId);
+        return !HasPendingChoice;
     }
 
     private PredictedCard? GetPreviousTurnAttack(CombatPredictionSimulator simulator, Player player)
     {
+        if (_rootMaterialized)
+            return _lastAttackPreviousTurn?.GetValueOrDefault(player);
         if (_lastAttackPreviousTurn?.TryGetValue(player, out PredictedCard? predicted) == true)
             return predicted;
         CardPlayFinishedEntry? live = _rootHistory.CardPlaysFinished.LastOrDefault(entry =>
@@ -208,7 +161,7 @@ internal sealed partial class SimulatedCombatState
         return predicted;
     }
 
-    private Dictionary<Player, PredictedCard>? ForkHistoryCourseCards(
+    private static Dictionary<Player, PredictedCard>? ForkHistoryCourseCards(
         Dictionary<Player, PredictedCard>? source,
         PredictionForkContext context)
     {
@@ -229,16 +182,31 @@ internal sealed partial class SimulatedCombatState
     private static void AppendTrackedAttack(
         ref StateFingerprintBuilder fingerprint,
         char marker,
-        IReadOnlyDictionary<Player, PredictedCard>? cards)
+        Dictionary<Player, PredictedCard>? cards)
     {
-        if (cards == null)
+        if (cards == null || cards.Count == 0)
             return;
-        foreach ((Player player, PredictedCard card) in cards.OrderBy(entry => entry.Key.NetId))
+        // Every state key visits this. Single-player combat tracks at most one player, and a
+        // single entry is already in NetId order, so only larger tables need the stable sort.
+        if (cards.Count == 1)
         {
-            fingerprint.Add(marker);
-            fingerprint.Add((long)player.NetId);
-            fingerprint.Add(card.Preview.Id.Entry);
-            fingerprint.Add(card.Preview.CurrentUpgradeLevel);
+            foreach ((Player player, PredictedCard card) in cards)
+                AppendTrackedAttackEntry(ref fingerprint, marker, player, card);
+            return;
         }
+        foreach ((Player player, PredictedCard card) in cards.OrderBy(entry => entry.Key.NetId))
+            AppendTrackedAttackEntry(ref fingerprint, marker, player, card);
+    }
+
+    private static void AppendTrackedAttackEntry(
+        ref StateFingerprintBuilder fingerprint,
+        char marker,
+        Player player,
+        PredictedCard card)
+    {
+        fingerprint.Add(marker);
+        fingerprint.Add((long)player.NetId);
+        fingerprint.Add(card.Preview.Id.Entry);
+        fingerprint.Add(card.Preview.CurrentUpgradeLevel);
     }
 }

@@ -1,5 +1,6 @@
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Models.Afflictions;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.Relics;
@@ -39,6 +40,7 @@ internal static class ShouldPlayMirrors
         registry.Register<SlothPower>(HandleSlothPower);
 
         registry.Register<VelvetChoker>(HandleVelvetChoker);
+        registry.Register<Normality>(HandleNormality);
 
         return registry;
     }
@@ -49,13 +51,23 @@ internal static class ShouldPlayMirrors
     {
         return context.Card.Preview.Owner.Creature != power.Owner ||
             context.Card.Preview.Affliction is not Bound ||
-            !context.StateStore.Get(power, static value => new ChainsOfBindingPredictionState(value)).BoundCardPlayed;
+            !context.StateStore.Get(power, static _ => new ChainsOfBindingPredictionState()).BoundCardPlayed;
+    }
+
+    private static bool HandleNormality(Normality normality, ShouldPlayMirrorContext context)
+    {
+        if (context.Card.Preview.Owner != normality.Owner
+            || context.State.FindCard(normality)?.GetPile(context.State)?.Type != PileType.Hand)
+            return true;
+        SimulatedCombatState combat = context.CombatState as SimulatedCombatState
+            ?? throw new InvalidOperationException("Normality requires branch card-play start history.");
+        return combat.GetCardPlayStartsThisTurn(normality.Owner.Creature) < 3;
     }
 
     private static bool HandleSlothPower(SlothPower power, ShouldPlayMirrorContext context)
     {
         return context.Card.Preview.Owner.Creature != power.Owner ||
-            context.StateStore.Get(power, static value => new CounterPredictionState(GameRef.Get<int>(value, "_cardsPlayedThisTurn"))).Value <
+            context.StateStore.Get(power, static value => new CounterPredictionState(T44PrivateAccess.SlothPower_CardsPlayedThisTurn(value))).Value <
             power.Amount;
     }
 
@@ -69,13 +81,13 @@ internal static class ShouldPlayMirrors
 
         SimulatedCombatState combat = context.CombatState as SimulatedCombatState
             ?? throw new InvalidOperationException("昏眩出牌限制缺少分支出牌历史。");
-        return combat.GetCardPlaysStartedThisTurn(power.Owner) == 0;
+        return combat.GetCardPlaySeriesStartedThisTurn(power.Owner) == 0;
     }
 
     private static bool HandleVelvetChoker(VelvetChoker relic, ShouldPlayMirrorContext context)
     {
         return context.Card.Preview.Owner != relic.Owner ||
-            context.StateStore.Get(relic, static value => new CounterPredictionState(GameRef.Get<int>(value, "_cardsPlayedThisTurn"))).Value <
+            context.StateStore.Get(relic, static value => new CounterPredictionState(T44PrivateAccess.VelvetChoker_CardsPlayedThisTurn(value))).Value <
             relic.DynamicVars.Cards.IntValue;
     }
 }

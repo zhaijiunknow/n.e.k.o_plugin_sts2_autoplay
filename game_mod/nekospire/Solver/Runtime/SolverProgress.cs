@@ -131,6 +131,20 @@ internal sealed class SearchInteractionState
         StoppedStamp = null;
         return result;
     }
+
+    // Worker completion and UI takeover completion are separate boundaries. Setup keeps its
+    // native choice session alive after a result, so it must retire the request explicitly.
+    public SearchTakeoverRequest? CompleteTakeover()
+    {
+        lock (_gate)
+        {
+            SearchTakeoverRequest? completed = _takeoverRequest;
+            Volatile.Write(ref _takeoverRequest, null);
+            Volatile.Write(ref _acceptingTakeover, 0);
+            RenderedRouteAdoptionSeed = null;
+            return completed;
+        }
+    }
 }
 
 internal sealed record SolverInterimResult(
@@ -142,16 +156,40 @@ internal sealed record SolverInterimResult(
     int ProjectedBattlePotionCount,
     int EnemyHp,
     double Score,
-    int? CombatEndedTurn = null);
+    int? CombatEndedTurn = null)
+{
+    public SolverTheftPolicy? TheftPolicy { get; init; }
+    public bool Survives { get; init; }
+    public int DeathSaveUseCount { get; init; }
+    public int GrowthHpCredit { get; init; }
+    public int GrowthRewardCount { get; init; }
+}
 
 internal sealed record SolverFrontierTurn(
     int Turn,
     IReadOnlyList<PlanAction> Actions,
     int HpLost,
+    int HpRecovered,
     int EnemyHpLost,
     int EnergyLeft,
     bool CombatEnded)
 {
+    public IReadOnlyList<PlanCardChoice> TurnStartChoices { get; init; } = [];
+
+    public static IReadOnlyList<PlanCardChoice> ChoicesForTurn(
+        int turn,
+        int startTurn,
+        IReadOnlyList<PlanCardChoice> setupChoices,
+        IReadOnlyList<PlanAction> actions)
+    {
+        IReadOnlyList<PlanCardChoice> preceding = actions
+            .FirstOrDefault(action => action.Turn == turn - 1 && action.TurnStartChoices is { Count: > 0 })
+            ?.TurnStartChoices ?? [];
+        return turn == startTurn
+            ? setupChoices.Concat(preceding).ToArray()
+            : preceding;
+    }
+
     public static IReadOnlyList<SolverFrontierTurn> FromResult(SolverResult result)
         => result.BestNode.Actions
             .GroupBy(action => action.Turn)
@@ -160,9 +198,17 @@ internal sealed record SolverFrontierTurn(
                 group.Key,
                 group.ToArray(),
                 result.HpLostByTurn.GetValueOrDefault(group.Key),
+                result.HpRecoveredByTurn.GetValueOrDefault(group.Key),
                 result.EnemyHpLostByTurn.GetValueOrDefault(group.Key),
                 result.EnergyLeftByTurn.GetValueOrDefault(group.Key),
-                result.CombatEndedTurn == group.Key))
+                result.CombatEndedTurn == group.Key)
+            {
+                TurnStartChoices = ChoicesForTurn(
+                    group.Key,
+                    result.StartTurnNumber,
+                    result.WasReused ? [] : result.TurnSetupChoices,
+                    result.BestNode.Actions),
+            })
             .ToArray();
 }
 
@@ -171,11 +217,14 @@ internal sealed record SolverCurrentTurnPreview(
     int Turn,
     IReadOnlyList<PlanAction> Actions,
     int HpLost,
+    int HpRecovered,
     int EnemyHpLost,
     int EnergyLeft,
     bool CombatEnded,
     IReadOnlyList<SolverFrontierTurn>? FrontierTurns = null)
 {
+    public IReadOnlyList<PlanCardChoice> TurnStartChoices { get; init; } = [];
+
     public static SolverCurrentTurnPreview FromResult(
         SolverResult result,
         int candidateVersion = 0)
@@ -186,10 +235,14 @@ internal sealed record SolverCurrentTurnPreview(
                 .Where(action => action.Turn == result.StartTurnNumber)
                 .ToArray(),
             result.HpLostByTurn.GetValueOrDefault(result.StartTurnNumber),
+            result.HpRecoveredByTurn.GetValueOrDefault(result.StartTurnNumber),
             result.EnemyHpLostByTurn.GetValueOrDefault(result.StartTurnNumber),
             result.EnergyLeftByTurn.GetValueOrDefault(result.StartTurnNumber),
             result.CombatEndedTurn == result.StartTurnNumber,
-            SolverFrontierTurn.FromResult(result));
+            SolverFrontierTurn.FromResult(result))
+        {
+            TurnStartChoices = result.WasReused ? [] : result.TurnSetupChoices,
+        };
 }
 
 internal sealed record SolverSpeculativeRoutePreview(
@@ -231,50 +284,5 @@ internal sealed record SolverProgress(
     SolverInterimResult? CurrentBestResult = null,
     SolverCurrentTurnPreview? CurrentTurnPreview = null,
     SolverSpeculativeRoutePreview? SpeculativeRoutePreview = null,
-    SolverRouteAdoptionSeed? RouteAdoptionSeed = null);
-
-// SearchProgressDisplayState is declared upstream inside src/Runtime/SolverControllerSessions.cs (a
-// controller-subsystem file we do NOT vendor wholesale). SolverProgress references it, so the type is lifted
-// here alone. It depends only on vendored types SolverProgress and SolverWeights.
-internal sealed class SearchProgressDisplayState(long startedAtTick)
-{
-    public SearchProgressDisplayState() : this(Environment.TickCount64)
-    {
-    }
-
-    public long StartedAtTick { get; private set; } = startedAtTick;
-    public long LastRenderAtTick { get; private set; } = startedAtTick;
-    public SolverProgress? RenderedProgress { get; private set; }
-
-    public void Restart(long nowTick)
-    {
-        StartedAtTick = nowTick;
-        LastRenderAtTick = nowTick;
-        RenderedProgress = null;
-    }
-
-    public bool TryCreate(
-        SolverProgress? progress,
-        long nowTick,
-        out SolverProgress displayProgress)
-    {
-        if (progress == null
-            || nowTick - LastRenderAtTick < SolverWeights.ProgressUiIntervalMilliseconds)
-        {
-            displayProgress = null!;
-            return false;
-        }
-
-        long elapsedMilliseconds = Math.Max(
-            progress.ElapsedMilliseconds,
-            Math.Max(
-                RenderedProgress?.ElapsedMilliseconds ?? 0L,
-                Math.Max(0L, nowTick - StartedAtTick)));
-        displayProgress = elapsedMilliseconds == progress.ElapsedMilliseconds
-            ? progress
-            : progress with { ElapsedMilliseconds = elapsedMilliseconds };
-        LastRenderAtTick = nowTick;
-        RenderedProgress = displayProgress;
-        return true;
-    }
-}
+    SolverRouteAdoptionSeed? RouteAdoptionSeed = null,
+    int RequestBudgetMilliseconds = 0);

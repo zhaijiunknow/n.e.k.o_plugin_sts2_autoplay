@@ -84,17 +84,18 @@ internal static class EnchantmentOnPlayMirrors
             : context.CardPlay.Target is { } selectedTarget ? [selectedTarget] : [];
         foreach (Creature target in targets)
         {
-            effects.ApplyPower(
+            effects.ApplyPowerFromSource(
                 typeof(WeakPower),
                 target,
                 enchantment.DynamicVars.Weak.IntValue,
-                context.PreviewCard.Owner.Creature);
+                context.PreviewCard.Owner.Creature,
+                context.PreviewCard);
         }
     }
 
     private static void HandleMomentum(Momentum enchantment, EnchantmentOnPlayMirrorContext context)
     {
-        GameRef.Set(enchantment, "_extraDamage", GameRef.Get<decimal>(enchantment, "_extraDamage") + enchantment.Amount);
+        T44PrivateAccess.SetMomentum_ExtraDamage(enchantment, T44PrivateAccess.Momentum_ExtraDamage(enchantment) + ( enchantment.Amount));
     }
 
     private static void HandleSown(Sown enchantment, EnchantmentOnPlayMirrorContext context)
@@ -104,7 +105,7 @@ internal static class EnchantmentOnPlayMirrors
             return;
         }
 
-        GameRef.Set(enchantment, "_status", EnchantmentStatus.Disabled);
+        T44PrivateAccess.SetEnchantmentModel_Status(enchantment,  EnchantmentStatus.Disabled);
         context.Simulator.GainEnergy(context.PreviewCard.Owner, enchantment.Amount);
     }
 
@@ -115,7 +116,7 @@ internal static class EnchantmentOnPlayMirrors
             return;
         }
 
-        GameRef.Set(enchantment, "_status", EnchantmentStatus.Disabled);
+        T44PrivateAccess.SetEnchantmentModel_Status(enchantment,  EnchantmentStatus.Disabled);
         context.Simulator.Draw(context.PreviewCard.Owner, enchantment.Amount);
     }
 }

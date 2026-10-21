@@ -13,53 +13,64 @@ internal sealed partial class CombatPredictionSimulator
     /// <summary>
     /// Currently mirrors the prediction-relevant parts of <see cref="CombatManager.EndPlayerTurnPhaseOneInternal()"/>.
     /// </summary>
-    internal void SimulateEndPlayerTurnAfterOrbPassives()
+    internal bool SimulateEndPlayerTurnBeforeOrbPassives(int playerTurn)
     {
-        var playersEndingTurn = CombatManager.Instance.PlayersTakingExtraTurn switch
-        {
-            { Count: > 0 } extraTurnPlayers => extraTurnPlayers,
-            _ => State.CombatState.Players
-        };
+        var playersEndingTurn = State.CombatState.Players;
 
         foreach (var player in playersEndingTurn)
         {
+            State.GetPlayerCombatState(player).Phase = PlayerTurnPhase.AutoPostPlay;
             HookMirrors.AfterAutoPostPlayPhaseEntered(this, player);
+            if (HasPendingChoice)
+                return false;
         }
+
+        foreach (var player in playersEndingTurn)
+            State.GetPlayerCombatState(player).Phase = PlayerTurnPhase.End;
 
         HookMirrors.BeforeSideTurnEnd(
             this,
             State.CombatState.CurrentSide,
             [.. playersEndingTurn.Select(static player => player.Creature)]);
+        if (HasPendingChoice)
+            return false;
         SynchronizePowerAmountPredictionStates();
 
-        if (CheckWinCondition())
-        {
-            return;
-        }
+        CheckWinCondition(playerTurn);
+        return true;
+    }
+
+    internal bool SimulateEndPlayerTurnAfterOrbPassives(int playerTurn)
+    {
+        if (IsOverOrEnding)
+            return true;
+        var playersEndingTurn = State.CombatState.Players;
 
         foreach (var player in playersEndingTurn)
         {
-            DoTurnEnd(player);
+            if (!DoTurnEnd(player))
+                return false;
         }
 
-        if (CheckWinCondition())
+        if (CheckWinCondition(playerTurn))
         {
-            return;
+            return true;
         }
 
         // Vanilla next calls Hook.BeforeFlush for each ending player. Its only vanilla listener is
         // SlumberingEssence, which is not used by the current version of the base game, so the hook is omitted.
+        return true;
     }
 
     /// <summary>
     /// Mirrors the prediction-relevant parts of <see cref="CombatManager.DoTurnEnd"/>.
     /// </summary>
-    private void DoTurnEnd(Player player)
+    private bool DoTurnEnd(Player player)
     {
         var playerState = State.GetPlayerCombatState(player);
         if (IsOverOrEnding)
         {
-            return;
+            return true;
         }
 
         List<PredictedCard>? turnEndCards = null;
@@ -81,32 +92,42 @@ internal sealed partial class CombatPredictionSimulator
         if (etherealCards != null)
         {
             foreach (PredictedCard card in etherealCards)
+            {
                 Exhaust(card, causedByEthereal: true);
+                if (HasPendingChoice)
+                    return false;
+            }
         }
 
         if (turnEndCards != null)
-            DoTurnEndCards(turnEndCards);
+            return DoTurnEndCards(turnEndCards);
+        return true;
     }
 
     /// <summary>
     /// Mirrors the prediction-relevant parts of <see cref="CombatManager.DoTurnEndCards"/>.
     /// </summary>
-    private void DoTurnEndCards(IEnumerable<PredictedCard> cards)
+    private bool DoTurnEndCards(IEnumerable<PredictedCard> cards)
     {
         foreach (var card in cards)
         {
             AddToPile(card, PileType.Play);
             CardOnTurnEndInHandMirrors.Invoke(this, card);
+            if (HasPendingChoice)
+                return false;
 
             // Vanilla does not check Hook.ShouldEtherealTrigger here, so we keep the same behavior.
             if (card.HasKeyword(State, CardKeyword.Ethereal))
             {
                 Exhaust(card, causedByEthereal: true);
+                if (HasPendingChoice)
+                    return false;
             }
             else
             {
                 AddToPile(card, PileType.Discard);
             }
         }
+        return true;
     }
 }

@@ -7,6 +7,14 @@ internal enum SolverPotionDirective
     Disabled,
 }
 
+internal enum PotionStrategyPreset
+{
+    AllSmart,
+    AllProtected,
+    AllForced,
+    OnlyForced,
+}
+
 internal readonly record struct PotionSlotDirective(
     int Slot,
     string PotionId,
@@ -21,12 +29,20 @@ internal readonly record struct ForcedPotionUseEvaluation(
 internal sealed class PotionStrategySnapshot
 {
     private readonly Dictionary<(int Slot, string PotionId), SolverPotionDirective> _directives;
+    private readonly bool _onlyForcedUses;
 
     public PotionStrategySnapshot(
         SolverPotionPolicy defaultPolicy,
         IEnumerable<PotionSlotDirective> directives)
+        : this(defaultPolicy, directives, onlyForcedUses: false) { }
+
+    private PotionStrategySnapshot(
+        SolverPotionPolicy defaultPolicy,
+        IEnumerable<PotionSlotDirective> directives,
+        bool onlyForcedUses)
     {
         DefaultPolicy = defaultPolicy;
+        _onlyForcedUses = onlyForcedUses;
         _directives = directives.ToDictionary(
             directive => (directive.Slot, directive.PotionId),
             directive => directive.Directive);
@@ -40,6 +56,12 @@ internal sealed class PotionStrategySnapshot
     public IReadOnlyList<PotionSlotDirective> Directives { get; }
     public bool HasForcedDirectives
         => Directives.Any(directive => directive.Directive == SolverPotionDirective.Force);
+
+    public int ForcedDirectiveCount
+        => Directives.Count(directive => directive.Directive == SolverPotionDirective.Force);
+
+    public PotionStrategySnapshot ForForcedBaseline()
+        => new(DefaultPolicy, Directives, onlyForcedUses: true);
 
     public SolverPotionDirective Resolve(int slot, string potionId)
         => _directives.GetValueOrDefault(
@@ -56,6 +78,9 @@ internal sealed class PotionStrategySnapshot
     {
         if (forceAllDisabled)
             return false;
+        if (_onlyForcedUses)
+            return _directives.TryGetValue((slot, potionId), out SolverPotionDirective forced)
+                && forced == SolverPotionDirective.Force;
         return _directives.TryGetValue((slot, potionId), out SolverPotionDirective directive)
             ? directive != SolverPotionDirective.Disabled
             : effectivePolicy != SolverPotionPolicy.Disabled;
@@ -63,7 +88,8 @@ internal sealed class PotionStrategySnapshot
 
     public ForcedPotionUseEvaluation EvaluateForcedUses(
         IReadOnlyList<PlanAction> actions,
-        bool renewablePotionShapedRock)
+        bool renewablePotionShapedRock,
+        PotionStrategicCostLookup? strategicCosts = null)
     {
         PotionSlotDirective[] forced = Directives
             .Where(directive => directive.Directive == SolverPotionDirective.Force)
@@ -80,9 +106,9 @@ internal sealed class PotionStrategySnapshot
             if (!used)
                 continue;
             count++;
-            strategicCost += PotionUsePolicy.StrategicHpCost(
-                directive.PotionId,
-                renewablePotionShapedRock);
+            strategicCost += strategicCosts != null
+                ? strategicCosts.Get(directive.PotionId, renewablePotionShapedRock)
+                : PotionUsePolicy.StrategicHpCost(directive.PotionId, renewablePotionShapedRock);
             if (string.Equals(directive.PotionId, "AMBERGRIS", StringComparison.Ordinal))
                 ambergrisCount++;
         }
@@ -91,6 +117,70 @@ internal sealed class PotionStrategySnapshot
             count,
             strategicCost,
             ambergrisCount);
+    }
+
+    public ForcedPotionUseEvaluation EvaluateForcedUses(SearchNode node)
+    {
+        int count = 0;
+        int strategicCost = 0;
+        int ambergrisCount = 0;
+        foreach (PotionSlotDirective directive in Directives)
+        {
+            if (directive.Directive != SolverPotionDirective.Force)
+                continue;
+            SearchNode? useNode = null;
+            for (SearchNode? cursor = node; cursor?.Action is { } action; cursor = cursor.Parent)
+            {
+                if (action.Kind == PlanActionKind.UsePotion
+                    && action.PotionSlot == directive.Slot
+                    && string.Equals(action.PotionId, directive.PotionId, StringComparison.Ordinal))
+                {
+                    useNode = cursor;
+                    break;
+                }
+            }
+            if (useNode == null)
+                continue;
+            count++;
+            strategicCost += useNode.Snapshot.ExplicitPotionStrategicCost
+                - useNode.Parent!.Snapshot.ExplicitPotionStrategicCost;
+            if (directive.PotionId == "AMBERGRIS")
+                ambergrisCount++;
+        }
+        return new ForcedPotionUseEvaluation(count == ForcedDirectiveCount,
+            count, strategicCost, ambergrisCount);
+    }
+
+    public ForcedPotionUseEvaluation EvaluateForcedUses(
+        IReadOnlyList<PredictedPotionUse> potionUses)
+    {
+        int count = 0;
+        int strategicCost = 0;
+        int ambergrisCount = 0;
+        foreach (PotionSlotDirective directive in Directives)
+        {
+            if (directive.Directive != SolverPotionDirective.Force)
+                continue;
+            PredictedPotionUse? use = null;
+            for (int index = potionUses.Count - 1; index >= 0; index--)
+            {
+                PredictedPotionUse candidate = potionUses[index];
+                if (candidate.Automatic || candidate.Slot != directive.Slot
+                    || !string.Equals(candidate.PotionId, directive.PotionId,
+                        StringComparison.Ordinal))
+                    continue;
+                use = candidate;
+                break;
+            }
+            if (use is not { } matched)
+                continue;
+            count++;
+            strategicCost += matched.StrategicHpCost;
+            if (directive.PotionId == "AMBERGRIS")
+                ambergrisCount++;
+        }
+        return new ForcedPotionUseEvaluation(count == ForcedDirectiveCount,
+            count, strategicCost, ambergrisCount);
     }
 
     public string DescribeForcedUses()

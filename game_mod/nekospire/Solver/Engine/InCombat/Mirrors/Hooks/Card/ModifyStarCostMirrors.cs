@@ -55,7 +55,7 @@ internal static class ModifyStarCostMirrors
     {
         return context.Card.Preview.Owner == relic.Owner &&
             IsInPlayablePile(context) &&
-            context.StateStore.Get(relic, static value => new CounterPredictionState(GameRef.Get<int>(value, "_cardsPlayedThisTurn"))).Value ==
+            context.StateStore.Get(relic, static value => new CounterPredictionState(T44PrivateAccess.BrilliantScarf_CardsPlayedThisTurn(value))).Value ==
             relic.DynamicVars.Cards.IntValue - 1
                 ? 0
                 : context.Cost;

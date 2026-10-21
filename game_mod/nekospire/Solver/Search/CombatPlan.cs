@@ -1,6 +1,6 @@
 using MegaCrit.Sts2.Core.Entities.Cards;
-using MegaCrit.Sts2.Core.Models;
 using CombatSolver.Engine.InCombat.Simulation;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 
 namespace CombatSolver;
@@ -32,6 +32,12 @@ internal enum PlanChoiceEffect
     AutoPlayRepeated,
     GenerateToHand,
     ApplyKnowledgeCurse,
+
+    /// <summary>
+    /// 结算由登记方负责的选择。求解器只负责展开分支、把选中的结果记进计划、部署时应答原生页面；
+    /// 效果由 <see cref="PotionChoiceMirrors"/> 登记的 apply 施加。求解器自己从不产生这个值。
+    /// </summary>
+    ModDefined,
 }
 
 internal enum PlanChoiceTiming
@@ -54,6 +60,8 @@ internal enum SearchBoundaryReason
     TurnLimit,
     NodeLimit,
     TimeLimit,
+    /// <summary>搜索内连续回收未腾出余量，本成员发布当前前沿后停止。</summary>
+    MemoryNoProgress,
 }
 
 internal enum SolverResultScope
@@ -141,7 +149,9 @@ internal sealed record PlanAction(
     int ReplayCount = 0,
     string CardStateKey = "",
     int CardStateOccurrence = 0,
-    bool EndsPlayerTurn = false)
+    bool EndsPlayerTurn = false,
+    int CardUpgradeLevel = 0,
+    string CardEnchantmentId = "")
 {
     public bool IsExecutable => Kind is PlanActionKind.PlayCard or PlanActionKind.UsePotion;
     public string ActionTitle => Kind == PlanActionKind.UsePotion ? PotionTitle : CardTitle;
@@ -164,9 +174,30 @@ internal sealed record PlanAction(
     }
 }
 
+internal static class HpChangeText
+{
+    /// <summary>
+    /// Renders a net HP change the way a player reads it: a gain keeps its plus sign, a loss keeps its minus.
+    /// </summary>
+    public static string Signed(int netHpChange)
+        => netHpChange > 0
+            ? $"+{netHpChange}"
+            : netHpChange.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>Same value, wrapped in the gain or loss colour used elsewhere in the route details.</summary>
+    public static string SignedColored(int netHpChange)
+        => netHpChange switch
+        {
+            > 0 => $"[color=#73c991]{Signed(netHpChange)}[/color]",
+            < 0 => $"[color=#ef6b6b]{Signed(netHpChange)}[/color]",
+            _ => Signed(netHpChange),
+        };
+}
+
 internal sealed record TurnOutcome(
     int Turn,
     int HpLost,
+    int HpRecovered,
     int EnemyHpLost,
     int SoldHp,
     int MaxBlock,
@@ -654,7 +685,8 @@ internal readonly record struct CycleExitQuality(
 internal sealed class CycleProbeTracker(
     StateFingerprint shapeKey,
     StateFingerprint sequenceKey,
-    StateFingerprint[] actionKeys)
+    StateFingerprint[] actionKeys,
+    CombatBeamSolver.CanonicalCycleFamilyKey familyKey)
 {
     private const int MaximumExitParetoQualities = 8;
 
@@ -682,12 +714,16 @@ internal sealed class CycleProbeTracker(
     public StateFingerprint SequenceKey { get; } = sequenceKey;
     public IReadOnlyList<StateFingerprint> ActionKeys => _actionKeys;
     public int PeriodActions => _actionKeys.Length;
+    public CombatBeamSolver.CanonicalCycleFamilyKey FamilyKey { get; } = familyKey;
+    public long ExitQualityEpoch { get; private set; }
 
     public long ObserveExit(
         int phaseIndex,
         StateFingerprint actionKey,
-        CycleExitQuality quality)
+        CycleExitQuality quality,
+        out bool qualityImproved)
     {
+        qualityImproved = false;
         Dictionary<StateFingerprint, ExitEnvelope> envelope =
             _exitEnvelopes[phaseIndex] ??= [];
         if (!envelope.TryGetValue(actionKey, out ExitEnvelope? prior))
@@ -695,6 +731,8 @@ internal sealed class CycleProbeTracker(
             envelope.Add(actionKey, new ExitEnvelope(quality));
             // A newly available exact action is itself bounded-lookahead evidence, even when
             // its first edge is only setup for a later payoff.
+            qualityImproved = true;
+            ExitQualityEpoch = checked(ExitQualityEpoch + 1);
             return 1;
         }
         if (prior.Qualities.Any(candidate => candidate.DominatesOrEquals(quality)))
@@ -704,7 +742,11 @@ internal sealed class CycleProbeTracker(
         prior.Qualities.Add(quality);
         TrimExitParetoFrontier(prior.Qualities);
         if (prior.Qualities.Contains(quality))
+        {
+            qualityImproved = true;
+            ExitQualityEpoch = checked(ExitQualityEpoch + 1);
             return CreatePendingGeneration(prior);
+        }
         return LatestPendingGeneration(prior);
     }
 
@@ -784,12 +826,23 @@ internal sealed class CycleProbeTracker(
         }
     }
 
+    internal int ActiveExitProbeTicketCountForTesting
+        => _exitEnvelopes.Sum(phase => phase?.Values.Sum(
+            envelope => envelope.ActiveTickets.Count) ?? 0);
+
+    internal int ExitEnvelopeActionCountForTesting
+        => _exitEnvelopes.Sum(phase => phase?.Count ?? 0);
+
     public CycleProbeTracker Clone()
     {
         CycleProbeTracker clone = new(
             ShapeKey,
             SequenceKey,
-            _actionKeys);
+            _actionKeys,
+            FamilyKey)
+        {
+            ExitQualityEpoch = ExitQualityEpoch,
+        };
         for (int phaseIndex = 0; phaseIndex < _exitEnvelopes.Length; phaseIndex++)
         {
             if (_exitEnvelopes[phaseIndex] is not { } source)
@@ -870,12 +923,13 @@ internal sealed class CycleProbeTracker(
     }
 }
 
-internal readonly record struct CycleProbeLease(
+internal sealed record CycleProbeLease(
     CycleProbeTracker Tracker,
     int NextActionIndex,
     int CompletedRepetitions,
     bool ImprovedSinceWrap,
-    bool LastCompletedRepetitionImproved);
+    bool LastCompletedRepetitionImproved,
+    long ObservedExitQualityEpoch);
 
 internal sealed record CycleExitProbeState(
     CycleProbeTracker OriginTracker,
@@ -887,11 +941,13 @@ internal sealed record CycleExitProbeState(
     StateFingerprint ExitActionKey,
     long OriginGeneration,
     int RemainingActions,
+    int RemainingEpochActions,
     int RemainingTurnTransitions,
     bool LeaseIssued = false);
 
 internal sealed record CycleExitObservation(
     CycleProbeTracker OriginTracker,
+    int OriginActionCount,
     int OriginPhaseIndex,
     StateFingerprint ExitActionKey,
     long OriginGeneration,
@@ -913,7 +969,7 @@ internal sealed class CrossTurnProbeTracker(
     public StateFingerprint OriginShapeKey { get; } = originShapeKey;
 }
 
-internal readonly record struct CrossTurnProbeState(
+internal sealed record CrossTurnProbeState(
     CrossTurnProbeTracker Tracker,
     int CompletedTurnTransitions,
     int SemanticStateChangeTransitions,
@@ -925,6 +981,59 @@ internal readonly record struct CrossTurnProbeState(
 internal readonly record struct CrossTurnStandPatBaseline(
     StateFingerprint StateKey,
     CycleExitQuality Quality);
+
+/// <summary>
+/// Incremental identity for order-sensitive card mutations performed since the last
+/// shuffle/turn boundary. The sequence key is deliberately ordered; the effect key is a
+/// commutative multiset used only to find routes whose visible unordered outcomes collide.
+/// </summary>
+internal sealed record OrderedMutationLineage(
+    int Turn,
+    int ChoiceCount,
+    StateFingerprint SequenceKey,
+    StateFingerprint EffectMultisetKey);
+
+/// <summary>
+/// One-prune evidence for an ordered mutation segment which ended on the edge that produced this
+/// node. It is never inherited by the next edge: the live lineage starts again after the boundary.
+/// </summary>
+internal sealed record OrderedMutationBoundaryLineage(
+    OrderedMutationLineage CompletedLineage,
+    int FromTurn,
+    int FromShufflesCrossed,
+    int ToTurn,
+    int ToShufflesCrossed);
+
+/// <summary>
+/// A bounded scheduling lease for one ordered-mutation alternative. RootKey is shared by every
+/// ordering in the collision family, InitialKey identifies the original ordering lane, and Key
+/// identifies the current derived lane. Derived lanes never mint a new root budget.
+/// </summary>
+internal sealed record OrderedMutationRetentionLease(
+    StateFingerprint RootKey,
+    StateFingerprint InitialKey,
+    StateFingerprint Key,
+    int OriginTurn,
+    int OriginShufflesCrossed,
+    int PortfolioPriority,
+    bool BoundaryReached)
+{
+    public const int MaximumProtectedAdmissions = 16;
+
+    /// <summary>
+    /// True only after an already-active ordering lane reaches a recurrent region whose
+    /// simulator state has made strict progress. It may then use the bounded tail of the
+    /// existing root/initial budgets; cold collision families never inherit this flag.
+    /// </summary>
+    public bool ProgressTailEligible { get; init; }
+}
+
+/// <summary>
+/// Transient identity for the two distinct orderings that first prove an unordered outcome
+/// collision. It exists only through the coordinator prune that activates the pair and is never
+/// propagated to an expanded child.
+/// </summary>
+internal sealed record OrderedMutationActivationTicket(StateFingerprint Key);
 
 /// <summary>
 /// A cycle candidate is evidence for search scheduling, never a proof that a route is infinite.
@@ -942,6 +1051,7 @@ internal sealed record CycleSearchState(
     public int PriorProjectedPlayerHp { get; init; }
     public EnemyDurabilityVector EnemyDurabilityFloor { get; init; }
     public bool HasNewEnemyDurabilityProgress { get; init; }
+    public bool HasConsistentDamagePhases { get; init; }
     public bool HasExactStateChange { get; init; }
     public int TotalStructuralRepetitions { get; init; } = Repetitions;
 }
@@ -969,17 +1079,44 @@ internal sealed record SearchNode(
 {
     private IReadOnlyList<PlanAction>? _actions;
 
+    // Cycle evidence is discovered only after the simulator snapshot has produced this node.
+    // Keep the positional member (and therefore record equality/deconstruction/with semantics),
+    // but allow the unpublished node to receive that evidence without cloning the whole node.
+    public CycleSearchState? Cycle { get; set; } = Cycle;
+
+    // Opening-only actions need only this monotonic route fact. Keeping it on the parent chain
+    // avoids materializing and retaining an ActionCount-sized array on every expanded sibling.
+    public bool HasNonPotionAction { get; } =
+        Parent?.HasNonPotionAction == true
+        || Action is { Kind: not PlanActionKind.UsePotion };
+
+    internal bool HasMaterializedActionsForTesting => _actions != null;
+
     public int RetentionRank { get; set; } = int.MaxValue;
     public int LongTermResourceRetentionRank { get; set; } = int.MaxValue;
     public int CumulativeEnemyHpLost { get; init; }
     public int CycleRetentionRank { get; set; } = int.MaxValue;
     public int CycleExitRetentionRank { get; set; } = int.MaxValue;
     public int CrossTurnRetentionRank { get; set; } = int.MaxValue;
+    public OrderedMutationLineage? OrderedMutationLineage { get; set; }
+    public OrderedMutationBoundaryLineage? OrderedMutationBoundaryLineage { get; set; }
+    public OrderedMutationRetentionLease? OrderedMutationRetentionLease { get; set; }
+    public bool OrderedMutationLeaseTransitionPending { get; set; }
+    public OrderedMutationActivationTicket? OrderedMutationActivationTicket { get; set; }
+    public bool OrderedMutationAdmissionPending { get; set; }
+    public bool OrderedMutationAdmissionCharged { get; set; }
+    public int OrderedMutationAdmissionSequence { get; set; } = int.MaxValue;
+    public bool OrderedMutationContinuationHandoff { get; set; }
+    public bool OrderedMutationContinuationBridge { get; set; }
+    public bool OrderedMutationObservationRequested { get; set; }
+    public bool OrderedMutationObservationDebtSettlementPending { get; set; }
+    public int OrderedMutationObservationStepsRemaining { get; set; }
     public CycleProbeLease? CycleProbeLease { get; set; }
     public CycleExitProbeState? CycleExitProbe { get; set; }
     public CycleExitObservation? CycleExitObservation { get; set; }
     public PendingCycleExitObservation? PendingCycleExitObservation { get; set; }
     public CrossTurnProbeState? CrossTurnProbe { get; set; }
+    public PowerCommitment? PowerCommitment { get; set; }
     public IReadOnlyList<CrossTurnStandPatBaseline>? CrossTurnStandPatBaselines { get; set; }
     public bool CrossTurnSemanticStateChanged { get; set; }
     public bool CrossTurnSemanticEvidenceAttached { get; set; }
@@ -1032,6 +1169,8 @@ internal sealed class SimulationSnapshot(
     int playerHp,
     int playerMaxHp,
     int cumulativePlayerHpLost,
+    int recoveredPlayerHp,
+    int deathSaveRelicHpRestored,
     int longTermResourceValue,
     int angerCopiesGenerated,
     int projectedPlayerHp,
@@ -1090,7 +1229,8 @@ internal sealed class SimulationSnapshot(
     IReadOnlySet<uint> processedEnemyDeaths,
     SearchBoundaryReason boundaryReason,
     IReadOnlyList<PredictionGap> predictionGaps,
-    CombatPredictionSimulator simulator)
+    CombatPredictionSimulator simulator,
+    CombatTerminalStamp? terminalStamp = null)
 {
     private CombatPredictionSimulator? _simulator = simulator;
     private string? _releasedBy;
@@ -1105,13 +1245,38 @@ internal sealed class SimulationSnapshot(
     public bool HasRisk { get; } = hasRisk;
     public bool PlayerDead { get; } = playerDead;
     public bool AllEnemiesDead { get; } = allEnemiesDead;
+    public CombatTerminalStamp? TerminalStamp { get; } = terminalStamp;
+    public int? CombatEndedTurn => TerminalStamp is { Outcome: CombatTerminalOutcome.Victory } terminal
+        ? terminal.PlayerTurn : null;
+    public int? DeathTurn => TerminalStamp is { Outcome: CombatTerminalOutcome.Defeat } terminal
+        ? terminal.PlayerTurn : null;
     public int PlayerHp { get; } = playerHp;
     public int PlayerMaxHp { get; } = playerMaxHp;
     public int CumulativePlayerHpLost { get; } = cumulativePlayerHpLost;
+    public int RecoveredPlayerHp { get; } = recoveredPlayerHp;
+    public int ExplicitPotionStrategicCost { get; init; }
+
+    /// <summary>HP a one-shot death-save relic put back on this route.</summary>
+    /// <seealso cref="ActEndingBossPolicy.DeathSavePremium"/>
+    public int DeathSaveRelicHpRestored { get; } = deathSaveRelicHpRestored;
+    public int DeathSavePotionHpRestored { get; init; }
+    public int DeathSaveHpRestored => DeathSaveRelicHpRestored + DeathSavePotionHpRestored;
+    public int DeathSaveUseCount { get; init; }
+    public int ProjectedDeathSaveUseCount { get; init; }
+
     public int LongTermResourceValue { get; } = longTermResourceValue;
+    public RelicCounterEvaluation RelicCounters { get; init; }
+    public int StrategyGoalHpCredit => GrowthHpCredit + RelicCounters.HpCredit;
+    public int StrategicHpCredit => StrategyGoalHpCredit + RelicCounters.HealingHpCredit;
+    public int StrategyGoalCount => GrowthRewards.Total + RelicCounters.SatisfiedPriority;
+    public int GrowthHpCredit { get; init; }
+    public GrowthValues GrowthRewards { get; init; }
+    public int FutureHealPotential { get; init; } = int.MaxValue;
+    public int BrightestFlameMaxHpSpent { get; init; }
     public int AngerCopiesGenerated { get; } = angerCopiesGenerated;
     public int ProjectedPlayerHp { get; } = projectedPlayerHp;
     public int PlayerBlock { get; } = playerBlock;
+    public int DefensiveBlockValue { get; init; }
     public int EnemyHp { get; } = enemyHp;
     public int EnemyBlock { get; } = enemyBlock;
     public int AliveEnemyCount { get; } = aliveEnemyCount;
@@ -1150,12 +1315,15 @@ internal sealed class SimulationSnapshot(
     public int LiveDeckClutter { get; } = liveDeckClutter;
     public int LiveDeckSize { get; } = liveDeckSize;
     public int OutstandingStolenResource { get; } = outstandingStolenResource;
+    public int? UnrecoveredGold { get; init; }
+    public int? UnrecoveredCards { get; init; }
     public int OffensiveProgressValue { get; } = offensiveProgressValue;
     public int Energy { get; } = energy;
     public int Stars { get; } = stars;
     public int HistoryEntryCount { get; } = historyEntryCount;
     public int HandCount { get; } = handCount;
     public int ReachableHandValue { get; } = reachableHandValue;
+    public int PlayableAttackCount { get; init; }
     public int ZeroCostPlayableCount { get; } = zeroCostPlayableCount;
     public bool CanTriggerArtOfWarNextTurn { get; } = canTriggerArtOfWarNextTurn;
     public int PocketwatchCardsPlayedThisTurn { get; } = pocketwatchCardsPlayedThisTurn;
@@ -1171,16 +1339,12 @@ internal sealed class SimulationSnapshot(
     public IReadOnlySet<uint> ProcessedEnemyDeaths { get; } = processedEnemyDeaths;
     public SearchBoundaryReason BoundaryReason { get; } = boundaryReason;
     public IReadOnlyList<PredictionGap> PredictionGaps { get; } = predictionGaps;
-    public ContinuationStamp? Continuation { get; private set; }
 
     public CombatPredictionSimulator Simulator => _simulator
         ?? throw new InvalidOperationException(
             $"搜索快照的模拟器已经释放：{_releasedBy ?? "unknown"}:{_releasedAtLine}。");
 
     public bool HasSimulator => _simulator != null;
-
-    public void SetContinuation(ContinuationStamp continuation)
-        => Continuation = continuation;
 
     public void ReleaseSimulator(
         [CallerMemberName] string caller = "",
@@ -1209,6 +1373,8 @@ internal sealed record SolverSnapshot(
     int PlayerHp,
     int PlayerMaxHp,
     int CumulativePlayerHpLost,
+    int RecoveredPlayerHp,
+    int DeathSaveRelicHpRestored,
     int LongTermResourceValue,
     int AngerCopiesGenerated,
     int ProjectedPlayerHp,
@@ -1222,7 +1388,21 @@ internal sealed record SolverSnapshot(
     int Turn,
     int ShufflesCrossed,
     SearchBoundaryReason BoundaryReason,
-    IReadOnlyList<PredictionGap> PredictionGaps);
+    IReadOnlyList<PredictionGap> PredictionGaps)
+{
+    public int DeathSavePotionHpRestored { get; init; }
+    public int DeathSaveHpRestored => DeathSaveRelicHpRestored + DeathSavePotionHpRestored;
+    public int DeathSaveUseCount { get; init; }
+    public int ProjectedDeathSaveUseCount { get; init; }
+    public int? UnrecoveredGold { get; init; }
+    public int? UnrecoveredCards { get; init; }
+    public RelicCounterEvaluation RelicCounters { get; init; }
+    public int StrategyGoalHpCredit => GrowthHpCredit + RelicCounters.HpCredit;
+    public int StrategicHpCredit => StrategyGoalHpCredit + RelicCounters.HealingHpCredit;
+    public int StrategyGoalCount => GrowthRewards.Total + RelicCounters.SatisfiedPriority;
+    public int GrowthHpCredit { get; init; }
+    public GrowthValues GrowthRewards { get; init; }
+}
 
 internal sealed record CachedContinuation(
     ContinuationStamp ExpectedState,
@@ -1231,24 +1411,28 @@ internal sealed record CachedContinuation(
 
 internal sealed class SolverResult
 {
+    public SolverInterimResult? ComparisonQuality { get; internal set; }
+    public string? ComparisonRootState { get; internal set; }
+    public bool WasRestoredFromCache { get; internal set; }
     public SolverResultScope ResultScope { get; internal set; } = SolverResultScope.SearchCompletion;
-    public SolverSearchPhase SearchPhase { get; internal set; } = SolverSearchPhase.Short;
-    public bool DeepSearchTriggered { get; internal set; }
-    public bool DeepSearchImprovedResult { get; internal set; }
+    public bool DeterministicBlockPotionInserted { get; internal set; }
     public bool SingleSessionSearch { get; internal set; }
-    public TimeSpan ShortSearchElapsed { get; internal set; }
-    public TimeSpan DeepSearchElapsed { get; internal set; }
+
+    /// <summary>
+    /// 本次请求的宽度组合诊断（首条路线发布时刻、逐成员明细、各成员结束后的托管堆峰值）。
+    /// 组合开关关闭时也有，那时是单成员一行。
+    /// </summary>
+    public BeamWidthPortfolioTelemetry? PortfolioTelemetry { get; internal set; }
     public TimeSpan TotalSearchElapsed { get; internal set; }
+    public SearchWorkAttribution[] SearchWorkAttributions { get; internal set; } = [];
     public long TotalWorkerAllocatedBytes { get; internal set; }
-    public int ShortExpandedNodes { get; internal set; }
-    public int DeepExpandedNodes { get; internal set; }
-    public int ShortTransitionCount { get; internal set; }
-    public int DeepTransitionCount { get; internal set; }
     public int TotalGen0Collections { get; internal set; }
     public int TotalGen1Collections { get; internal set; }
     public int TotalGen2Collections { get; internal set; }
     public TimeSpan TotalGcPauseDuration { get; internal set; }
     public TimeSpan TotalMaxObservedGcPause { get; internal set; }
+    public SearchGcLifecycleSnapshot GcLifecycle { get; internal set; }
+    public SearchGcLifecycleAttribution? GcLifecycleAttribution { get; internal set; }
     public int MainThreadFrameCount { get; internal set; }
     public int MainThreadFramesOver33Milliseconds { get; internal set; }
     public double MaxMainThreadFrameGapMilliseconds { get; internal set; }
@@ -1258,6 +1442,7 @@ internal sealed class SolverResult
     public int MainThreadFramesOver100Milliseconds { get; internal set; }
     public SearchPhaseMetric ForkMetric { get; internal set; }
     public SearchPhaseMetric ActionMetric { get; internal set; }
+    public SearchPhaseMetric ExecutionChoiceResumeMetric { get; internal set; }
     public SearchPhaseMetric CardExecutionMetric { get; internal set; }
     public SearchPhaseMetric CardPostProcessingMetric { get; internal set; }
     public SearchPhaseMetric PotionExecutionMetric { get; internal set; }
@@ -1286,10 +1471,13 @@ internal sealed class SolverResult
     public required IReadOnlyList<PlanCardChoice> TurnSetupChoices { get; init; }
     public ContinuationStamp? TurnSetupPlayState { get; init; }
     public required SelectedSearchPlan BestNode { get; init; }
+    public IReadOnlyList<PredictedPotionUse> PotionUses { get; init; } = [];
     public required SolverSnapshot Snapshot { get; init; }
     public required IntentForecast Forecast { get; init; }
     public required int ExpandedNodes { get; init; }
     public long TotalExpandedNodes { get; internal set; }
+    public NoveltySearchTelemetry? NoveltySearch { get; init; }
+    public NoveltyPortfolioTelemetry? NoveltyPortfolio { get; internal set; }
     public required int DominatedActionsPruned { get; init; }
     public required int TopQueueActionsDropped { get; init; }
     public required int ActionAdmissionRepresentativesProtected { get; init; }
@@ -1298,11 +1486,24 @@ internal sealed class SolverResult
     public long TotalChoiceBranchesEvaluated { get; internal set; }
     public int ChoiceReplayAttempts { get; init; }
     public int ChoiceReplayBudgetExhaustions { get; init; }
+    public int ChoiceBranchesDroppedByBudget { get; init; }
     public required int ShuffleBranchesPruned { get; init; }
     public required int SoldHpBranchesPruned { get; init; }
     public required int HpInvestmentBranchesProtected { get; init; }
     public required int ReplayCount { get; init; }
     public required int ForkCount { get; init; }
+    public int RoundReplayPrefixCaptures { get; init; }
+    public int RoundReplayPrefixReuses { get; init; }
+    public int ExecutionChoiceCaptures { get; init; }
+    public int ExecutionChoiceReuses { get; init; }
+    public int CardChoicePrefixAttempts { get; init; }
+    public int CardChoicePrefixCaptures { get; init; }
+    public int CardChoicePrefixReuses { get; init; }
+    public int CardChoicePrefixFallbacks { get; init; }
+    public int PotionChoicePrefixForks { get; init; }
+    public int PotionChoicePrefixCaptures { get; init; }
+    public int PotionChoicePrefixReuses { get; init; }
+    public int PotionChoicePrefixFallbacks { get; init; }
     public required int TransitionCount { get; init; }
     public long TotalTransitionCount { get; internal set; }
     public required int ReusedNodeSnapshots { get; init; }
@@ -1312,9 +1513,36 @@ internal sealed class SolverResult
     public int CycleProbeContinuationsExpanded { get; init; }
     public int CycleCandidatesProtected { get; init; }
     public int CycleContinuationsStopped { get; init; }
+    public int CycleReplayAttempts { get; init; }
+    public int CycleReplayActions { get; init; }
+    public int TotalCycleReplayActions { get; internal set; }
+    public int CycleReplayVictories { get; init; }
+    public int CycleReplayContinuations { get; init; }
+    public int CycleStoppedUnproductive { get; init; }
+    public int CycleStoppedRepetitionBudget { get; init; }
+    public int CycleStoppedFamilyBudget { get; init; }
+    public int CycleStoppedExitBudget { get; init; }
+    public int TurnLayerBudgetStops { get; init; }
+    public int TurnLayerTimeBudgetStops { get; init; }
+    public int TurnLayerNodeBudgetStops { get; init; }
+
+    public int CycleRegionsDetected { get; init; }
+    public int CycleRegionCandidatesConsidered { get; init; }
+    public int CycleRegionCandidatesAdmitted { get; init; }
+    public int CycleRegionCandidatesDropped { get; init; }
+    public int CycleRegionProgressEpochs { get; init; }
+    public int CycleRegionProbeCandidatesAdmitted { get; init; }
+    public int CycleRegionProgressCandidatesAdmitted { get; init; }
+    public int CycleRegionMaxActionFamilies { get; init; }
+    public int OrderedMutationCandidatesAdmitted { get; init; }
+    public int OrderedMutationLeaseExpiredBudget { get; init; }
+    public int OrderedMutationOrdinaryFallbacks { get; init; }
+    public int OrderedMutationColdAtomicCommitted { get; init; }
+    public int OrderedMutationColdAtomicRejected { get; init; }
     public int CrossTurnCandidatesProtected { get; init; }
     public int CrossTurnContinuationsStopped { get; init; }
     public int PrimaryIncumbentBranchesPruned { get; init; }
+    public int PrimaryIncumbentCertifiedHealingBoundBranchesPruned { get; init; }
     public int PrimaryIncumbentUpdates { get; init; }
     public required int StandPatProbes { get; init; }
     public int ParallelExpansionWaves { get; init; }
@@ -1349,8 +1577,12 @@ internal sealed class SolverResult
     public required int SoldHp { get; init; }
     public required int FutureSoldHp { get; init; }
     public required int BattleHpLostSoFar { get; init; }
+    public int BattleHpRecoveredOrGainedSoFar { get; init; }
     public required int ProjectedBattleHpLost { get; init; }
     public required int BattlePotionsUsedSoFar { get; init; }
+    public required string[] BattlePotionIdsUsedSoFar { get; init; }
+    public required string[] PlannedPotionIds { get; init; }
+    public required PotionRewardOutlook PotionRewardOutlook { get; init; }
     public required int PotionCount { get; init; }
     public required int ExplicitPotionCount { get; init; }
     public int ProjectedBattlePotionCount => BattlePotionsUsedSoFar + PotionCount;
@@ -1359,9 +1591,18 @@ internal sealed class SolverResult
     public required int PotionBranchesRejected { get; init; }
     public required SolverTheftPolicy? TheftPolicy { get; init; }
     public required int OutstandingStolenResource { get; init; }
-    public required int SoldHpThreshold { get; init; }
     public required IReadOnlyDictionary<int, int> SoldHpByTurn { get; init; }
     public required IReadOnlyDictionary<int, int> HpLostByTurn { get; init; }
+    public required IReadOnlyDictionary<int, int> HpRecoveredByTurn { get; init; }
+    /// <summary>
+    /// HP the player's relics restore right after this fight is won, which is what the player will see happen.
+    /// </summary>
+    /// <remarks>
+    /// Reported in full, including the threshold relic that route ranking deliberately leaves out. Reporting
+    /// less than the game will actually restore would put the overlay back at odds with the fight it describes,
+    /// which is the problem the net HP display set out to fix.
+    /// </remarks>
+    public required int PostCombatRelicHeal { get; init; }
     public required IReadOnlyDictionary<int, int> EnemyHpLostByTurn { get; init; }
     public required IReadOnlyDictionary<int, int> MaxBlockByTurn { get; init; }
     public required IReadOnlyDictionary<int, int> ActualBlockByTurn { get; init; }
@@ -1376,8 +1617,20 @@ internal sealed class SolverResult
     public required BossHpRelief BossHpRelief { get; init; }
     public required TimeSpan Elapsed { get; init; }
     public required IReadOnlyList<CachedContinuation> Continuations { get; init; }
+    public int TranspositionCount { get; init; }
+    public int ExpandedTranspositionCount { get; init; }
+    public int TranspositionLimitBypasses { get; init; }
+    public int StandPatCacheCount { get; init; }
+    public int ThreatProjectionCacheCount { get; init; }
+    public int CoverageCacheCount { get; init; }
     public bool WasReused { get; init; }
     public int? ReusedFromTurn { get; init; }
+    /// <summary>
+    /// 本次请求的早期回合探索摘要。探索因为开关关闭、范围不足或已证明零战损
+    /// 而跳过时为 <c>null</c>。存在时必然包含完整的续搜明细，即使一次改进都没有
+    /// （改进为零本身就是有价值的遥测，需要与“没有跑探索”区分开）。
+    /// </summary>
+    public EarlyTurnExplorationTelemetry? EarlyTurnExploration { get; internal set; }
     public bool RecalculatedAfterCompleteProjection { get; internal set; }
     public int? PreviousProjectedBattleHpLost { get; internal set; }
     public int ProjectedBattleHpLossIncrease => PreviousProjectedBattleHpLost is { } previous
@@ -1385,12 +1638,68 @@ internal sealed class SolverResult
         : 0;
     public string? RecalculationStateDifference { get; internal set; }
 
+    internal bool TryValidateTurnOutcomes(out string? failure)
+    {
+        (string Name, IReadOnlyDictionary<int, int>? Values)[] tables =
+        [
+            (nameof(HpLostByTurn), HpLostByTurn),
+            (nameof(HpRecoveredByTurn), HpRecoveredByTurn),
+            (nameof(EnemyHpLostByTurn), EnemyHpLostByTurn),
+            (nameof(SoldHpByTurn), SoldHpByTurn),
+            (nameof(MaxBlockByTurn), MaxBlockByTurn),
+            (nameof(ActualBlockByTurn), ActualBlockByTurn),
+            (nameof(EnergyLeftByTurn), EnergyLeftByTurn),
+        ];
+        foreach (var table in tables)
+        {
+            if (table.Values == null)
+            {
+                failure = $"{table.Name}=null";
+                return false;
+            }
+        }
+        int lastActionTurn = BestNode.Actions.Select(action => action.Turn).DefaultIfEmpty(StartTurnNumber).Max();
+        bool terminal = Snapshot.PlayerDead || Snapshot.AllEnemiesDead
+            || Snapshot.BoundaryReason != SearchBoundaryReason.None;
+        HashSet<int> checkedTurns = [];
+        foreach (PlanAction action in BestNode.Actions)
+        {
+            if (action.Turn == lastActionTurn && !terminal
+                && action.Kind != PlanActionKind.EndTurn && !action.EndsPlayerTurn)
+                continue;
+            if (!checkedTurns.Add(action.Turn))
+                continue;
+            foreach (var table in tables)
+            {
+                if (!table.Values!.ContainsKey(action.Turn))
+                {
+                    failure = $"{table.Name}[{action.Turn}] missing";
+                    return false;
+                }
+            }
+        }
+        failure = null;
+        return true;
+    }
+
+    internal void AssertCompleteTurnOutcomes()
+    {
+        if (!TryValidateTurnOutcomes(out string? failure))
+            throw new InvalidOperationException($"路线回合统计不完整：{failure}。");
+    }
+
+    internal int RequireHpLostForTurn(int turn)
+        => HpLostByTurn.TryGetValue(turn, out int hpLost)
+            ? hpLost
+            : throw new InvalidOperationException($"路线缺少第 {turn} 回合的预计掉血，不能按零伤害执行。");
+
     public bool TryCreateContinuation(
         ContinuationStamp actual,
         int currentHp,
         BattleDamageSnapshot battleDamage,
         out SolverResult? continuation)
     {
+        AssertCompleteTurnOutcomes();
         CachedContinuation? cached = Continuations.FirstOrDefault(item => item.ExpectedState == actual);
         if (cached == null)
         {
@@ -1438,6 +1747,12 @@ internal sealed class SolverResult
             StartTurnNumber = cached.StartTurnNumber,
             TurnSetupChoices = TurnSetupChoices,
             TurnSetupPlayState = TurnSetupPlayState,
+            TranspositionCount = TranspositionCount,
+            ExpandedTranspositionCount = ExpandedTranspositionCount,
+            TranspositionLimitBypasses = TranspositionLimitBypasses,
+            StandPatCacheCount = StandPatCacheCount,
+            ThreatProjectionCacheCount = ThreatProjectionCacheCount,
+            CoverageCacheCount = CoverageCacheCount,
             BestNode = BestNode,
             Snapshot = Snapshot,
             Forecast = slicedForecast,
@@ -1460,9 +1775,36 @@ internal sealed class SolverResult
             CycleProbeContinuationsExpanded = 0,
             CycleCandidatesProtected = 0,
             CycleContinuationsStopped = 0,
+            CycleReplayAttempts = 0,
+            CycleReplayActions = 0,
+            TotalCycleReplayActions = 0,
+            CycleReplayVictories = 0,
+            CycleReplayContinuations = 0,
+            CycleStoppedUnproductive = 0,
+            CycleStoppedRepetitionBudget = 0,
+            CycleStoppedFamilyBudget = 0,
+            CycleStoppedExitBudget = 0,
+            TurnLayerBudgetStops = 0,
+            TurnLayerTimeBudgetStops = 0,
+            TurnLayerNodeBudgetStops = 0,
+
+            CycleRegionsDetected = 0,
+            CycleRegionCandidatesConsidered = 0,
+            CycleRegionCandidatesAdmitted = 0,
+            CycleRegionCandidatesDropped = 0,
+            CycleRegionProgressEpochs = 0,
+            CycleRegionProbeCandidatesAdmitted = 0,
+            CycleRegionProgressCandidatesAdmitted = 0,
+            CycleRegionMaxActionFamilies = 0,
+            OrderedMutationCandidatesAdmitted = 0,
+            OrderedMutationLeaseExpiredBudget = 0,
+            OrderedMutationOrdinaryFallbacks = 0,
+            OrderedMutationColdAtomicCommitted = 0,
+            OrderedMutationColdAtomicRejected = 0,
             CrossTurnCandidatesProtected = 0,
             CrossTurnContinuationsStopped = 0,
             PrimaryIncumbentBranchesPruned = 0,
+            PrimaryIncumbentCertifiedHealingBoundBranchesPruned = 0,
             PrimaryIncumbentUpdates = 0,
             StandPatProbes = 0,
             TransitionCacheHits = 0,
@@ -1478,8 +1820,12 @@ internal sealed class SolverResult
             SoldHp = battleDamage.SoldHpCommitted + remainingSold,
             FutureSoldHp = remainingSold,
             BattleHpLostSoFar = battleDamage.HpLostSoFar,
+            BattleHpRecoveredOrGainedSoFar = battleDamage.HpRecoveredOrGainedSoFar,
             ProjectedBattleHpLost = battleDamage.HpLostSoFar + totalRemainingLoss,
             BattlePotionsUsedSoFar = battleDamage.PotionsUsedSoFar,
+            BattlePotionIdsUsedSoFar = battleDamage.PotionIdsUsedSoFar,
+            PlannedPotionIds = PlannedPotionIds.Skip(PotionCount - remainingPotionCount).ToArray(),
+            PotionRewardOutlook = PotionRewardOutlook,
             PotionCount = remainingPotionCount,
             ExplicitPotionCount = remainingExplicitPotionCount,
             PotionHpSaved = remainingPotionCount == 0 ? 0 : PotionHpSaved,
@@ -1487,15 +1833,17 @@ internal sealed class SolverResult
             PotionBranchesRejected = 0,
             TheftPolicy = TheftPolicy,
             OutstandingStolenResource = Snapshot.OutstandingStolenResource,
-            SoldHpThreshold = SoldHpThreshold,
             SoldHpByTurn = soldByTurn,
             HpLostByTurn = HpLostByTurn,
+            HpRecoveredByTurn = HpRecoveredByTurn,
+            PostCombatRelicHeal = PostCombatRelicHeal,
             EnemyHpLostByTurn = EnemyHpLostByTurn,
             MaxBlockByTurn = MaxBlockByTurn,
             ActualBlockByTurn = ActualBlockByTurn,
             EnergyLeftByTurn = EnergyLeftByTurn,
             PotionCountByTurn = PotionCountByTurn,
             PotionStrategicCostByTurn = PotionStrategicCostByTurn,
+            PotionUses = PotionUses,
             KillsAfterAction = KillsAfterAction,
             CombatEndedTurn = CombatEndedTurn,
             DeathTurn = DeathTurn,
@@ -1521,7 +1869,7 @@ internal sealed class SolverResult
             $"洗牌边界前预计：玩家 {Snapshot.PlayerHp} HP / {Snapshot.PlayerBlock} 格挡；敌方合计 {Snapshot.EnemyHp} HP",
             $"置信度：{ConfidenceText()}　展开 {ExpandedNodes} 节点　{Elapsed.TotalMilliseconds:F0} ms",
             $"动态范围：{SearchedTurns} 回合，边界 {BoundaryReason}；洗牌分支停止 {ShuffleBranchesPruned}",
-            $"本局战损：已发生 {BattleHpLostSoFar}，路线预计累计 {ProjectedBattleHpLost}；主动卖血 {SoldHp}/{SoldHpThreshold}",
+            $"本局战损：已发生 {BattleHpLostSoFar}，路线预计累计 {ProjectedBattleHpLost}；主动卖血 {SoldHp}",
             BattlePotionsUsedSoFar > 0
                 ? $"本局已喝药：{BattlePotionsUsedSoFar} 瓶；路线还需使用 {PotionCount} 瓶"
                 : $"路线预计用药：{PotionCount} 瓶",
@@ -1543,14 +1891,25 @@ internal sealed class SolverResult
             string playText = indexedActions.Count == 0
                 ? "直接结束"
                 : string.Join(" | ", indexedActions.Select(item => DescribeWithKills(item.Action, item.Index)));
-            string hpLoss = HpLostByTurn.GetValueOrDefault(turn) > 0
-                ? $"　[color=#ef6b6b]预计掉血 {HpLostByTurn[turn]}[/color]"
-                : string.Empty;
+            int turnHpLost = HpLostByTurn.GetValueOrDefault(turn);
+            int turnHpRecovered = HpRecoveredByTurn.GetValueOrDefault(turn);
+            string hpLoss = (turnHpLost, turnHpRecovered) switch
+            {
+                (> 0, > 0) => $"　[color=#ef6b6b]预计掉血 {turnHpLost}[/color]" +
+                    $"　[color=#73c991]回血 {turnHpRecovered}[/color]" +
+                    $"　净 {HpChangeText.SignedColored(turnHpRecovered - turnHpLost)} HP",
+                (> 0, _) => $"　[color=#ef6b6b]预计掉血 {turnHpLost}[/color]",
+                (_, > 0) => $"　[color=#73c991]预计回血 {turnHpRecovered}[/color]",
+                _ => string.Empty,
+            };
             string combatEnd = CombatEndedTurn == turn
                 ? "　[color=#73c991][b]战斗结束[/b][/color]"
                 : string.Empty;
             lines.Add($"[b]第 {turn} 回合[/b]　{playText}{hpLoss}{combatEnd}");
         }
+
+        if (PostCombatRelicHeal > 0)
+            lines.Add($"[color=#73c991]战斗结束后遗物回血 {PostCombatRelicHeal} HP[/color]");
 
         lines.Add("");
         lines.Add("[color=#d5b46a]评分：不死优先；区分不可避免战损与主动卖血，并综合击杀、输出、易伤、能力牌和费用利用。[/color]");

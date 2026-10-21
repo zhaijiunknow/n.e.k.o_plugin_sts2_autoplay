@@ -15,14 +15,9 @@ using Registry = MethodMirrorRegistry<CardModel, CardIsPlayableMirrorContext, bo
 // Mirrors CardModel.IsPlayable while replacing vanilla overrides that read live combat state.
 internal static class CardIsPlayableMirrors
 {
-    private delegate bool IsPlayableDelegate(CardModel card);
-
     private static readonly MethodInfo IsPlayableGetterMethod =
         AccessTools.PropertyGetter(typeof(CardModel), "IsPlayable")
         ?? throw new UnreachableException("Could not find CardModel.IsPlayable getter.");
-
-    private static readonly IsPlayableDelegate OriginalIsPlayableGetter =
-        (IsPlayableDelegate)Delegate.CreateDelegate(typeof(IsPlayableDelegate), IsPlayableGetterMethod);
 
     private static readonly MirrorMethodSpec IsPlayable = new(
         typeof(CardModel),
@@ -40,9 +35,14 @@ internal static class CardIsPlayableMirrors
             Card = card
         };
 
-        return Registry.TryInvokeRegistered(card.Preview, context, out var result)
-            ? result.Value
-            : OriginalIsPlayableGetter(card.Preview);
+        // CardModel.IsPlayable is `=> true` unless a card overrides it, so `true` is the exact
+        // answer for every non-overriding card. Going through Invoke (instead of falling back to
+        // the original getter) means an override we have not mirrored is reported as
+        // MethodNotMirrored instead of silently answering from live state: the getter reads the
+        // owner's real hand, and on a detached preview clone it usually reports no owner at all,
+        // so the search would treat a conditional card as always playable and only find out at
+        // deployment.
+        return Registry.Invoke(card.Preview, context, defaultResult: true).Value;
     }
 
     private static Registry CreateRegistry()

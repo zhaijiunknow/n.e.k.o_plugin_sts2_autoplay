@@ -13,6 +13,7 @@ using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Mirrors.Hooks.Card;
+using CombatSolver.Engine.InCombat.Mirrors.Hooks.Resources;
 using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver;
@@ -41,36 +42,43 @@ internal static class PersistentPowerSupport
         Player player,
         int baseDraw)
     {
-        decimal result = Hook.ModifyHandDraw(combat, player, baseDraw, out _);
-        result = AdjustTurnBasedRelicHandDraw(combat, player, result);
+        // Preserve the native normal/late listener passes. Audited turn/counter
+        // relics read the branch directly, never Owner.PlayerCombatState in live.
+        decimal result = baseDraw;
+        int simulatedTurn = combat.GetPlayerTurnNumber(player);
+        foreach (AbstractModel listener in combat.IterateHookListeners())
+        {
+            if (listener is RelicModel relic && IsBranchOwnedHandDrawRelic(relic))
+            {
+                if (ReferenceEquals(relic.Owner, player) && !relic.IsMelted)
+                    result += GetTurnBasedHandDrawContribution(relic, combat, simulatedTurn)
+                        + combat.GetStatefulRelicHandDrawContribution(relic, player, simulatedTurn);
+            }
+            else
+                result = listener.ModifyHandDraw(player, result);
+        }
+        foreach (AbstractModel listener in combat.IterateHookListeners())
+            result = listener.ModifyHandDrawLate(player, result);
         return Math.Max(0, (int)result);
     }
+
+    private static bool IsBranchOwnedHandDrawRelic(RelicModel relic)
+        => relic.GetType() == typeof(BagOfPreparation) || relic.GetType() == typeof(BigMushroom)
+            || relic.GetType() == typeof(BoomingConch) || relic.GetType() == typeof(RingOfTheDrake)
+            || relic.GetType() == typeof(RingOfTheSnake) || relic.GetType() == typeof(Pendulum)
+            || relic.GetType() == typeof(Pocketwatch) || relic.GetType() == typeof(PollinousCore);
 
     public static int GetModifiedMaxEnergy(SimulatedCombatState combat, Player player)
     {
-        decimal result = Hook.ModifyMaxEnergy(combat, player, player.MaxEnergy);
-        result = AdjustTurnBasedRelicMaxEnergy(combat, player, result);
-        return Math.Max(0, (int)result);
-    }
-
-    private static decimal AdjustTurnBasedRelicHandDraw(
-        SimulatedCombatState combat,
-        Player player,
-        decimal result)
-    {
-        int rootTurn = combat.GetRootPlayerTurnNumber(player);
-        int simulatedTurn = combat.GetPlayerTurnNumber(player);
-        foreach (RelicModel relic in combat.RelicsOf(player).Where(static relic => !relic.IsMelted))
+        decimal result = combat.GetBaseMaxEnergy(player);
+        int turn = combat.GetPlayerTurnNumber(player);
+        foreach (AbstractModel listener in combat.IterateHookListeners())
         {
-            result -= GetTurnBasedHandDrawContribution(relic, combat, rootTurn);
-            result -= SimulatedCombatState.GetLiveStatefulRelicHandDrawContribution(
-                relic,
-                player,
-                rootTurn);
-            result += GetTurnBasedHandDrawContribution(relic, combat, simulatedTurn);
-            result += combat.GetStatefulRelicHandDrawContribution(relic, player, simulatedTurn);
+            result = listener is RelicModel relic && ReferenceEquals(relic.Owner, player) && relic is Bread or PaelsFlesh
+                ? result + GetTurnBasedMaxEnergyContribution(relic, turn)
+                : listener.ModifyMaxEnergy(player, result);
         }
-        return result;
+        return Math.Max(0, (int)result);
     }
 
     private static decimal GetTurnBasedHandDrawContribution(
@@ -90,24 +98,6 @@ internal static class PersistentPowerSupport
             _ => 0m,
         };
 
-    private static decimal AdjustTurnBasedRelicMaxEnergy(
-        SimulatedCombatState combat,
-        Player player,
-        decimal result)
-    {
-        int rootTurn = combat.GetRootPlayerTurnNumber(player);
-        int simulatedTurn = combat.GetPlayerTurnNumber(player);
-        if (rootTurn == simulatedTurn)
-            return result;
-
-        foreach (RelicModel relic in combat.RelicsOf(player).Where(static relic => !relic.IsMelted))
-        {
-            result -= GetTurnBasedMaxEnergyContribution(relic, rootTurn);
-            result += GetTurnBasedMaxEnergyContribution(relic, simulatedTurn);
-        }
-        return result;
-    }
-
     private static decimal GetTurnBasedMaxEnergyContribution(RelicModel relic, int turn)
         => relic switch
         {
@@ -116,46 +106,29 @@ internal static class PersistentPowerSupport
             _ => 0m,
         };
 
-    public static void TriggerAfterEnergyReset(
+    public static bool TriggerAfterEnergyReset(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         Player player)
     {
         Creature owner = player.Creature;
-        SimPlayerCombatState state = simulator.State.GetPlayerCombatState(player);
+        var context = new AfterEnergyResetMirrorContext { Simulator = simulator, Player = player };
 
-        int genesis = combat.GetAmount<GenesisPower>(owner);
-        if (genesis > 0)
-            simulator.GainStars(player, genesis);
-
-        int lightningRod = combat.GetAmount<LightningRodPower>(owner);
-        if (lightningRod > 0)
+        // Channel order affects the queue and the effects evoked when it is full.
+        foreach (PowerModel power in combat.EffectivePowers())
         {
-            simulator.OrbChannel<LightningOrb>(player);
-            combat.SetAmount<LightningRodPower>(owner, lightningRod - 1);
+            // 层数为零的能力在原版里每一个重写都是空转：加零点星、抽零张、扣零点能量。
+            // 这道门保持原来的判据，顺带让没登记的第三方能力不会为了一次空转记风险。
+            if (power.Owner != owner || power.Amount <= 0)
+                continue;
+            AfterEnergyResetMirrors.Invoke(power, context);
+            if (simulator.HasPendingChoice)
+                return false;
         }
-
-        RadiancePower? radiance = combat.GetPower<RadiancePower>(owner);
-        if (radiance is { Amount: > 0 })
-        {
-            if (combat.GetAmount<NoEnergyGainPower>(owner) <= 0)
-                state.GainEnergy(radiance.DynamicVars.Energy.IntValue);
-            combat.SetAmount<RadiancePower>(owner, radiance.Amount - 1);
-        }
-
-        int spinner = combat.GetAmount<SpinnerPower>(owner);
-        if (spinner > 0)
-            simulator.OrbChannel<GlassOrb>(player, spinner);
-
-        int starsNextTurn = combat.GetAmount<StarNextTurnPower>(owner);
-        if (starsNextTurn > 0)
-        {
-            simulator.GainStars(player, starsNextTurn);
-            combat.SetAmount<StarNextTurnPower>(owner, 0);
-        }
+        return !simulator.HasPendingChoice;
     }
 
-    public static void TriggerAfterSideTurnStart(
+    public static bool TriggerAfterSideTurnStart(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         CombatSide side,
@@ -163,10 +136,14 @@ internal static class PersistentPowerSupport
         bool isExtraTurn = false)
     {
         foreach (Creature owner in participants)
-            TriggerOwnerAfterSideTurnStart(simulator, combat, owner);
+        {
+            if (!TriggerOwnerAfterSideTurnStart(simulator, combat, owner))
+                return false;
+        }
 
         if (side == CombatSide.Player && !isExtraTurn)
-            TriggerRampart(simulator, combat);
+            return TriggerRampart(simulator, combat);
+        return !simulator.HasPendingChoice;
     }
 
     public static void TriggerRitual(SimulatedCombatState combat, Creature owner)
@@ -177,7 +154,7 @@ internal static class PersistentPowerSupport
         combat.Apply<StrengthPower>(owner, amount, owner);
     }
 
-    private static void TriggerOwnerAfterSideTurnStart(
+    private static bool TriggerOwnerAfterSideTurnStart(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         Creature owner)
@@ -194,6 +171,8 @@ internal static class PersistentPowerSupport
                 .Distinct()
                 .Count();
             simulator.GainBlock(owner, distinctOrbs * coolant, ValueProp.Unpowered);
+            if (simulator.HasPendingChoice)
+                return false;
         }
 
         int demonForm = combat.GetAmount<DemonFormPower>(owner);
@@ -206,7 +185,11 @@ internal static class PersistentPowerSupport
 
         int furnace = combat.GetAmount<FurnacePower>(owner);
         if (furnace > 0 && owner.Player is { } furnacePlayer)
+        {
             Forge(simulator, furnacePlayer, furnace);
+            if (simulator.HasPendingChoice)
+                return false;
+        }
 
         int neurosurge = combat.GetAmount<NeurosurgePower>(owner);
         if (neurosurge > 0)
@@ -218,7 +201,12 @@ internal static class PersistentPowerSupport
             foreach (Creature opponent in combat.GetOpponentsOf(owner))
             {
                 if (simulator.State.IsHittable(opponent))
+                {
                     combat.Apply<PoisonPower>(opponent, noxiousFumes, owner);
+                    PowerLifecycleSupport.ResolvePowerAmountChanges(simulator, combat);
+                    if (simulator.HasPendingChoice)
+                        return false;
+                }
             }
         }
 
@@ -244,9 +232,10 @@ internal static class PersistentPowerSupport
         int clarity = combat.GetAmount<ClarityPower>(owner);
         if (clarity > 0)
             combat.SetAmount<ClarityPower>(owner, clarity - 1);
+        return !simulator.HasPendingChoice;
     }
 
-    private static void TriggerRampart(
+    private static bool TriggerRampart(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat)
     {
@@ -257,9 +246,14 @@ internal static class PersistentPowerSupport
             foreach (Creature enemy in combat.Enemies)
             {
                 if (enemy.Monster is TurretOperator && simulator.State.GetCreature(enemy).IsAlive)
+                {
                     simulator.GainBlock(enemy, rampart.Amount, ValueProp.Unpowered);
+                    if (simulator.HasPendingChoice)
+                        return false;
+                }
             }
         }
+        return true;
     }
 
     public static void Forge(
@@ -267,6 +261,9 @@ internal static class PersistentPowerSupport
         Player player,
         int amount)
     {
+        if (simulator.HasPendingChoice)
+            return;
+
         SimPlayerCombatState state = simulator.State.GetPlayerCombatState(player);
         bool hasUnexhaustedBlade = state.AllCards.Any(card =>
             card.Preview is SovereignBlade
@@ -274,7 +271,7 @@ internal static class PersistentPowerSupport
             && !state.ExhaustPile.Cards.Contains(card));
         if (!hasUnexhaustedBlade)
         {
-            PredictedCard created = PredictedCard.Create(ModelDb.Card<SovereignBlade>(), player);
+            PredictedCard created = PredictedCard.Create(CanonicalModels.Card<SovereignBlade>(), player);
             ((SovereignBlade)created.MutablePreview).CreatedThroughForge = true;
             simulator.AddGeneratedCardToCombat(
                 created,
@@ -282,6 +279,8 @@ internal static class PersistentPowerSupport
                 player,
                 CardPilePosition.Bottom,
                 CardGenerationResultKind.Fixed);
+            if (simulator.HasPendingChoice)
+                return;
         }
         foreach (PredictedCard card in state.AllCards)
         {

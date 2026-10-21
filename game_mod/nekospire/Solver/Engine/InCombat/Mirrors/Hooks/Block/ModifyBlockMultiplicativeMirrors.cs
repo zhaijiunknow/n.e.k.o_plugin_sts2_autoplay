@@ -2,12 +2,14 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.Models.Singleton;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.Common.Mirrors;
 using CombatSolver.Engine.InCombat.Mirrors.Hooks.Card;
+using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver.Engine.InCombat.Mirrors.Hooks.Block;
 
@@ -46,17 +48,56 @@ internal static class ModifyBlockMultiplicativeMirrors
         registry.Register<PaelsLegion>(HandlePaelsLegion);
         registry.Register<Vambrace>(HandleVambrace);
         registry.Register<MultiplayerScalingModel>(HandleMultiplayerScaling);
+        registry.Register<UnmovablePower>(HandleUnmovablePower);
+        registry.Register<ShadowmeldPower>(HandleShadowmeldPower);
 
         return registry;
+    }
+
+    /// <summary>
+    /// Vanilla doubles block once per Shadowmeld stack: 2^Amount. The exponential factor
+    /// leaves decimal range at 96 stacks. The facade carries that overflow through the
+    /// remaining modifiers and applies the simulation's ceiling at settlement.
+    /// </summary>
+    private static decimal HandleShadowmeldPower(
+        ShadowmeldPower power,
+        ModifyBlockMultiplicativeMirrorContext context)
+    {
+        if (power.Owner != context.Target)
+        {
+            return 1m;
+        }
+        return power.Amount >= 96
+            ? decimal.MaxValue
+            : (decimal)Math.Pow(2.0, power.Amount);
+    }
+
+    private static decimal HandleUnmovablePower(
+        UnmovablePower power,
+        ModifyBlockMultiplicativeMirrorContext context)
+    {
+        if (context.Target.IsMonster
+            || !context.Props.IsCardOrMonsterMove()
+            || context.CardSource is not null
+                && context.CardSource.Preview.Owner.Creature != power.Owner)
+        {
+            return 1m;
+        }
+
+        SimulatedCombatState combat = context.State.CombatState as SimulatedCombatState
+            ?? throw new InvalidOperationException("Unmovable prediction requires SimulatedCombatState.");
+        int earlierEvents = combat.GetBlockCardsPlayedThisTurn(power.Owner)
+            - context.Simulator.GetPoweredBlockEvents(context.CardPlay);
+        return earlierEvents < power.Amount ? 2m : 1m;
     }
 
     private static decimal HandleMultiplayerScaling(
         MultiplayerScalingModel _,
         ModifyBlockMultiplicativeMirrorContext context)
     {
-        // Co-op: the engine only models a single player, but block cards still route through this
-        // multiplier mirror. Resolve as a solo ×1 instead of throwing so a co-op client can search its
-        // own hand. Plans are a single-player approximation (co-op-specific block scaling is ignored).
+        int playerCount = context.State.CombatState.Players.Count;
+        if (playerCount != 1)
+            throw new NotSupportedException($"CombatSolver only supports single-player combat, found {playerCount} players.");
         return 1m;
     }
 

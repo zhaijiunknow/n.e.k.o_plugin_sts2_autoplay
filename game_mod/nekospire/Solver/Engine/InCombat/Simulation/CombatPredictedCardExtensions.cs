@@ -39,7 +39,7 @@ internal static class CombatPredictedCardExtensions
         // CardModel.CreateClone instead keeps the reset values from CardModel.AfterCloned.
         clonedCard.DeckVersion = null;
         clonedCard.HasBeenRemovedFromState = false;
-        GameRef.Set(clonedCard, "_cloneOf", card.Original);
+        T44PrivateAccess.SetCardModel_CloneOf(clonedCard,  card.Original);
         clonedCard.ExhaustOnNextPlay = false;
         return PredictedCard.FromGenerated(clonedCard);
     }
@@ -50,7 +50,7 @@ internal static class CombatPredictedCardExtensions
     public static PredictedCard CreateCloneForPlayer(this PredictedCard card, Player player)
     {
         var clone = card.CreateClone();
-        GameRef.Set(clone.MutablePreview, "_owner", player);
+        T44PrivateAccess.SetCardModel_Owner(clone.MutablePreview,  player);
         return clone;
     }
 
@@ -61,7 +61,7 @@ internal static class CombatPredictedCardExtensions
         if (card.Preview.IsDupe && card.Preview.DupeOf is { } original)
             source = PredictedCard.FromGenerated(PredictionUtils.CloneCardStateForSimulation(original));
         PredictedCard dupe = source.CreateCloneForPlayer(player);
-        GameRef.Set(dupe.MutablePreview, "IsDupe", true);
+        T44PrivateAccess.SetCardModel_IsDupe(dupe.MutablePreview,  true);
         dupe.MutablePreview.RemoveKeyword(CardKeyword.Exhaust);
         return dupe;
     }
@@ -72,9 +72,9 @@ internal static class CombatPredictedCardExtensions
     public static void Afflict(this PredictedCard card, AfflictionModel affliction, decimal amount)
     {
         var previewCard = card.MutablePreview;
-        GameRef.Set(previewCard, "Affliction", affliction);
+        T44PrivateAccess.SetCardModel_Affliction(previewCard,  affliction);
         previewCard.Affliction.Card = previewCard;
-        GameRef.Set(previewCard.Affliction, "_amount", (int)amount);
+        T44PrivateAccess.SetAfflictionModel_Amount(previewCard.Affliction,  (int)amount);
         card.NotifyHookListenerStructureChanged();
     }
 
@@ -85,7 +85,7 @@ internal static class CombatPredictedCardExtensions
         {
             var previewCard = card.MutablePreview;
             previewCard.Affliction!.ClearInternal();
-            GameRef.Set(previewCard, "Affliction", null);
+            T44PrivateAccess.SetCardModel_Affliction(previewCard,  null);
             card.NotifyHookListenerStructureChanged();
         }
     }
@@ -125,13 +125,13 @@ internal static class CombatPredictedCardExtensions
     {
         var energyCost = card.Preview.EnergyCost;
 
-        var cost = GameRef.Get<int>(energyCost, "_base");
+        var cost = T44PrivateAccess.CardEnergyCost_Base(energyCost);
         if (cost < 0 || energyCost.CostsX)
         {
             return cost;
         }
 
-        foreach (var modifier in GameRef.Get<List<LocalCostModifier>>(energyCost, "_localModifiers"))
+        foreach (var modifier in T44PrivateAccess.CardEnergyCost_LocalModifiers(energyCost))
         {
             cost = modifier.Modify(cost);
         }
@@ -171,10 +171,16 @@ internal static class CombatPredictedCardExtensions
     // Mirrors CardModel.Keywords => CardModel.GetKeywordsWithSources(KeywordSources.All).
     public static IReadOnlySet<CardKeyword> GetKeywords(this PredictedCard card, CombatPredictionState state)
     {
-        var keywords = GameRef.Get<System.Collections.Generic.HashSet<MegaCrit.Sts2.Core.Entities.Cards.CardKeyword>>(card.Preview, "LocalKeywords").ToHashSet();
-        Hook.ModifyKeywordsInCombat(state.CombatState, card.Preview, keywords);
+        var keywords = T44PrivateAccess.CardModel_LocalKeywords(card.Preview).ToHashSet();
+        if (!HasNoGlobalKeywordModifiers(state))
+            Hook.ModifyKeywordsInCombat(state.CombatState, card.Preview, keywords);
         return keywords;
     }
+
+    private static bool HasNoGlobalKeywordModifiers(CombatPredictionState state)
+        => state.CombatState is ICombatPredictionHookListenerSource source
+            && source.MirroredHookListeners is MirroredHookListenerSnapshot listeners
+            && !listeners.HasAny(MirroredHookMask.TryModifyKeywordsInCombat);
 
     /// <summary>
     /// 热路径只查询一个关键字时复用线程本地集合，避免 CanPlay、回合末和伤害 Hook
@@ -185,6 +191,12 @@ internal static class CombatPredictedCardExtensions
         CombatPredictionState state,
         CardKeyword keyword)
     {
+        // Capture/dispatch metadata already guards base and native Hook patches, external
+        // model types, and opaque attached listeners. With no participant, the original
+        // hook can only call AbstractModel's no-op, so the local set is the complete answer.
+        if (HasNoGlobalKeywordModifiers(state))
+            return T44PrivateAccess.CardModel_LocalKeywords(card.Preview).Contains(keyword);
+
         bool ownsScratch = !_keywordScratchInUse;
         HashSet<CardKeyword> keywords;
         if (ownsScratch)
@@ -199,8 +211,18 @@ internal static class CombatPredictedCardExtensions
 
         try
         {
-            foreach (CardKeyword localKeyword in GameRef.Get<System.Collections.Generic.HashSet<MegaCrit.Sts2.Core.Entities.Cards.CardKeyword>>(card.Preview, "LocalKeywords"))
-                keywords.Add(localKeyword);
+            // LocalKeywords 以接口类型暴露一个数组，foreach 会为每次查询装箱一个枚举器。
+            // 这里只往集合里塞元素再问 Contains，插入顺序不影响结果。
+            if (T44PrivateAccess.CardModel_LocalKeywords(card.Preview) is IReadOnlyList<CardKeyword> indexableKeywords)
+            {
+                for (int index = 0; index < indexableKeywords.Count; index++)
+                    keywords.Add(indexableKeywords[index]);
+            }
+            else
+            {
+                foreach (CardKeyword localKeyword in T44PrivateAccess.CardModel_LocalKeywords(card.Preview))
+                    keywords.Add(localKeyword);
+            }
             Hook.ModifyKeywordsInCombat(state.CombatState, card.Preview, keywords);
             return keywords.Contains(keyword);
         }

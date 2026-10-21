@@ -97,7 +97,7 @@ internal static partial class CardOnPlaySupport
                 CardChoiceSupport.TransformCards(
                     simulator,
                     attacks,
-                    ModelDb.Card<GiantRock>(),
+                    CanonicalModels.Card<GiantRock>(),
                     card.IsUpgraded);
                 break;
             }
@@ -138,15 +138,19 @@ internal static partial class CardOnPlaySupport
             card.Owner.Creature,
             playedCard,
             null);
+        if (simulator.HasPendingChoice)
+            return;
         CorePowerSupport.ApplyEnemyDeathPowers(
             simulator,
             combat,
             combat.Enemies,
             processedEnemyDeaths);
+        if (simulator.HasPendingChoice)
+            return;
 
         List<PredictedCard> souls = new(card.DynamicVars.Cards.IntValue);
         for (int index = 0; index < card.DynamicVars.Cards.IntValue; index++)
-            souls.Add(PredictedCard.Create(ModelDb.Card<Soul>(), card.Owner));
+            souls.Add(PredictedCard.Create(CanonicalModels.Card<Soul>(), card.Owner));
         simulator.AddGeneratedCardsToCombat(
             souls,
             PileType.Draw,
@@ -164,8 +168,12 @@ internal static partial class CardOnPlaySupport
     {
         CardModel card = playedCard.Preview;
         var attackContext = simulator.BeginAttackContext(playedCard, cardPlay);
+        bool completed = false;
         try
         {
+            if (simulator.HasPendingChoice)
+                return;
+
             int attackCount = 1;
             while (attackCount > 0)
             {
@@ -178,6 +186,8 @@ internal static partial class CardOnPlaySupport
                     card.Owner.Creature,
                     playedCard,
                     cardPlay);
+                if (simulator.HasPendingChoice)
+                    return;
                 simulator.AddAttackContextHit(attackContext, results);
                 attackCount += results.Count(result => result.WasTargetKilled);
                 CorePowerSupport.ApplyEnemyDeathPowers(
@@ -185,11 +195,14 @@ internal static partial class CardOnPlaySupport
                     combat,
                     combat.Enemies,
                     processedEnemyDeaths);
+                if (simulator.HasPendingChoice)
+                    return;
             }
+            completed = true;
         }
         finally
         {
-            simulator.EndAttackContext(attackContext);
+            simulator.EndAttackContext(attackContext, completed);
         }
     }
 
@@ -201,12 +214,23 @@ internal static partial class CardOnPlaySupport
     {
         List<Creature> targets = AliveHittableEnemies(simulator, combat);
         foreach (Creature enemy in targets)
+        {
             combat.Apply<DoomPower>(enemy, card.DynamicVars.Doom.IntValue, card.Owner.Creature);
+            // PowerCmd.Apply awaits amount-change listeners before OnPlay proceeds
+            // to its Doom threshold check (notably SleightOfFlesh damage).
+            PowerLifecycleSupport.ResolvePowerAmountChanges(simulator, combat);
+            if (simulator.HasPendingChoice)
+                return;
+            if (!CorePowerSupport.ApplyEnemyDeathPowers(simulator, combat, combat.KnownEnemies, processedEnemyDeaths))
+                return;
+        }
 
-        List<Creature> doomed = targets
+        List<Creature> doomed = AliveHittableEnemies(simulator, combat)
             .Where(enemy => simulator.State.GetCreature(enemy).CurrentHp <= combat.GetAmount<DoomPower>(enemy))
             .ToList();
         combat.DoomKill(simulator, doomed);
+        if (simulator.HasPendingChoice)
+            return;
         CorePowerSupport.ApplyEnemyDeathPowers(
             simulator,
             combat,
@@ -224,8 +248,12 @@ internal static partial class CardOnPlaySupport
     {
         CardModel card = playedCard.Preview;
         var attackContext = simulator.BeginAttackContext(playedCard, cardPlay);
+        bool completed = false;
         try
         {
+            if (simulator.HasPendingChoice)
+                return;
+
             IReadOnlyList<DamageResult> firstResults = simulator.Damage(
                 [target],
                 card.DynamicVars.Damage.BaseValue,
@@ -233,6 +261,8 @@ internal static partial class CardOnPlaySupport
                 card.Owner.Creature,
                 playedCard,
                 cardPlay);
+            if (simulator.HasPendingChoice)
+                return;
             simulator.AddAttackContextHit(attackContext, firstResults);
             DamageResult? first = firstResults.FirstOrDefault();
             CorePowerSupport.ApplyEnemyDeathPowers(
@@ -240,15 +270,23 @@ internal static partial class CardOnPlaySupport
                 combat,
                 combat.Enemies,
                 processedEnemyDeaths);
-            if (first == null)
+            if (simulator.HasPendingChoice)
                 return;
+            if (first == null)
+            {
+                completed = true;
+                return;
+            }
 
             List<Creature> otherTargets = combat.GetTeammatesOf(first.Receiver)
                 .Where(enemy => !ReferenceEquals(enemy, target)
                     && simulator.State.IsHittable(enemy))
                 .ToList();
             if (otherTargets.Count == 0)
+            {
+                completed = true;
                 return;
+            }
             IReadOnlyList<DamageResult> copiedResults = simulator.Damage(
                 otherTargets,
                 first.TotalDamage + first.OverkillDamage,
@@ -256,16 +294,21 @@ internal static partial class CardOnPlaySupport
                 card.Owner.Creature,
                 playedCard,
                 cardPlay);
+            if (simulator.HasPendingChoice)
+                return;
             simulator.AddAttackContextHit(attackContext, copiedResults);
             CorePowerSupport.ApplyEnemyDeathPowers(
                 simulator,
                 combat,
                 combat.Enemies,
                 processedEnemyDeaths);
+            if (simulator.HasPendingChoice)
+                return;
+            completed = true;
         }
         finally
         {
-            simulator.EndAttackContext(attackContext);
+            simulator.EndAttackContext(attackContext, completed);
         }
     }
 
@@ -280,12 +323,15 @@ internal static partial class CardOnPlaySupport
             combat.Apply<PoisonPower>(enemy, card.DynamicVars.Poison.IntValue, card.Owner.Creature);
         foreach (Creature enemy in targets)
         {
-            CorePowerSupport.TriggerPoison(simulator, combat, [enemy]);
+            if (!CorePowerSupport.TriggerPoison(simulator, combat, [enemy]))
+                return;
             CorePowerSupport.ApplyEnemyDeathPowers(
                 simulator,
                 combat,
                 combat.Enemies,
                 processedEnemyDeaths);
+            if (simulator.HasPendingChoice)
+                return;
         }
     }
 

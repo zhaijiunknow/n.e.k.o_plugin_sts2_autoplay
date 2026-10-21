@@ -13,7 +13,8 @@ internal sealed class CombatPredictionState
 
     private readonly Dictionary<Creature, SimCreatureState> _creatures;
 
-    private readonly HashSet<Creature> _removedCreatures;
+    // 绝大多数分叉里没有任何生物被移出预测名册。惰性建表让 Fork 少一次空 HashSet 分配。
+    private HashSet<Creature>? _removedCreatures;
 
     private readonly Dictionary<Player, SimPlayerCombatState> _playerCombatStates;
     private HittableEnemyView? _hittableEnemies;
@@ -65,7 +66,6 @@ internal sealed class CombatPredictionState
     {
         CombatState = combatState;
         _creatures = [];
-        _removedCreatures = [];
         _playerCombatStates = [];
         if (combatState is ICombatPredictionStateOwner owner)
             owner.AttachPredictionState(this);
@@ -74,7 +74,7 @@ internal sealed class CombatPredictionState
     private CombatPredictionState(
         ICombatState combatState,
         Dictionary<Creature, SimCreatureState> creatures,
-        HashSet<Creature> removedCreatures,
+        HashSet<Creature>? removedCreatures,
         Dictionary<Player, SimPlayerCombatState> playerCombatStates)
     {
         CombatState = combatState;
@@ -99,7 +99,7 @@ internal sealed class CombatPredictionState
 
     // SimulatedCombatState updates its allies/enemies rosters, but PlayerCreatures is an
     // immutable root projection and can still contain a removed player-side summon.
-    public IReadOnlyList<Creature> PlayerCreatures => _removedCreatures.Count == 0
+    public IReadOnlyList<Creature> PlayerCreatures => _removedCreatures is not { Count: > 0 }
         ? CombatState.PlayerCreatures
         : [.. ExcludeRemoved(CombatState.PlayerCreatures)];
 
@@ -127,12 +127,25 @@ internal sealed class CombatPredictionState
 
     public bool IsHittable(Creature creature)
     {
-        if (_removedCreatures.Contains(creature) || !GetCreature(creature).IsAlive)
+        if (_removedCreatures?.Contains(creature) == true || !GetCreature(creature).IsAlive)
             return false;
         return CombatState is ICombatPredictionCreatureSemantics semantics
             ? semantics.IsHittable(creature)
             : Hook.ShouldAllowHitting(CombatState, creature);
     }
+
+    /// <summary>
+    /// 实机 <c>Creature.CanReceivePowers</c> 里的「个体仍在战斗里」那一半。
+    /// </summary>
+    /// <remarks>
+    /// 实机 <c>CreatureCmd.Kill</c> 在击杀当时就 <c>combatState.RemoveCreature</c>
+    /// （<c>CombatState = null</c>，只放过正在执行自己行动的怪物），于是同一动作里后续对它施加
+    /// Power 是空操作。预测侧同一处也走 <see cref="RemoveCreature"/>，所以「有没有被移除」
+    /// 就是这条判据的等价物；它换来的是「死亡效果被推迟到 ApplyEnemyDeathPowers」那个窗口里的
+    /// 正确行为，见 <c>SimulatedCombatState.CanReceivePredictedPowers</c>。
+    /// </remarks>
+    public bool IsAttachedToCombat(Creature creature)
+        => _removedCreatures?.Contains(creature) != true;
 
     public IReadOnlyList<Creature> GetOpponentsOf(Creature creature)
         => !RequiresRemovedCreatureFiltering
@@ -154,7 +167,7 @@ internal sealed class CombatPredictionState
     // the first death, which dominates long multi-enemy searches. Keep the fallback for combat
     // state implementations that cannot update their own roster.
     private bool RequiresRemovedCreatureFiltering
-        => _removedCreatures.Count != 0 && CombatState is not ICombatPredictionRosterSink;
+        => _removedCreatures is { Count: > 0 } && CombatState is not ICombatPredictionRosterSink;
 
     public IReadOnlyList<AbstractModel> IterateHookListeners()
     {
@@ -182,7 +195,7 @@ internal sealed class CombatPredictionState
     {
         if (Creatures.Contains(creature))
         {
-            _removedCreatures.Add(creature);
+            (_removedCreatures ??= []).Add(creature);
             if (CombatState is ICombatPredictionRosterSink roster)
                 roster.RemoveCreatureFromPrediction(creature);
         }
@@ -207,7 +220,7 @@ internal sealed class CombatPredictionState
 
     private IEnumerable<Creature> ExcludeRemoved(IEnumerable<Creature> creatures)
     {
-        return creatures.Where(creature => !_removedCreatures.Contains(creature));
+        return creatures.Where(creature => _removedCreatures?.Contains(creature) != true);
     }
 
     internal CombatPredictionState Fork(PredictionForkContext context)
@@ -230,7 +243,7 @@ internal sealed class CombatPredictionState
         CombatPredictionState fork = new(
             combatState,
             creatures,
-            new HashSet<Creature>(_removedCreatures),
+            _removedCreatures is null ? null : new HashSet<Creature>(_removedCreatures),
             players);
         context.Register(this, fork);
         return fork;

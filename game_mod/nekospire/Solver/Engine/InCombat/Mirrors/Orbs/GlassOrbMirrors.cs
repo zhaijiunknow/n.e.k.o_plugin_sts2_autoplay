@@ -1,4 +1,3 @@
-using CombatSolver.Engine.Common;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models.Orbs;
 using MegaCrit.Sts2.Core.ValueProps;
@@ -16,20 +15,20 @@ internal static class GlassOrbMirrors
     // Mirrors GlassOrb.Passive by mutating only the simulator's cloned orb.
     public static void Passive(GlassOrb orb, OrbPassiveMirrorContext context)
     {
-        decimal passiveVal = OrbMirrors.ModifyValue(context.Simulator, orb, GameRef.Get<int>(orb, "_passiveVal"));
+        decimal passiveVal = OrbMirrors.ModifyValue(context.Simulator, orb, T44PrivateAccess.GlassOrb_PassiveVal(orb));
         if (passiveVal <= 0m)
         {
             return;
         }
 
-        GameRef.Set(orb, "_passiveVal", Math.Max(0m, GameRef.Get<int>(orb, "_passiveVal") - 1m));
+        T44PrivateAccess.SetGlassOrb_PassiveVal(orb,  Math.Max(0m, T44PrivateAccess.GlassOrb_PassiveVal(orb) - 1m));
         Damage(orb, context, passiveVal);
     }
 
     // Mirrors GlassOrb.Evoke without VFX/SFX or waits.
     public static IReadOnlyList<Creature> Evoke(GlassOrb orb, OrbMirrorContext context)
     {
-        decimal evokeVal = OrbMirrors.ModifyValue(context.Simulator, orb, GameRef.Get<int>(orb, "_passiveVal")) * 2m;
+        decimal evokeVal = OrbMirrors.ModifyValue(context.Simulator, orb, T44PrivateAccess.GlassOrb_PassiveVal(orb)) * 2m;
         return evokeVal <= 0m ? [] : Damage(orb, context, evokeVal);
     }
 

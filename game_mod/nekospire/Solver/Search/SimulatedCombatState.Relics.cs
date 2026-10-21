@@ -8,7 +8,6 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Models.Relics;
-using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.CardPools;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Extensions;
@@ -36,10 +35,15 @@ internal sealed partial class SimulatedCombatState
         CombatPredictionSimulator simulator,
         Player player,
         TurnStartChoiceCursor choices)
+        => ContinueRelicsBeforeHandDraw(simulator, player, choices, RelicsOf(player).ToArray(), GetPlayerTurnNumber(player), 0);
+
+    private bool ContinueRelicsBeforeHandDraw(CombatPredictionSimulator simulator, Player player,
+        TurnStartChoiceCursor choices, IReadOnlyList<RelicModel> relics, int turn, int nextIndex)
     {
-        int turn = GetPlayerTurnNumber(player);
-        foreach (RelicModel relic in RelicsOf(player).Where(static relic => !relic.IsMelted))
+        for (int relicIndex = nextIndex; relicIndex < relics.Count; relicIndex++)
         {
+            RelicModel relic = relics[relicIndex];
+            if (relic.IsMelted) continue;
             StatefulRelicState state;
             switch (relic)
             {
@@ -63,6 +67,19 @@ internal sealed partial class SimulatedCombatState
                         relic.DynamicVars.Cards.IntValue,
                         player,
                         CardPilePosition.Random);
+                    break;
+                case FuneraryMask when turn == 1:
+                    for (int index = 0; index < relic.DynamicVars.Cards.BaseValue; index++)
+                        simulator.CreateAndAddGeneratedCardsToCombat<Soul>(
+                            player, PileType.Draw, 1, player, CardPilePosition.Random);
+                    break;
+                case RadiantPearl when turn == 1:
+                    simulator.CreateAndAddGeneratedCardsToCombat<Luminesce>(
+                        player, PileType.Hand, relic.DynamicVars.Cards.IntValue, player);
+                    break;
+                case NinjaScroll when turn <= 1:
+                    simulator.CreateAndAddGeneratedCardsToCombat<Shiv>(
+                        player, PileType.Hand, relic.DynamicVars["Shivs"].IntValue, player);
                     break;
                 case JeweledMask when turn <= 1:
                 {
@@ -102,10 +119,16 @@ internal sealed partial class SimulatedCombatState
                             options,
                             "BEFORE_HAND_DRAW"))
                     {
+                        simulator.AppendExecutionContinuation(new BeforeHandDrawRelicFrame(player, relics, turn, relicIndex + 1));
                         return true;
                     }
                     break;
                 }
+            }
+            if (simulator.HasPendingChoice)
+            {
+                simulator.RejectExecutionContinuation();
+                return true;
             }
         }
         return false;
@@ -144,49 +167,15 @@ internal sealed partial class SimulatedCombatState
                         SetStatefulRelicState(relic, state with { Current = 1 });
                         break;
                     }
-                case Kunai value when card.Type == CardType.Attack:
-                    {
-                        int count = RelicPredictionStateSupport.GetCounterValue(
-                            simulator,
-                            value,
-                            GameRef.Get<int>(value, "_attacksPlayedThisTurn"));
-                        if (count % value.DynamicVars.Cards.IntValue == 0)
-                        {
-                            Apply<DexterityPower>(player.Creature, value.DynamicVars.Dexterity.IntValue, player.Creature);
-                            if (simulator.IsRecordingActionRelicTriggers)
-                                simulator.RecordRelicTrigger(value, $"：敏捷+{value.DynamicVars.Dexterity.IntValue}");
-                        }
-                        break;
-                    }
                 case RainbowRing value:
                     {
                         StatefulRelicState state = GetStatefulRelicState(value);
                         if (state.Current == 0
                             && RelicPredictionStateSupport.GetRainbowActivationCount(simulator, value) > 0)
                         {
-                            Apply<StrengthPower>(player.Creature, value.DynamicVars.Strength.IntValue, player.Creature);
-                            Apply<DexterityPower>(player.Creature, value.DynamicVars.Dexterity.IntValue, player.Creature);
+                            // Power application belongs to the exact AfterCardPlayed mirror.
+                            // Keep this existing lifecycle projection synchronized with its counter.
                             SetStatefulRelicState(value, state with { Current = 1 });
-                            if (simulator.IsRecordingActionRelicTriggers)
-                            {
-                                simulator.RecordRelicTrigger(
-                                    value,
-                                    $"：力量+{value.DynamicVars.Strength.IntValue} 敏捷+{value.DynamicVars.Dexterity.IntValue}");
-                            }
-                        }
-                        break;
-                    }
-                case Shuriken value when card.Type == CardType.Attack:
-                    {
-                        int count = RelicPredictionStateSupport.GetCounterValue(
-                            simulator,
-                            value,
-                            GameRef.Get<int>(value, "_attacksPlayedThisTurn"));
-                        if (count % value.DynamicVars.Cards.IntValue == 0)
-                        {
-                            Apply<StrengthPower>(player.Creature, value.DynamicVars.Strength.IntValue, player.Creature);
-                            if (simulator.IsRecordingActionRelicTriggers)
-                                simulator.RecordRelicTrigger(value, $"：力量+{value.DynamicVars.Strength.IntValue}");
                         }
                         break;
                     }
@@ -223,12 +212,6 @@ internal sealed partial class SimulatedCombatState
         cardThreshold = pocketwatch.DynamicVars["CardThreshold"].IntValue;
         return true;
     }
-
-    public static decimal GetLiveStatefulRelicHandDrawContribution(
-        RelicModel relic,
-        Player player,
-        int turn)
-        => GetStatefulRelicHandDrawContribution(relic, player, turn, CaptureLiveState(relic));
 
     private static decimal GetStatefulRelicHandDrawContribution(
         RelicModel relic,
@@ -309,11 +292,26 @@ internal sealed partial class SimulatedCombatState
     {
         if (_statefulRelicStates?.TryGetValue(relic, out StatefulRelicState state) == true)
             return state;
-        if (_rootMaterialized && _rootRelics.Values.Any(relics => relics.Contains(relic)))
+        // Any(lambda) 捕获参数 relic，Roslyn 会把参数提升进方法入口就分配的闭包对象里 ——
+        // 连命中缓存的快路径也要付这一次分配。换成显式扫描，判定结果不变。
+        if (_rootMaterialized && IsCapturedRootRelic(relic))
             throw new InvalidOperationException($"Root relic state was not captured for {relic.Id.Entry}.");
         state = CaptureLiveState(_rootRelicSources?.GetValueOrDefault(relic, relic) ?? relic);
         (_statefulRelicStates ??= [])[relic] = state;
         return state;
+    }
+
+    private bool IsCapturedRootRelic(RelicModel relic)
+    {
+        foreach (RelicModel[] relics in _rootRelics.Values)
+        {
+            for (int index = 0; index < relics.Length; index++)
+            {
+                if (EqualityComparer<RelicModel>.Default.Equals(relics[index], relic))
+                    return true;
+            }
+        }
+        return false;
     }
 
     private StatefulRelicState PeekStatefulRelicState(RelicModel relic)
@@ -341,36 +339,59 @@ internal sealed partial class SimulatedCombatState
                 (bool)BeltBuckleDexterityAppliedField.GetValue(buckle)! ? 1 : 0,
                 0),
             BoneTea tea => new StatefulRelicState(tea.CombatsLeft, 0),
-            EmotionChip chip => new StatefulRelicState(
-                CombatManager.Instance.History.Entries
-                    .OfType<DamageReceivedEntry>()
-                    .Any(entry => ReferenceEquals(entry.Receiver, chip.Owner.Creature)
-                                  && !entry.Result.WasFullyBlocked
-                                  && entry.HappenedLastPlayerTurn(chip.Owner)) ? 1 : 0,
-                CombatManager.Instance.History.Entries
-                    .OfType<DamageReceivedEntry>()
-                    .Any(entry => ReferenceEquals(entry.Receiver, chip.Owner.Creature)
-                                  && !entry.Result.WasFullyBlocked
-                                  && entry.HappenedThisTurn(chip.Owner.Creature.CombatState)) ? 1 : 0),
+            EmotionChip chip => CaptureEmotionChipState(chip),
             FakeHappyFlower flower => new StatefulRelicState(flower.TurnsSeen, 0),
             FakeVenerableTeaSet tea => new StatefulRelicState(tea.GainEnergyInNextCombat ? 1 : 0, 0),
             HappyFlower flower => new StatefulRelicState(flower.TurnsSeen, 0),
-            MiniRegent regent => new StatefulRelicState(GameRef.Get<bool>(regent, "_usedThisTurn") ? 1 : 0, 0),
+            MiniRegent regent => new StatefulRelicState(T44PrivateAccess.MiniRegent_UsedThisTurn(regent) ? 1 : 0, 0),
             GalacticDust dust => new StatefulRelicState(dust.StarsSpent, 0),
-            PaelsEye eye => new StatefulRelicState(GameRef.Get<bool>(eye, "_usedThisCombat") ? 1 : 0, GameRef.Get<bool>(eye, "_wasOwnerPartOfLastPlayerTurn") ? 1 : 0),
-            PaelsTears tears => new StatefulRelicState(GameRef.Get<bool>(tears, "_hadLeftoverEnergy") ? 1 : 0, 0),
-            RainbowRing ring => new StatefulRelicState(GameRef.Get<int>(ring, "_activationCountThisTurn"), 0),
-            RedSkull skull => new StatefulRelicState(GameRef.Get<bool>(skull, "_strengthApplied") ? 1 : 0, 0),
+            PaelsEye eye => new StatefulRelicState(T44PrivateAccess.PaelsEye_UsedThisCombat(eye) ? 1 : 0, T44PrivateAccess.PaelsEye_WasOwnerPartOfLastPlayerTurn(eye) ? 1 : 0),
+            PaelsTears tears => new StatefulRelicState(T44PrivateAccess.PaelsTears_HadLeftoverEnergy(tears) ? 1 : 0, 0),
+            RainbowRing ring => new StatefulRelicState(T44PrivateAccess.RainbowRing_ActivationCountThisTurn(ring), 0),
+            RedSkull skull => new StatefulRelicState(T44PrivateAccess.RedSkull_StrengthApplied(skull) ? 1 : 0, 0),
             Pendulum pendulum => new StatefulRelicState(pendulum.TurnsSeen, 0),
             Pocketwatch pocketwatch => new StatefulRelicState(
-                GameRef.Get<int>(pocketwatch, "_cardsPlayedThisTurn"),
-                GameRef.Get<int>(pocketwatch, "_cardsPlayedLastTurn")),
+                T44PrivateAccess.Pocketwatch_CardsPlayedThisTurn(pocketwatch),
+                T44PrivateAccess.Pocketwatch_CardsPlayedLastTurn(pocketwatch)),
             PollinousCore core => new StatefulRelicState(core.TurnsSeen, 0),
             RuinedHelmet helmet => new StatefulRelicState(CaptureRuinedHelmetUsed(helmet) ? 1 : 0, 0),
             UnsettlingLamp lamp => new StatefulRelicState(CaptureUnsettlingLampFinished(lamp) ? 1 : 0, 0),
             VenerableTeaSet tea => new StatefulRelicState(tea.GainEnergyInNextCombat ? 1 : 0, 0),
             _ => default,
         };
+
+    // 原来这一段挂在 CaptureLiveState 的 switch 分支里，两条 OfType().Any() 各带一个捕获
+    // chip 的闭包，闭包对象随分支作用域在方法里被提升分配。搬成独立方法后 CaptureLiveState
+    // 本身不再有任何闭包，两个判定改成同序短路扫描，结果不变。
+    private static StatefulRelicState CaptureEmotionChipState(EmotionChip chip)
+    {
+        Creature receiver = chip.Owner.Creature;
+        bool lastPlayerTurn = false;
+        foreach (var entry in CombatManager.Instance.History.Entries)
+        {
+            if (entry is DamageReceivedEntry damage
+                && ReferenceEquals(damage.Receiver, receiver)
+                && !damage.Result.WasFullyBlocked
+                && damage.HappenedLastPlayerTurn(chip.Owner))
+            {
+                lastPlayerTurn = true;
+                break;
+            }
+        }
+        bool thisTurn = false;
+        foreach (var entry in CombatManager.Instance.History.Entries)
+        {
+            if (entry is DamageReceivedEntry damage
+                && ReferenceEquals(damage.Receiver, receiver)
+                && !damage.Result.WasFullyBlocked
+                && damage.HappenedThisTurn(receiver.CombatState))
+            {
+                thisTurn = true;
+                break;
+            }
+        }
+        return new StatefulRelicState(lastPlayerTurn ? 1 : 0, thisTurn ? 1 : 0);
+    }
 
     private static bool IsStatefulRelic(RelicModel relic)
         => relic is ArtOfWar

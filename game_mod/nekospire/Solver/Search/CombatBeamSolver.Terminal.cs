@@ -1,9 +1,7 @@
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
-using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
@@ -17,7 +15,6 @@ using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Mirrors;
 using CombatSolver.Engine.InCombat.Simulation;
-using BufferCard = MegaCrit.Sts2.Core.Models.Cards.Buffer;
 
 namespace CombatSolver;
 
@@ -34,6 +31,9 @@ internal sealed partial class CombatBeamSolver
     {
         if (ended.Count == 0)
             return ended;
+
+        int pathBoundaryId = ObserveSearchPathBoundaryInput(
+            ended, SearchPathObservationStage.TurnInput, "before_turn_outcome_annotation");
 
         List<PendingTurnOutcome> pending = [];
         foreach (SearchNode node in ended)
@@ -62,8 +62,6 @@ internal sealed partial class CombatBeamSolver
                 comparable));
         }
 
-        int availableFutureSoldHp = Math.Max(0, SoldHpThreshold() - battleDamage.SoldHpCommitted);
-        int absoluteFutureSoldHp = Math.Max(0, root.InitialPlayerHp - 1);
         List<SearchNode> annotated = [];
         foreach (IGrouping<(int Turn, StateFingerprint State, ulong PotionSlotsUsed), PendingTurnOutcome> group in pending.GroupBy(
                      item => (item.Turn, item.TurnStart.StateKey, item.PotionSlotsUsed)))
@@ -110,11 +108,7 @@ internal sealed partial class CombatBeamSolver
 
             PendingTurnOutcome[] comparable = retained.Where(item => item.IsComparable).ToArray();
             int minimumHpLost = comparable.Length == 0 ? 0 : comparable.Min(item => item.HpLost);
-            PendingTurnOutcome[] conservative = comparable
-                .Where(item => item.HpLost == minimumHpLost)
-                .ToArray();
             int maxBlock = retained.Max(item => item.ActualBlock);
-            List<(PendingTurnOutcome Outcome, int FutureSold)> deferredInvestments = [];
             foreach (PendingTurnOutcome outcome in retained)
             {
                 int soldThisTurn = outcome.IsComparable
@@ -122,77 +116,14 @@ internal sealed partial class CombatBeamSolver
                     : 0;
                 int previousSold = outcome.Node.Parent!.FutureSoldHp;
                 int futureSold = previousSold + soldThisTurn;
-                bool exceedsPolicyThreshold = futureSold > availableFutureSoldHp;
-                bool protectsInvestment = exceedsPolicyThreshold
-                    && HasStrategicInvestmentPayoff(outcome, conservative);
-                if (futureSold > absoluteFutureSoldHp)
-                {
-                    _run.SoldHpBranchesPruned++;
-                    continue;
-                }
-                if (exceedsPolicyThreshold && !protectsInvestment)
-                {
-                    deferredInvestments.Add((outcome, futureSold));
-                    continue;
-                }
-                if (protectsInvestment)
-                    _run.HpInvestmentBranchesProtected++;
                 annotated.Add(AnnotateTurnOutcome(
                     outcome,
                     soldThisTurn,
                     futureSold,
-                    maxBlock,
-                    exceedsPolicyThreshold));
-            }
-
-            // Immediate scalar payoff is not a proof that a route is worthwhile, and its
-            // absence is not a proof that it is useless. Preserve a tiny structural portfolio
-            // for delayed HP investments; the cross-turn lease supplies the hard time bound.
-            List<(PendingTurnOutcome Outcome, int FutureSold)> deferredRepresentatives =
-                deferredInvestments
-                    .GroupBy(item => (
-                        item.Outcome.Node.Snapshot.CycleShapeKey,
-                        item.Outcome.Node.StateKey))
-                    .Select(family => family
-                        .OrderBy(item => item.FutureSold)
-                        .ThenByDescending(item => item.Outcome.Node.ActionCount)
-                        .ThenByDescending(item => item.Outcome.Node.Snapshot.ProjectedPlayerHp)
-                        .ThenByDescending(item => item.Outcome.Node.Score)
-                        .First())
-                    .ToList();
-            List<(PendingTurnOutcome Outcome, int FutureSold)> retainedDeferred = [];
-            (PendingTurnOutcome Outcome, int FutureSold)? safest = deferredRepresentatives
-                .OrderBy(item => item.FutureSold)
-                .ThenByDescending(item => item.Outcome.Node.Snapshot.ProjectedPlayerHp)
-                .ThenByDescending(item => item.Outcome.Node.ActionCount)
-                .ThenByDescending(item => item.Outcome.Node.Score)
-                .Select(item => ((PendingTurnOutcome, int)?)item)
-                .FirstOrDefault();
-            if (safest is { } safeInvestment)
-                retainedDeferred.Add(safeInvestment);
-            (PendingTurnOutcome Outcome, int FutureSold)? furthest = deferredRepresentatives
-                .Where(item => !retainedDeferred.Contains(item))
-                .OrderByDescending(item => item.Outcome.Node.ActionCount)
-                .ThenBy(item => item.FutureSold)
-                .ThenByDescending(item => item.Outcome.Node.Snapshot.ProjectedPlayerHp)
-                .ThenByDescending(item => item.Outcome.Node.Score)
-                .Select(item => ((PendingTurnOutcome, int)?)item)
-                .FirstOrDefault();
-            if (furthest is { } furthestInvestment)
-                retainedDeferred.Add(furthestInvestment);
-            _run.SoldHpBranchesPruned += deferredInvestments.Count - retainedDeferred.Count;
-            foreach ((PendingTurnOutcome outcome, int futureSold) in retainedDeferred)
-            {
-                int soldThisTurn = Math.Max(0, futureSold - outcome.Node.Parent!.FutureSoldHp);
-                _run.HpInvestmentBranchesProtected++;
-                annotated.Add(AnnotateTurnOutcome(
-                    outcome,
-                    soldThisTurn,
-                    futureSold,
-                    maxBlock,
-                    isInvestment: true));
+                    maxBlock));
             }
         }
+        ObserveSearchPathTurnSelection(ended, annotated, pathBoundaryId);
         return annotated;
     }
 
@@ -200,8 +131,7 @@ internal sealed partial class CombatBeamSolver
         PendingTurnOutcome outcome,
         int soldThisTurn,
         int futureSold,
-        int maxBlock,
-        bool isInvestment)
+        int maxBlock)
     {
         double scoreWithoutSoldPenalty = outcome.Node.Score
             - outcome.Node.FutureSoldHp * SoldHpPenalty();
@@ -209,38 +139,44 @@ internal sealed partial class CombatBeamSolver
         {
             FutureSoldHp = futureSold,
             Score = ApplySoldHpPenalty(scoreWithoutSoldPenalty, futureSold),
-            Traits = isInvestment
-                ? outcome.Node.Traits | SearchRouteTraits.HpInvestment
-                : outcome.Node.Traits,
-            Outcome = new TurnOutcome(
-                outcome.Turn,
-                outcome.HpLost,
-                outcome.Node.CumulativeEnemyHpLost
-                    - outcome.TurnStart.CumulativeEnemyHpLost,
-                soldThisTurn,
-                maxBlock,
-                outcome.ActualBlock,
-                outcome.EnergyLeft),
+            Outcome = CreateTurnOutcome(
+                outcome.Node, outcome.TurnStart, outcome.HpLost, soldThisTurn,
+                maxBlock, outcome.ActualBlock, outcome.EnergyLeft),
         };
     }
 
-    private static bool HasStrategicInvestmentPayoff(
-        PendingTurnOutcome outcome,
-        IReadOnlyList<PendingTurnOutcome> conservative)
+    private static TurnOutcome CreateTurnOutcome(
+        SearchNode node,
+        SearchNode turnStart,
+        int hpLost,
+        int soldThisTurn,
+        int maxBlock,
+        int actualBlock,
+        int energyLeft)
+        => new(
+            node.Action!.Turn,
+            hpLost,
+            Math.Max(0, node.Snapshot.RecoveredPlayerHp - turnStart.Snapshot.RecoveredPlayerHp),
+            node.CumulativeEnemyHpLost - turnStart.CumulativeEnemyHpLost,
+            soldThisTurn,
+            maxBlock,
+            actualBlock,
+            energyLeft);
+
+    private static TurnOutcome CreateUncomparedTurnOutcome(SearchNode node)
     {
-        SimulationSnapshot candidate = outcome.Node.Snapshot;
-        if (candidate.PlayerDead || candidate.ProjectedPlayerHp <= 0 || conservative.Count == 0)
-            return false;
-        CycleExitQuality candidateQuality = MeasureCycleExitQuality(
-            outcome.TurnStart,
-            outcome.Node);
-        // Compare against real conservative routes one by one. Combining each route's best
-        // coordinate into an unattainable synthetic baseline incorrectly deletes Pareto-safe
-        // investments.
-        return !conservative.Any(item => MeasureCycleExitQuality(
-                item.TurnStart,
-                item.Node)
-            .DominatesOrEquals(candidateQuality));
+        SearchNode parent = node.Parent
+            ?? throw new InvalidOperationException("回合结果节点没有父节点。");
+        SearchNode turnStart = FindTurnStart(parent);
+        bool endedByTurn = node.Action!.Kind == PlanActionKind.EndTurn || node.Turn > parent.Turn;
+        int block = endedByTurn ? parent.Snapshot.PlayerBlock : node.Snapshot.PlayerBlock;
+        int energy = endedByTurn ? parent.Snapshot.Energy : node.Snapshot.Energy;
+        int soldThisTurn = node.FutureSoldHp - parent.FutureSoldHp;
+        if (soldThisTurn < 0)
+            throw new InvalidOperationException("路线回合累计卖血不能减少。");
+        return CreateTurnOutcome(node, turnStart,
+            Math.Max(0, node.Snapshot.CumulativePlayerHpLost - turnStart.Snapshot.CumulativePlayerHpLost),
+            soldThisTurn, block, block, energy);
     }
 
     private static ulong CurrentTurnPotionSlotsUsed(SearchNode turnStart, SearchNode outcome)
@@ -263,7 +199,10 @@ internal sealed partial class CombatBeamSolver
         return slots;
     }
 
-    private RouteAnnotations BuildRouteAnnotations(SearchNode best)
+    private RouteAnnotations BuildRouteAnnotations(
+        SearchNode best,
+        ActionRelicTriggerRecorder? killRecorder = null,
+        IReadOnlyList<Creature>? annotationEnemies = null)
     {
         List<SearchNode> path = [];
         for (SearchNode? node = best; node?.Parent != null; node = node.Parent)
@@ -275,6 +214,7 @@ internal sealed partial class CombatBeamSolver
         Dictionary<int, int> sold = [];
         Dictionary<int, int> maxBlock = [];
         Dictionary<int, int> actualBlock = [];
+        Dictionary<int, int> recoveries = [];
         Dictionary<int, int> energy = [];
         Dictionary<int, int> potionCounts = [];
         Dictionary<int, int> potionCosts = [];
@@ -307,9 +247,14 @@ internal sealed partial class CombatBeamSolver
             }
             aliveMask = node.Snapshot.AliveEnemyMask;
 
-            if (node.Outcome is { } outcome)
+            TurnOutcome? turnOutcome = node.Outcome;
+            // Boundary fallbacks can retain the original node rather than its ranked annotation clone.
+            if (turnOutcome == null && (node.IsTerminal || node.Turn > parent.Turn))
+                turnOutcome = CreateUncomparedTurnOutcome(node);
+            if (turnOutcome is { } outcome)
             {
                 losses[outcome.Turn] = outcome.HpLost;
+                recoveries[outcome.Turn] = outcome.HpRecovered;
                 enemyHpLosses[outcome.Turn] = outcome.EnemyHpLost;
                 actualBlock[outcome.Turn] = outcome.ActualBlock;
                 maxBlock[outcome.Turn] = outcome.MaxBlock;
@@ -324,13 +269,45 @@ internal sealed partial class CombatBeamSolver
                     node.Snapshot.ProjectedPlayerHp)
                 && node.Snapshot.BoundaryReason != SearchBoundaryReason.UnsupportedEffect)
             {
-                combatEndedTurn = action.Turn;
+                combatEndedTurn = node.Snapshot.CombatEndedTurn;
             }
             if (deathTurn == null && node.Snapshot.PlayerDead)
-                deathTurn = action.Turn;
+                deathTurn = node.Snapshot.DeathTurn;
         }
+        if (killRecorder != null)
+        {
+            ArgumentNullException.ThrowIfNull(annotationEnemies);
+            Dictionary<int, IReadOnlyList<string>> attributedKills = [];
+            foreach (SearchNode node in path)
+            {
+                int actionIndex = node.ActionCount - 1;
+                IReadOnlyList<RecordedKill> recorded = killRecorder.KillsForAction(actionIndex);
+                if (recorded.Count > 0)
+                {
+                    attributedKills[actionIndex] = recorded
+                        .Select(kill =>
+                        {
+                            Creature enemy = annotationEnemies.First(candidate => candidate.CombatId == kill.CombatId);
+                            string targetName = displayNames.Creature(enemy, annotationEnemies);
+                            if (string.IsNullOrEmpty(targetName))
+                                targetName = kill.TargetId;
+                            return $"{targetName}（{displayNames.DamageSource(kill.Source)}）";
+                        })
+                        .ToArray();
+                }
+                else if (kills.TryGetValue(actionIndex, out IReadOnlyList<string>? fallback))
+                {
+                    attributedKills[actionIndex] = fallback
+                        .Select(name => $"{name}（{displayNames.DamageSource(CombatDamageSource.Unknown)}）")
+                        .ToArray();
+                }
+            }
+            kills = attributedKills;
+        }
+
         return new RouteAnnotations(
             losses,
+            recoveries,
             enemyHpLosses,
             sold,
             maxBlock,
@@ -351,86 +328,66 @@ internal sealed partial class CombatBeamSolver
         return current;
     }
 
-    private int SoldHpThreshold()
-        => ResolveSoldHpThreshold(
-            root.InitialPlayerMaxHp,
-            root.EncounterRoomType,
-            _strategicBossHpRelief,
-            _theftPolicy);
-
-    internal static int ResolveSoldHpThreshold(
-        int initialPlayerMaxHp,
-        RoomType? encounterRoomType,
-        BossHpRelief bossHpRelief,
-        SolverTheftPolicy? theftPolicy)
-    {
-        if (theftPolicy == SolverTheftPolicy.PreserveResources)
-            return initialPlayerMaxHp;
-        int survivalLimit = Math.Max(0, initialPlayerMaxHp - 1);
-        if (bossHpRelief == BossHpRelief.RunEnding)
-            return survivalLimit;
-        if (bossHpRelief == BossHpRelief.ActClearHeal)
-        {
-            return Math.Min(
-                survivalLimit,
-                ActEndingBossPolicy.RawHpRequiredForPersistentValue(
-                    SolverWeights.BossSoldHpThreshold,
-                    bossHpRelief));
-        }
-        return encounterRoomType switch
-        {
-            RoomType.Boss => SolverWeights.BossSoldHpThreshold,
-            RoomType.Elite => SolverWeights.EliteSoldHpThreshold,
-            _ => SolverWeights.NormalSoldHpThreshold,
-        };
-    }
-
     private double ApplySoldHpPenalty(double score, int futureSoldHp)
         => score + futureSoldHp * SoldHpPenalty();
 
     private static double SoldHpPenalty()
         => SolverWeights.SoldHpPenalty;
 
-    private IReadOnlyList<CachedContinuation> BuildContinuations(SearchNode best)
+    private static ContinuationCapture PrepareContinuationCapture(SearchNode best)
     {
-        List<CachedContinuation> continuations = [];
-        List<SearchNode> path = [];
+        List<(int ActionIndex, int Turn)> boundaries = [];
+        HashSet<int> laterActionTurns = [];
         for (SearchNode? node = best; node?.Parent != null; node = node.Parent)
-            path.Add(node);
-        path.Reverse();
-        for (int pathIndex = 0; pathIndex < path.Count; pathIndex++)
         {
-            SearchNode node = path[pathIndex];
             PlanAction action = node.Action
                 ?? throw new InvalidOperationException("续用路径节点缺少动作。");
-            if (action.Kind != PlanActionKind.EndTurn && !action.EndsPlayerTurn
-                || node.Snapshot.PlayerDead
-                || node.Snapshot.AllEnemiesDead
-                || node.Snapshot.BoundaryReason != SearchBoundaryReason.None)
+            if ((action.Kind == PlanActionKind.EndTurn || action.EndsPlayerTurn)
+                && !node.Snapshot.PlayerDead
+                && !node.Snapshot.AllEnemiesDead
+                && node.Snapshot.BoundaryReason == SearchBoundaryReason.None
+                && laterActionTurns.Contains(node.Turn))
             {
-                continue;
+                boundaries.Add((node.ActionCount - 1, node.Turn));
             }
-            bool hasPlannedNextTurn = path
-                .Skip(pathIndex + 1)
-                .Any(later => later.Action?.Turn == node.Turn);
-            if (!hasPlannedNextTurn)
-                continue;
-            int forecastOffset = node.Turn - _startTurnNumber;
-            ContinuationStamp? expected = node.Snapshot.Continuation;
-            if (expected == null)
-            {
-                SimulationSnapshot replayed = Replay(node.Actions);
-                expected = ContinuationStamp.CapturePredicted(
-                    _player,
-                    replayed.Simulator,
-                    node.Turn,
-                    _forecast,
-                    _startTurnNumber);
-                replayed.ReleaseSimulator();
-            }
-            continuations.Add(new CachedContinuation(expected, node.Turn, forecastOffset));
+            laterActionTurns.Add(action.Turn);
         }
-        return continuations;
+        boundaries.Reverse();
+        return new ContinuationCapture(boundaries);
+    }
+
+    private sealed class ContinuationCapture(IReadOnlyList<(int ActionIndex, int Turn)> boundaries)
+    {
+        private readonly List<CachedContinuation> _continuations = new(boundaries.Count);
+
+        public void Observe(CombatBeamSolver solver, CombatPredictionSimulator simulator,
+            int actionIndex, int turn, SearchBoundaryReason boundary)
+        {
+            if (_continuations.Count == boundaries.Count)
+                return;
+            var expected = boundaries[_continuations.Count];
+            if (actionIndex < expected.ActionIndex)
+                return;
+            if (actionIndex != expected.ActionIndex || turn != expected.Turn
+                || boundary != SearchBoundaryReason.None || simulator.HasPendingChoice
+                || simulator.TerminalStamp != null)
+            {
+                throw new InvalidOperationException(
+                    $"续用回放未抵达预期稳定边界：action={actionIndex}/{expected.ActionIndex} " +
+                    $"turn={turn}/{expected.Turn} boundary={boundary}。");
+            }
+            ((SimulatedCombatState)simulator.State.CombatState).AssertForkable();
+            ContinuationStamp stamp = ContinuationStamp.CapturePredicted(
+                solver._player, simulator, turn, solver._forecast, solver._startTurnNumber);
+            _continuations.Add(new CachedContinuation(stamp, turn, turn - solver._startTurnNumber));
+        }
+
+        public IReadOnlyList<CachedContinuation> Complete()
+        {
+            if (_continuations.Count != boundaries.Count)
+                throw new InvalidOperationException("最终路线回放缺少预期续用边界。");
+            return _continuations;
+        }
     }
 
 }

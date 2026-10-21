@@ -2,7 +2,7 @@ namespace CombatSolver;
 
 internal sealed partial class CombatBeamSolver
 {
-    private SearchNode AttachCrossTurnSchedulingEvidence(SearchNode child)
+    private static SearchNode AttachCrossTurnSchedulingEvidence(SearchNode child)
     {
         if (child.Parent is not { } parent)
             return child;
@@ -20,7 +20,7 @@ internal sealed partial class CombatBeamSolver
         }
         else
         {
-            CrossTurnProbeState probe = parent.CrossTurnProbe!.Value;
+            CrossTurnProbeState probe = parent.CrossTurnProbe!;
             CycleExitQuality quality = MeasureCycleExitQuality(
                 probe.Tracker.OriginNode,
                 child);
@@ -134,7 +134,7 @@ internal sealed partial class CombatBeamSolver
         _run.CrossTurnCandidatesProtected++;
     }
 
-    private bool RequiresCrossTurnPlanning(SearchNode node)
+    private static bool RequiresCrossTurnPlanning(SearchNode node)
     {
         if (node.IsTerminal
             || node.BoundaryReason != SearchBoundaryReason.None
@@ -143,11 +143,7 @@ internal sealed partial class CombatBeamSolver
         {
             return false;
         }
-        int availableFutureSoldHp = Math.Max(
-            0,
-            SoldHpThreshold() - battleDamage.SoldHpCommitted);
         return node.CombatProgress.TurnsWithoutProgress > 0
-            || node.CrossTurnSemanticInvisibleToModeledQuality
-            || node.FutureSoldHp > availableFutureSoldHp;
+            || node.CrossTurnSemanticInvisibleToModeledQuality;
     }
 }

@@ -39,7 +39,7 @@ internal static class AfterOrbChanneledMirrors
         var state = context.StateStore.Get(relic, () => new MetronomePredictionState(relic));
         state.OrbsChanneled++;
 
-        if (state.OrbsChanneled == relic.DynamicVars[GameRef.GetStatic<string>(typeof(Metronome), "_orbCountKey")].IntValue)
+        if (state.OrbsChanneled == relic.DynamicVars[T44PrivateAccess.Metronome_OrbCountKey()].IntValue)
         {
             context.Simulator.Damage(
                 context.State.HittableEnemies,
@@ -58,7 +58,7 @@ internal sealed class AfterOrbChanneledMirrorContext : CombatMirrorContext
 
 internal sealed class MetronomePredictionState(Metronome relic) : IPredictionStateForkable
 {
-    public int OrbsChanneled { get; set; } = GameRef.Get<int>(relic, "_orbsChanneled");
+    public int OrbsChanneled { get; set; } = T44PrivateAccess.Metronome_OrbsChanneled(relic);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

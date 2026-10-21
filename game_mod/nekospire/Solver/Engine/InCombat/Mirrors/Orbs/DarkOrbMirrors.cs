@@ -1,4 +1,3 @@
-using CombatSolver.Engine.Common;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models.Orbs;
 using MegaCrit.Sts2.Core.ValueProps;
@@ -16,7 +15,7 @@ internal static class DarkOrbMirrors
     // Mirrors DarkOrb.Passive by mutating only the simulator's cloned orb.
     public static void Passive(DarkOrb orb, OrbPassiveMirrorContext context)
     {
-        GameRef.Set(orb, "_evokeVal", GameRef.Get<int>(orb, "_evokeVal") + OrbMirrors.ModifyValue(context.Simulator, orb, 6m));
+        T44PrivateAccess.SetDarkOrb_EvokeVal(orb, T44PrivateAccess.DarkOrb_EvokeVal(orb) + ( OrbMirrors.ModifyValue(context.Simulator, orb, 6m)));
     }
 
     // Mirrors DarkOrb.Evoke without VFX/SFX or waits.

@@ -54,7 +54,7 @@ internal sealed class SearchWorkPacer(SearchFramePressureSignal framePressureSig
         worker._frameRecoveryWaitTicks = 0;
     }
 
-    private void ObserveGcPause()
+    internal void ObserveGcPause()
     {
         int gen0 = GC.CollectionCount(0);
         int gen1 = GC.CollectionCount(1);
@@ -69,5 +69,13 @@ internal sealed class SearchWorkPacer(SearchFramePressureSignal framePressureSig
             if (pause > MaxObservedGcPause)
                 MaxObservedGcPause = pause;
         }
+    }
+
+    internal void ObserveGcPause(TimeSpan? observation)
+    {
+        if (observation is not { } pause)
+            return;
+        if (pause > MaxObservedGcPause)
+            MaxObservedGcPause = pause;
     }
 }

@@ -17,48 +17,87 @@ namespace CombatSolver;
 
 internal sealed partial class SimulatedCombatState
 {
-    public void PrepareRelicsBeforeSideTurnStart(
+    /// <summary>
+    /// 每个回合开始都要枚举一遍参与方的遗物；用普通循环替代 SelectMany/Where/Contains，
+    /// 避免迭代器、闭包与 ForkableList 的装箱枚举器分配。顺序与原实现一致：按玩家顺序、再按遗物顺序。
+    /// </summary>
+    private List<RelicModel> RelicsParticipatingInSideTurn(IReadOnlyList<Creature> participants)
+    {
+        List<RelicModel> relics = [];
+        for (int playerIndex = 0; playerIndex < Players.Count; playerIndex++)
+        {
+            IReadOnlyList<RelicModel> owned = RelicsOf(Players[playerIndex]);
+            for (int relicIndex = 0; relicIndex < owned.Count; relicIndex++)
+            {
+                RelicModel relic = owned[relicIndex];
+                if (relic.IsMelted)
+                    continue;
+                Creature ownerCreature = relic.Owner.Creature;
+                bool participating = false;
+                for (int index = 0; index < participants.Count; index++)
+                {
+                    if (ReferenceEquals(participants[index], ownerCreature))
+                    {
+                        participating = true;
+                        break;
+                    }
+                }
+                if (participating)
+                    relics.Add(relic);
+            }
+        }
+        return relics;
+    }
+
+    public bool PrepareRelicsBeforeSideTurnStart(
         CombatPredictionSimulator simulator,
         IReadOnlyList<Creature> participants)
     {
-        foreach (RelicModel relic in Players
-                     .SelectMany(RelicsOf)
-                     .Where(relic => !relic.IsMelted && participants.Contains(relic.Owner.Creature)))
+        foreach (RelicModel relic in RelicsParticipatingInSideTurn(participants))
         {
-            RelicPredictionStateSupport.ResetBeforeSideTurnStart(simulator, relic);
-            switch (relic)
+            PrepareRelicBeforeSideTurnStart(simulator, relic);
+            if (simulator.HasPendingChoice)
+                return false;
+        }
+        return true;
+    }
+
+    // 单项结算与原有无扩展路径共用，避免两套原版状态写入合同。
+    internal void PrepareRelicBeforeSideTurnStart(CombatPredictionSimulator simulator, RelicModel relic)
+    {
+        RelicPredictionStateSupport.ResetBeforeSideTurnStart(simulator, relic);
+        switch (relic)
+        {
+            case Pocketwatch:
             {
-                case Pocketwatch:
-                {
-                    StatefulRelicState state = GetStatefulRelicState(relic);
-                    SetStatefulRelicState(relic, new StatefulRelicState(0, state.Current));
-                    break;
-                }
-                case BagOfMarbles:
-                    if (GetPlayerTurnNumber(relic.Owner) <= 1)
-                    {
-                        foreach (Creature enemy in LivingOpponents(simulator, relic.Owner.Creature))
-                            Apply<VulnerablePower>(enemy, relic.DynamicVars.Vulnerable.IntValue, relic.Owner.Creature);
-                    }
-                    break;
-                case CrackedCore:
-                    if (GetPlayerTurnNumber(relic.Owner) <= 1)
-                        simulator.OrbChannel<LightningOrb>(relic.Owner, relic.DynamicVars["Lightning"].IntValue);
-                    break;
-                case MiniRegent:
-                    SetStatefulRelicState(relic, default);
-                    break;
-                case RainbowRing:
-                    SetStatefulRelicState(relic, default);
-                    break;
-                case RedMask:
-                    if (GetPlayerTurnNumber(relic.Owner) <= 1)
-                    {
-                        foreach (Creature enemy in LivingOpponents(simulator, relic.Owner.Creature))
-                            Apply<WeakPower>(enemy, relic.DynamicVars["WeakPower"].IntValue, relic.Owner.Creature);
-                    }
-                    break;
+                StatefulRelicState state = GetStatefulRelicState(relic);
+                SetStatefulRelicState(relic, new StatefulRelicState(0, state.Current));
+                break;
             }
+            case BagOfMarbles:
+                if (GetPlayerTurnNumber(relic.Owner) <= 1)
+                {
+                    foreach (Creature enemy in LivingOpponents(simulator, relic.Owner.Creature))
+                        Apply<VulnerablePower>(enemy, relic.DynamicVars.Vulnerable.IntValue, relic.Owner.Creature);
+                }
+                break;
+            case CrackedCore:
+                if (GetPlayerTurnNumber(relic.Owner) <= 1)
+                    simulator.OrbChannel<LightningOrb>(relic.Owner, relic.DynamicVars["Lightning"].IntValue);
+                break;
+            case MiniRegent:
+                SetStatefulRelicState(relic, default);
+                break;
+            case RainbowRing:
+                SetStatefulRelicState(relic, default);
+                break;
+            case RedMask:
+                if (GetPlayerTurnNumber(relic.Owner) <= 1)
+                {
+                    foreach (Creature enemy in LivingOpponents(simulator, relic.Owner.Creature))
+                        Apply<WeakPower>(enemy, relic.DynamicVars["WeakPower"].IntValue, relic.Owner.Creature);
+                }
+                break;
         }
     }
 
@@ -96,10 +135,30 @@ internal sealed partial class SimulatedCombatState
         CombatPredictionSimulator simulator,
         Player player,
         TurnStartChoiceCursor choices)
+        => ContinueRelicsAfterPlayerTurnStart(simulator, player, choices, RelicsOf(player).ToArray(), GetPlayerTurnNumber(player), 0);
+
+    internal bool ApplyRelicAfterPlayerTurnStart(CombatPredictionSimulator simulator, Player player,
+        TurnStartChoiceCursor choices, RelicModel relic)
+        => ContinueRelicsAfterPlayerTurnStart(simulator, player, choices, [relic], GetPlayerTurnNumber(player), 0);
+
+    private bool ContinueRelicsAfterPlayerTurnStart(CombatPredictionSimulator simulator, Player player,
+        TurnStartChoiceCursor choices, IReadOnlyList<RelicModel> relics, int turn, int nextIndex, bool applyMittensStrength = false)
     {
-        int turn = GetPlayerTurnNumber(player);
-        foreach (RelicModel relic in RelicsOf(player).Where(static relic => !relic.IsMelted))
+        for (int relicIndex = nextIndex; relicIndex < relics.Count; relicIndex++)
         {
+            RelicModel relic = relics[relicIndex];
+            if (applyMittensStrength)
+            {
+                Apply<StrengthPower>(player.Creature, relic.DynamicVars.Strength.IntValue, player.Creature);
+                applyMittensStrength = false;
+                if (simulator.HasPendingChoice)
+                {
+                    simulator.RejectExecutionContinuation();
+                    return true;
+                }
+                continue;
+            }
+            if (relic.IsMelted) continue;
             switch (relic)
             {
                 case Bellows when turn <= 1:
@@ -140,19 +199,28 @@ internal sealed partial class SimulatedCombatState
                             options,
                             "AFTER_PLAYER_TURN_START"))
                     {
+                        simulator.AppendExecutionContinuation(new AfterPlayerTurnStartRelicFrame(player, relics, turn, relicIndex + 1));
                         return true;
                     }
                     break;
                 }
                 case EmotionChip value:
-                    TriggerEmotionChip(simulator, value);
+                    if (!TriggerEmotionChip(simulator, value))
+                    {
+                        simulator.RejectExecutionContinuation();
+                        return true;
+                    }
                     break;
                 case FestivePopper when turn <= 1:
-                    simulator.Damage(
-                        LivingOpponents(simulator, player.Creature),
-                        relic.DynamicVars.Damage.BaseValue,
-                        ValueProp.Unpowered,
-                        player.Creature);
+                    using (simulator.PushDamageSource(
+                        CombatDamageSource.For(CombatDamageSourceKind.Relic, relic.Id.Entry)))
+                    {
+                        simulator.Damage(
+                            LivingOpponents(simulator, player.Creature),
+                            relic.DynamicVars.Damage.BaseValue,
+                            ValueProp.Unpowered,
+                            player.Creature);
+                    }
                     break;
                 case GamblingChip when turn <= 1:
                     if (!TurnStartChoiceSupport.ResolveDiscardAndDraw(
@@ -163,15 +231,20 @@ internal sealed partial class SimulatedCombatState
                             relic.Id.Entry,
                             "AFTER_PLAYER_TURN_START"))
                     {
+                        simulator.AppendExecutionContinuation(new AfterPlayerTurnStartRelicFrame(player, relics, turn, relicIndex + 1));
                         return true;
                     }
                     break;
                 case MercuryHourglass:
-                    simulator.Damage(
-                        LivingOpponents(simulator, player.Creature),
-                        relic.DynamicVars.Damage.BaseValue,
-                        ValueProp.Unpowered,
-                        player.Creature);
+                    using (simulator.PushDamageSource(
+                        CombatDamageSource.For(CombatDamageSourceKind.Relic, relic.Id.Entry)))
+                    {
+                        simulator.Damage(
+                            LivingOpponents(simulator, player.Creature),
+                            relic.DynamicVars.Damage.BaseValue,
+                            ValueProp.Unpowered,
+                            player.Creature);
+                    }
                     break;
                 case RoyalPoison when turn <= 1:
                     simulator.Damage(
@@ -181,11 +254,15 @@ internal sealed partial class SimulatedCombatState
                         null);
                     break;
                 case MrStruggles:
-                    simulator.Damage(
-                        LivingOpponents(simulator, player.Creature),
-                        turn,
-                        ValueProp.Unpowered,
-                        player.Creature);
+                    using (simulator.PushDamageSource(
+                        CombatDamageSource.For(CombatDamageSourceKind.Relic, relic.Id.Entry)))
+                    {
+                        simulator.Damage(
+                            LivingOpponents(simulator, player.Creature),
+                            turn,
+                            ValueProp.Unpowered,
+                            player.Creature);
+                    }
                     break;
                 case ToastyMittens:
                     if (!simulator.State.GetPlayerCombatState(player).Hand.IsEmpty
@@ -198,6 +275,7 @@ internal sealed partial class SimulatedCombatState
                             PlanChoiceEffect.Exhaust,
                             1))
                     {
+                        simulator.AppendExecutionContinuation(new AfterPlayerTurnStartRelicFrame(player, relics, turn, relicIndex, ApplyMittensStrength: true));
                         return true;
                     }
                     Apply<StrengthPower>(
@@ -225,18 +303,21 @@ internal sealed partial class SimulatedCombatState
                     break;
                 }
             }
+            if (simulator.HasPendingChoice)
+            {
+                simulator.RejectExecutionContinuation();
+                return true;
+            }
         }
         return false;
     }
 
-    public void TriggerRelicsAfterSideTurnStart(
+    public bool TriggerRelicsAfterSideTurnStart(
         CombatPredictionSimulator simulator,
         CombatSide side,
         IReadOnlyList<Creature> participants)
     {
-        foreach (RelicModel relic in Players
-                     .SelectMany(RelicsOf)
-                     .Where(relic => !relic.IsMelted && participants.Contains(relic.Owner.Creature)))
+        foreach (RelicModel relic in RelicsParticipatingInSideTurn(participants))
         {
             int turn = GetPlayerTurnNumber(relic.Owner);
             RelicPredictionStateSupport.ResetAfterSideTurnStart(simulator, relic, turn);
@@ -272,6 +353,8 @@ internal sealed partial class SimulatedCombatState
                     break;
                 case DiamondDiadem when turn <= 1:
                     simulator.GainBlock(relic.Owner.Creature, relic.DynamicVars.Block.BaseValue, ValueProp.Unpowered);
+                    if (simulator.HasPendingChoice)
+                        return false;
                     Apply<BlurPower>(relic.Owner.Creature, 1, relic.Owner.Creature);
                     break;
                 case DivineDestiny when turn <= 1:
@@ -293,17 +376,26 @@ internal sealed partial class SimulatedCombatState
                         simulator.GainEnergy(relic.Owner, relic.DynamicVars.Energy.BaseValue);
                     break;
                 }
+                case InfusedCore when turn <= 1:
+                    simulator.OrbChannel<LightningOrb>(
+                        relic.Owner,
+                        relic.DynamicVars["Lightning"].IntValue);
+                    break;
                 case Lantern when turn <= 1:
                     simulator.GainEnergy(relic.Owner, relic.DynamicVars.Energy.BaseValue);
                     break;
                 case Crossbow:
-                    GenerateRelicCards(
+                    // 根快照命中时复用已按战斗/人数过滤的角色攻击牌序列，未命中回退原版
+                    // GetUnlockedCards 路径；筛选集合与顺序、随机选择与 RNG 消耗都不变。
+                    AddGeneratedRelicCards(
                         simulator,
                         relic,
-                        relic.Owner.Character.CardPool
-                            .GetUnlockedCards(relic.Owner.UnlockState, _cardMultiplayerConstraint)
-                            .Where(card => card.Type == CardType.Attack),
-                        1,
+                        simulator.GetDistinctUnlockedCharacterAttacksForCombat(
+                                relic.Owner,
+                                1,
+                                simulator.Rng.CombatCardGeneration,
+                                _cardMultiplayerConstraint)
+                            .ToList(),
                         setFreeThisTurn: true);
                     break;
                 case OrangeDough when turn <= 1:
@@ -355,7 +447,31 @@ internal sealed partial class SimulatedCombatState
                     simulator.GainEnergy(relic.Owner, relic.DynamicVars.Energy.BaseValue);
                     break;
             }
+            if (simulator.HasPendingChoice)
+                return false;
         }
+        return true;
+    }
+
+    // 候选的取得方式由调用方决定：命中根快照时用 simulator 的缓存 helper，未命中时
+    // 回退原版 GetUnlockedCards。这里只保留原版的加牌与“本回合免费”语义。
+    private void AddGeneratedRelicCards(
+        CombatPredictionSimulator simulator,
+        RelicModel relic,
+        IReadOnlyList<PredictedCard> generated,
+        bool setFreeThisTurn = false)
+    {
+        if (setFreeThisTurn)
+        {
+            foreach (PredictedCard card in generated)
+                card.SetToFreeThisTurn();
+        }
+        simulator.AddGeneratedCardsToCombat(
+            generated,
+            PileType.Hand,
+            relic.Owner,
+            CardPilePosition.Bottom,
+            CardGenerationResultKind.Random);
     }
 
     private void GenerateRelicCards(
@@ -372,17 +488,7 @@ internal sealed partial class SimulatedCombatState
                 simulator.Rng.CombatCardGeneration,
                 _cardMultiplayerConstraint)
             .ToList();
-        if (setFreeThisTurn)
-        {
-            foreach (PredictedCard card in generated)
-                card.SetToFreeThisTurn();
-        }
-        simulator.AddGeneratedCardsToCombat(
-            generated,
-            PileType.Hand,
-            relic.Owner,
-            CardPilePosition.Bottom,
-            CardGenerationResultKind.Random);
+        AddGeneratedRelicCards(simulator, relic, generated, setFreeThisTurn);
     }
 
     public void PrepareRelicsBeforeSideTurnEnd(
@@ -399,7 +505,7 @@ internal sealed partial class SimulatedCombatState
         }
     }
 
-    public void CompleteRelicsAfterSideTurnEnd(
+    public bool CompleteRelicsAfterSideTurnEnd(
         CombatPredictionSimulator simulator,
         IReadOnlyList<Creature> participants,
         int etherealExhaustCount)
@@ -412,7 +518,7 @@ internal sealed partial class SimulatedCombatState
             StatefulRelicState state = GetStatefulRelicState(relic);
             SetStatefulRelicState(relic, new StatefulRelicState(0, state.Current));
         }
-        TriggerRelicsAfterSideTurnEnd(simulator, participants, etherealExhaustCount);
+        return TriggerRelicsAfterSideTurnEnd(simulator, participants, etherealExhaustCount);
     }
 
     private IReadOnlyList<Creature> LivingOpponents(

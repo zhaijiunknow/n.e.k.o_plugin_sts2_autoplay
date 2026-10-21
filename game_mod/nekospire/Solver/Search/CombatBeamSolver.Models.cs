@@ -1,8 +1,5 @@
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
-using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Hooks;
@@ -15,53 +12,64 @@ using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
-using CombatSolver.Engine.InCombat.Mirrors;
 using CombatSolver.Engine.InCombat.Simulation;
-using BufferCard = MegaCrit.Sts2.Core.Models.Cards.Buffer;
 
 namespace CombatSolver;
 
 
 internal sealed partial class CombatBeamSolver
 {
-    private readonly record struct TranspositionLabel(
-        int PotionCount,
-        int PotionStrategicCost,
-        int FutureSoldHp,
-        int CumulativePlayerHpLost,
-        int ActionCount,
-        double Score);
-
-    private sealed class TranspositionFrontier(TranspositionLabel first)
-    {
-        private readonly List<TranspositionLabel> _labels = [first];
-
-        public bool TryAccept(TranspositionLabel next)
-        {
-            foreach (TranspositionLabel current in _labels)
-            {
-                if (Dominates(current, next))
-                    return false;
-            }
-            _labels.RemoveAll(current => Dominates(next, current));
-            _labels.Add(next);
-            return true;
-        }
-
-        private static bool Dominates(TranspositionLabel left, TranspositionLabel right)
-            => left.PotionCount <= right.PotionCount
-                && left.PotionStrategicCost <= right.PotionStrategicCost
-                && left.FutureSoldHp <= right.FutureSoldHp
-                && left.CumulativePlayerHpLost <= right.CumulativePlayerHpLost
-                && left.ActionCount <= right.ActionCount
-                && left.Score >= right.Score;
-    }
-
     private readonly record struct StandPatEvaluation(
         bool AllEnemiesDead,
         int DelayedDamage,
         int ProjectedPlayerHp,
         int ResourceValue);
+
+    internal readonly record struct CanonicalCycleFamilyKey(
+        int Turn,
+        int PrimitivePeriodActions,
+        StateFingerprint SequenceKey);
+
+    // A region deliberately excludes the exact action sequence. Exact sequence identity is
+    // still used by CycleFamilyLedger for delayed-benefit leases, while this coarser key caps
+    // permutations that revisit the same semantic recurrence in one turn.
+    internal readonly record struct CycleRegionKey(
+        int Turn,
+        StateFingerprint ShapeKey);
+
+    private sealed class CycleFamilyLedgerEntry
+    {
+        public HashSet<int> AdmittedActionCounts { get; } = [];
+        // Family keys intentionally omit mutable exact state, so the first sibling admitted at
+        // one depth is not necessarily the sibling which proves progress. Track that evidence
+        // independently while still bounding it by the admitted action-depth set.
+        public HashSet<int>? ImprovementEvidenceActionCounts;
+        public int ProbeStarts;
+        public int ProbeExpandedNodes;
+        public byte EarnedImprovementEpoch;
+        public byte ActiveImprovementEpoch;
+        public byte RequestedImprovementEpoch;
+    }
+
+    private sealed class CycleRegionLedgerEntry
+    {
+        public int AdmittedNodes;
+        public int ProbeAdmittedNodes;
+        public int ProgressAdmittedNodes;
+        // Identity only: an inactive region must not keep an obsolete route's parent chain
+        // alive. Treat each handle as immutable; provisional ledgers may share it, but an
+        // updated witness always receives a new handle rather than calling SetTarget.
+        public WeakReference<SearchNode>? ProgressContinuationNode;
+        public int ProgressActionsRemaining;
+        public int DroppedNodes;
+        public int ProgressEpochs;
+        public bool HasObservation;
+        public EnemyDurabilityVector EnemyDurabilityFloor;
+        public long BestHealthRisk;
+        public int BestProjectedPlayerHp;
+        public int BestUsefulBlock;
+        public long BestSetupValue;
+    }
 
     private readonly record struct ThreatFocus(
         uint? CombatId,
@@ -82,13 +90,83 @@ internal sealed partial class CombatBeamSolver
         bool measurePhasePerformance,
         SearchFramePressureSignal framePressureSignal)
     {
+        public NoveltySearchRun? Novelty;
+        public Guid PathDiagnosticsSolverId;
+        public int PathDiagnosticsBoundaryId;
+        public long RoutingChoiceSummaryBuilds;
+        public long RoutingChoiceSummaryHits;
+        public long RoutingChoiceSummaryBypasses;
+        public long PowerValuationCandidates;
+        public long PowerFrontierEvaluations;
+        public int PowerCommitmentsCreated;
+        public int PowerCommitmentsAdmitted;
+        public int PowerCommitmentsExpired;
+        public int PowerCommitmentsRealized;
+        public int PowerCommitmentSeatsPeak;
         public readonly SearchPerformanceMetrics Performance = new(measurePhasePerformance);
         public readonly SearchWorkPacer WorkPacer = new(framePressureSignal);
+        public readonly OwnedExpansionBatch<SimulationSnapshot, RawCardCandidate, SearchNode>.Pool
+            ExpansionBatchPool = new(static snapshot => snapshot.ReleaseSimulator());
+        public readonly SnapshotListBuffer<PredictedCard> SnapshotLiveCards = new();
+        public ParallelExpansionExecutor? ActiveParallelExpansion;
         public Dictionary<StateFingerprint, TranspositionFrontier> Transpositions = [];
         public Dictionary<StateFingerprint, TranspositionFrontier> ExpandedTranspositions = [];
+        /// <summary>诊断计数：因为合并条目上限而没有写入的新转置状态数。</summary>
+        public int TranspositionLimitBypasses;
+        public readonly TranspositionCapDiagnostics TranspositionDiagnostics = new();
         public Dictionary<StateFingerprint, StandPatEvaluation> StandPatCache = [];
-        public Dictionary<(StateFingerprint State, int RoundIndex), int> ThreatProjectionCache = [];
+        // Only the coordinator owns a prune checkpoint; probe lanes never receive it.
+        public Action<long>? EnsurePruneMemory;
+        public Action<string>? CheckpointPruneMetadata;
+        public long StandPatProbeAllocatedHighWater;
+        public long StandPatBatchAllocatedBytes;
+
+        public readonly PotionStrategicCostLookup PotionStrategicCosts = new();
+        public Dictionary<(StateFingerprint State, int RoundIndex), ThreatProjection> ThreatProjectionCache = [];
         public Dictionary<PredictionRiskSignature, CoverageSummary> CoverageCache = [];
+        // This ledger is search semantics rather than a rebuildable cache. In particular, a
+        // memory-pressure checkpoint must not let an already sampled cycle family buy fresh
+        // work merely because the transposition tables were rebuilt.
+        public readonly Dictionary<CanonicalCycleFamilyKey, CycleFamilyLedgerEntry>
+            CycleFamilyLedger = [];
+        public readonly HashSet<CycleExitProbeTicketKey> ExpandedCycleProbeTickets = [];
+        public readonly Dictionary<CycleRegionKey, CycleRegionLedgerEntry>
+            CycleRegionLedger = [];
+        // Region run budgets are partitioned by combat turn. A combinatorial cycle in one
+        // turn cannot spend the admission reserve needed to inspect a later turn, while all
+        // recurrent shapes within the same turn still share one deterministic hard cap.
+        public readonly Dictionary<int, int> CycleRegionAdmissionsByTurn = [];
+        public readonly Dictionary<int, int> CycleRegionProbeAdmissionsByTurn = [];
+        public readonly Dictionary<int, int> CycleRegionMaxProgressEpochsByTurn = [];
+        // Cycle-family work is budgeted independently for each combat turn. A large same-turn
+        // recurrence cannot consume the reserve required to inspect a later turn, while the
+        // dictionaries remain bounded by the number of turns that actually earned work.
+        public readonly Dictionary<int, int> CycleFamilyDepthsConsumedByTurn = [];
+        public readonly Dictionary<int, int> CycleProbeExpandedNodesConsumedByTurn = [];
+        // Scheduling semantics, not rebuildable caches. Every derived lane is charged to the
+        // collision root's hard budget; the narrower ledgers only order roots, original lanes,
+        // and current derived lanes fairly after checkpoint rebuilds.
+        public readonly Dictionary<StateFingerprint, int>
+            OrderedMutationAdmissionsByRootLease = [];
+        public readonly Dictionary<StateFingerprint, int>
+            OrderedMutationAdmissionsByInitialLease = [];
+        public readonly Dictionary<StateFingerprint, int> OrderedMutationAdmissionsByLease = [];
+        public readonly Dictionary<OrderedMutationHandoffSourceLedgerKey, int>
+            OrderedMutationHandoffAdmissionsByInitialAndSource = [];
+        public readonly Dictionary<SearchNode, OrderedMutationHandoffSourceLedgerKey>
+            PendingOrderedMutationHandoffSourceByNode = new(
+                ReferenceEqualityComparer.Instance);
+        // Naturally ranked inherited leases still pay the ordered admission ledger. If that
+        // payment cannot commit, only the scheduling lease expires; the ordinary route remains
+        // eligible for the normal cycle-region coordinator.
+        public readonly HashSet<SearchNode> PendingOrderedMutationOrdinaryFallbackNodes = new(
+            ReferenceEqualityComparer.Instance);
+        public int CycleRegionPortfolioNodesConsumed;
+        public int OrderedMutationPortfolioNodesConsumed;
+        public int OrderedMutationLeaseExpiredBudget;
+        public int OrderedMutationOrdinaryFallbacks;
+        public int OrderedMutationColdAtomicCommitted;
+        public int OrderedMutationColdAtomicRejected;
         public int Expanded;
         public int DominatedActionsPruned;
         public int TopQueueActionsDropped;
@@ -97,11 +175,29 @@ internal sealed partial class CombatBeamSolver
         public int ChoiceBranchesEvaluated;
         public int ChoiceReplayAttempts;
         public int ChoiceReplayBudgetExhaustions;
+        public int ChoiceBranchesDroppedByBudget;
         public int ShuffleBranchesPruned = 0;
         public int SoldHpBranchesPruned;
         public int HpInvestmentBranchesProtected;
         public int ReplayCount;
         public int ForkCount;
+        public int RoundReplayPrefixCaptures;
+        public int RoundReplayPrefixReuses;
+        public int ExecutionChoiceCaptures;
+        public int ExecutionChoiceReuses;
+        public int CardChoicePrefixAttempts;
+        public int CardChoicePrefixCaptures;
+        public int CardChoicePrefixReuses;
+        public int CardChoicePrefixFallbacks;
+        public int PotionChoicePrefixForks;
+        public int PotionChoicePrefixCaptures;
+        public int PotionChoicePrefixReuses;
+        public int PotionChoicePrefixFallbacks;
+        // Lane-local scheduling hint, never combat state or candidate policy. Learn only
+        // after an initial EndTurn probe reached the stable post-draw boundary and
+        // produced a choice layer.
+        public bool HasObservedPostDrawRoundChoice;
+        public HashSet<string>? ObservedHandDrawShuffleChoiceSources;
         public int TransitionCount;
         public int ReusedNodeSnapshots;
         public int TranspositionBranchesPruned;
@@ -109,10 +205,31 @@ internal sealed partial class CombatBeamSolver
         public int CycleShapesDetected;
         public int CycleProbeContinuationsExpanded;
         public int CycleCandidatesProtected;
+        public readonly HashSet<CycleRegionKey> CycleReplayRegions = [];
+        public int CycleReplayAttempts;
+        public int CycleReplayActions;
+        public int CycleReplayVictories;
+        public int CycleReplayContinuations;
         public int CycleContinuationsStopped;
+        public int CycleStoppedUnproductive;
+        public int CycleStoppedRepetitionBudget;
+        public int CycleStoppedFamilyBudget;
+        public int CycleStoppedExitBudget;
+        public int TurnLayerBudgetStops;
+        public int TurnLayerTimeBudgetStops;
+        public int TurnLayerNodeBudgetStops;
+        public int CycleRegionsDetected;
+        public int CycleRegionCandidatesConsidered;
+        public int CycleRegionCandidatesAdmitted;
+        public int CycleRegionCandidatesDropped;
+        public int CycleRegionProgressEpochs;
+        public int CycleRegionProbeCandidatesAdmitted;
+        public int CycleRegionProgressCandidatesAdmitted;
+        public int CycleRegionMaxActionFamilies;
         public int CrossTurnCandidatesProtected;
         public int CrossTurnContinuationsStopped;
         public int PrimaryIncumbentBranchesPruned;
+        public int PrimaryIncumbentCertifiedHealingBoundBranchesPruned;
         public int PrimaryIncumbentUpdates;
         public int StandPatProbes;
         public long OffThreadAllocatedBytes;
@@ -128,9 +245,10 @@ internal sealed partial class CombatBeamSolver
         public int DeferredRoundChoiceFiniteQuotaFallbacks;
         public int DeferredRoundChoiceFinitePrimaryLayers;
         public int DeferredRoundChoiceFinitePendingFallbacks;
-        public int ParallelRoundChoiceReplayWaves;
-        public int ParallelRoundChoiceReplayWorkItems;
-        public int MaxParallelRoundChoiceReplayConcurrency;
+        // Choice preparation/replay/continuation jobs on the same fixed expansion lanes.
+        public int ParallelRoundChoiceReplayWaves = 0;
+        public int ParallelRoundChoiceReplayWorkItems = 0;
+        public int MaxParallelRoundChoiceReplayConcurrency = 0;
         public int NodeLimitSnapshotsReleased;
         public int InitialPersistentBuffValue;
         public int InitialEnemyStrengthSuppression;
@@ -139,6 +257,8 @@ internal sealed partial class CombatBeamSolver
 
         public void ResetRebuildableCaches(IReadOnlyList<SearchNode> frontier)
         {
+            ExpansionBatchPool.Clear();
+            SnapshotLiveCards.Clear();
             Transpositions = [];
             foreach (SearchNode node in frontier)
             {
@@ -159,7 +279,12 @@ internal sealed partial class CombatBeamSolver
 
         public void ResetReclaimableCaches()
         {
-            StandPatCache = [];
+            ExpansionBatchPool.Clear();
+            SnapshotLiveCards.Clear();
+            // A running prune may have skipped cached representatives when preparing its
+            // pending probes. Keep these scalar answers through its drained checkpoints.
+            if (EnsurePruneMemory == null)
+                StandPatCache = [];
             ThreatProjectionCache = [];
             CoverageCache = [];
         }
@@ -203,6 +328,7 @@ internal sealed partial class CombatBeamSolver
 
     private sealed record RouteAnnotations(
         IReadOnlyDictionary<int, int> HpLostByTurn,
+        IReadOnlyDictionary<int, int> HpRecoveredByTurn,
         IReadOnlyDictionary<int, int> EnemyHpLostByTurn,
         IReadOnlyDictionary<int, int> SoldHpByTurn,
         IReadOnlyDictionary<int, int> MaxBlockByTurn,
@@ -220,6 +346,8 @@ internal sealed partial class CombatBeamSolver
         int PlayerHp,
         int PlayerMaxHp,
         int CumulativePlayerHpLost,
+        int RecoveredPlayerHp,
+        int DeathSaveHpRestored,
         int LongTermResourceValue,
         int AngerCopiesGenerated,
         int PlayerBlock,
@@ -259,6 +387,8 @@ internal sealed partial class CombatBeamSolver
                 snapshot.PlayerHp,
                 snapshot.PlayerMaxHp,
                 snapshot.CumulativePlayerHpLost,
+                snapshot.RecoveredPlayerHp,
+                snapshot.DeathSaveHpRestored,
                 snapshot.LongTermResourceValue,
                 snapshot.AngerCopiesGenerated,
                 snapshot.PlayerBlock,

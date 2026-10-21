@@ -22,14 +22,18 @@ internal static partial class CardOnPlaySupport
         CardModel card = playedCard.Preview;
         Creature owner = card.Owner.Creature;
         CardPowerOnPlaySupport.Apply(combat, card);
+        if (simulator.HasPendingChoice)
+            return;
         CardPileOnPlaySupport.Apply(simulator, playedCard);
+        if (simulator.HasPendingChoice)
+            return;
         switch (card)
         {
             case Alignment:
-                simulator.State.GetPlayerCombatState(card.Owner).GainEnergy(card.DynamicVars.Energy.IntValue);
+                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
                 break;
             case BorrowedTime:
-                simulator.State.GetPlayerCombatState(card.Owner).GainEnergy(card.DynamicVars.Energy.IntValue);
+                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
                 combat.Apply<BorrowedTimePower>(owner, card.DynamicVars["ExtraCost"].IntValue, owner);
                 break;
             case BubbleBubble when target != null && combat.GetAmount<PoisonPower>(target) > 0:
@@ -51,7 +55,9 @@ internal static partial class CardOnPlaySupport
                     owner,
                     playedCard,
                     null);
-                simulator.State.GetPlayerCombatState(card.Owner).GainEnergy(card.DynamicVars.Energy.IntValue);
+                if (simulator.HasPendingChoice)
+                    return;
+                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
                 break;
             case Conqueror when target != null:
                 PersistentPowerSupport.Forge(simulator, card.Owner, card.DynamicVars.Forge.IntValue);
@@ -83,7 +89,7 @@ internal static partial class CardOnPlaySupport
             case DoubleEnergy:
             {
                 SimPlayerCombatState playerState = simulator.State.GetPlayerCombatState(card.Owner);
-                playerState.GainEnergy(playerState.Energy);
+                simulator.GainEnergy(card.Owner, playerState.Energy);
                 break;
             }
             case EnfeeblingTouch when target != null:
@@ -105,7 +111,7 @@ internal static partial class CardOnPlaySupport
                 combat.InitializeFeralAfterApplied(simulator, owner);
                 break;
             case ForgottenRitual or Fuel or Luminesce:
-                simulator.State.GetPlayerCombatState(card.Owner).GainEnergy(card.DynamicVars.Energy.IntValue);
+                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
                 break;
             case Haze:
                 foreach (Creature enemy in combat.HittableEnemies)
@@ -114,7 +120,8 @@ internal static partial class CardOnPlaySupport
                     combat.Apply<WeakPower>(enemy, card.DynamicVars.Weak.IntValue, owner);
                 break;
             case HiddenCache:
-                simulator.GainStars(card.Owner, card.DynamicVars.Stars.IntValue);
+                if (!simulator.GainStars(card.Owner, card.DynamicVars.Stars.IntValue))
+                    return;
                 combat.Apply<StarNextTurnPower>(
                     owner,
                     card.DynamicVars["StarNextTurnPower"].IntValue,
@@ -141,7 +148,7 @@ internal static partial class CardOnPlaySupport
                 combat.Apply<OblivionPower>(target, card.DynamicVars.Doom.IntValue, owner);
                 break;
             case Production:
-                simulator.State.GetPlayerCombatState(card.Owner).GainEnergy(card.DynamicVars.Energy.IntValue);
+                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
                 break;
             case Prolong:
                 combat.Apply<BlockNextTurnPower>(owner, simulator.State.GetCreature(owner).Block, owner);
@@ -154,6 +161,8 @@ internal static partial class CardOnPlaySupport
                 break;
             case ShadowStep:
                 simulator.Discard(simulator.State.GetPlayerCombatState(card.Owner).Hand.Cards.ToArray());
+                if (simulator.HasPendingChoice)
+                    return;
                 combat.Apply<ShadowStepPower>(owner, 1, owner);
                 break;
             case Snakebite when target != null:
@@ -163,7 +172,7 @@ internal static partial class CardOnPlaySupport
                 PersistentPowerSupport.Forge(simulator, card.Owner, card.DynamicVars.Forge.IntValue);
                 break;
             case Supercritical or Tactician or Wisp:
-                simulator.State.GetPlayerCombatState(card.Owner).GainEnergy(card.DynamicVars.Energy.IntValue);
+                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
                 break;
             case Synchronize:
             {
@@ -181,9 +190,9 @@ internal static partial class CardOnPlaySupport
                 break;
             case Turbo:
             {
-                simulator.State.GetPlayerCombatState(card.Owner).GainEnergy(card.DynamicVars.Energy.IntValue);
+                simulator.GainEnergy(card.Owner, card.DynamicVars.Energy.IntValue);
                 PredictedCard generated = PredictedCard.Create(
-                    ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.Void>(),
+                    CanonicalModels.Card<MegaCrit.Sts2.Core.Models.Cards.Void>(),
                     card.Owner);
                 simulator.AddGeneratedCardToCombat(
                     generated,
@@ -197,8 +206,11 @@ internal static partial class CardOnPlaySupport
                 simulator.GainStars(card.Owner, card.DynamicVars.Stars.IntValue);
                 break;
         }
+        if (simulator.HasPendingChoice)
+            return;
         ApplyBatch042(simulator, combat, playedCard, cardPlay, target, processedEnemyDeaths);
+        if (simulator.HasPendingChoice)
+            return;
         ApplyBatch043(simulator, combat, playedCard, target, processedEnemyDeaths);
-        ApplyBatch044(simulator, combat, playedCard, target, processedEnemyDeaths);
     }
 }

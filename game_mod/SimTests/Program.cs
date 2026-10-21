@@ -1229,6 +1229,94 @@ internal static class SimTests
         Check(s.Enemies[0].Hp == 5, $"Devastate dealt 35 (40 -> 5), got {s.Enemies[0].Hp}");
     }
 
+    /// <summary>
+    /// ★ t42 **文档回归门**：`SimCoverage.cs` 不得再声称「X 费卡被完全排除出搜索」。
+    ///
+    /// 那句注释原本写在 `SimCoverage.cs` 的头部：
+    ///     "an X-cost card is excluded from the search entirely, so calling it 'ignored' is
+    ///      the honest label regardless of anything else known about it"
+    /// —— 它是**事实错误**：两条引擎路径都**照常搜索并打出 X 费卡**，只是能量成本按
+    /// 「当前全部能量」估算（`CombatBeamSolver.StateEvaluation.CalculateReachableHandPotential`
+    /// 用 `Math.Max(0, playerState.Energy)`；`CombatPredictionSimulator.Card` 真的写
+    /// `CapturedXValue`；Sim 路径 `SimResolver` 用 `state.ActiveEnergy` 并捕获 `x`）。
+    ///
+    /// 后果是实打实的：队长据此把 X 费卡判为「不参与搜索」，进而**错误地建议关掉上游自动计算**，
+    /// 后来靠实测才撤回。这属 DEFECT-D5 同族（注释与实现漂移 ⇒ 直接导致错误结论）。
+    ///
+    /// ★ 诚实标注：这是**源码级文档门**，不是行为门 —— 它防的是"错误论断回潮"，
+    ///   行为正确性由 `TestT41FixedStarCostIsNotIgnored` / `TestCoverageXCostCardIsIgnored` 负责。
+    /// </summary>
+    private static void TestT42XCostIsAReportClassNotASearchExclusion()
+    {
+        Console.WriteLine("[T42 docs: `ignored` is a coverage report class, NOT 'excluded from the search']");
+        var path = SimCoverageSourcePath();
+        Check(File.Exists(path), $"SimCoverage.cs is reachable for the doc gate ({path})");
+        var text = File.ReadAllText(path);
+
+        // 那句话在**更正段落里**是允许出现的（它是被引用来说明"原文错在哪"的历史留痕）。
+        // 门要防的是它回到**正文论断**位置 ⇒ 只检查更正标记【之前】的部分。
+        const string marker = "★★ 更正（2026-10-21，t42）";
+        var markerAt = text.IndexOf(marker, StringComparison.Ordinal);
+        Check(markerAt > 0, "the t42 correction block exists (so the history stays auditable)");
+
+        var beforeCorrection = markerAt > 0 ? text[..markerAt] : text;
+        Check(!beforeCorrection.Contains("excluded from the search entirely"),
+            "the wrong claim is gone from the body (it may only survive as a quoted history inside the correction block)");
+        Check(text.Contains("不等于该卡不参与搜索"),
+            "the corrected statement is present (ignored != 'not searched')");
+    }
+
+    /// <summary>
+    /// 用 `[CallerFilePath]` 取到本文件的**编译期路径**，再回推 `SimCoverage.cs`。
+    /// 这样不必在运行时猜相对路径（`SimTests` 是通过 `&lt;Compile Include&gt;` 链接源码的，
+    /// 二进制目录下并没有那份 .cs）。
+    /// </summary>
+    private static string SimCoverageSourcePath(
+        [System.Runtime.CompilerServices.CallerFilePath] string callerPath = "")
+    {
+        var here = Path.GetDirectoryName(callerPath) ?? ".";
+        return Path.GetFullPath(Path.Combine(here, "..", "nekospire", "Game", "Sim", "SimCoverage.cs"));
+    }
+
+    /// <summary>
+    /// ★ t42 **行为门**：X 费卡**确实参与可打出集合**，并且打它会把**当前全部能量**花掉。
+    ///
+    /// 这是对上面那条文档门的**行为侧配对**：文档说「`ignored` ≠ 不参与搜索」，
+    /// 这条就用 `SimResolver` 证明 X 费卡真的可打出、真的被结算。
+    ///
+    /// 代码事实（`Game/Sim/SimResolver.cs`）：
+    ///   `IsPlayable`：`var cost = card.CostsX ? state.ActiveEnergy : card.Cost;`
+    ///                 ⇒ X 费卡的费用就是"当前全部能量"，必然可负担；
+    ///   `PlayCard`  ：同样的 cost 计算 ⇒ `SimCommand.LoseEnergy(state, cost)` 把能量清零；
+    ///                 若该卡有脚本，`var x = card.CostsX ? cost : -1;` 传给 `SimOnPlay.Execute`。
+    ///
+    /// ★ 诚实边界：本条断言覆盖「参与可打出集合 + 结算掉全部能量」；
+    ///   **x 值本身的捕获**发生在脚本路径（`SimResolver.cs:75` → `SimOnPlay.Execute(..., x)`），
+    ///   由既有的 script/onplay 测试负责，本条不重复断言（构造带 x 的脚本会引入无关复杂度）。
+    /// </summary>
+    private static void TestT42XCostCardIsPlayableAndSpendsAllEnergy()
+    {
+        Console.WriteLine("[T42 behaviour: an X-cost card IS playable and spends the full current energy]");
+        var s = new SimState { MaxEnergy = 3, ActiveEnergy = 3 };
+        s.Players.Add(new SimCombatant(60, 80));
+        s.Enemies.Add(new SimCombatant(40, 40));
+        var xCard = new SimCard
+        {
+            Id = "WHIRLWIND", Name = "Whirlwind", CardType = "Attack",
+            CostsX = true, Target = SimTargetKind.AnyEnemy, Damage = 5,
+        };
+        s.Hand.Add(xCard);
+
+        Check(SimResolver.IsPlayable(s, xCard),
+            "X-cost card is in the playable set (it is NOT excluded from the search)");
+        Check(SimResolver.IsPlayable(s, xCard) && s.ActiveEnergy == 3,
+            "playability check itself does not spend energy (still 3)");
+
+        SimResolver.PlayCard(s, 0, 0);
+        Check(s.ActiveEnergy == 0, $"X cost spends ALL current energy (3 -> 0), got {s.ActiveEnergy}");
+        Check(s.Enemies[0].Hp == 35, $"the card still resolved its effect (40 -> 35), got {s.Enemies[0].Hp}");
+    }
+
     // (3) Monster move table necessity. An enemy with an EMPTY move table is silently harmless:
     //     SimEnemy.RollMove returns the synthetic "idle" move and nothing happens. That is exactly why a
     //     missing movement transcription under-models a fight without any error — hence the t41 audit of the
@@ -1305,6 +1393,8 @@ internal static class SimTests
         TestT41SummonPlacesExactlyOneCard();
         TestT41FixedStarCostIsNotIgnored();
         TestT41EmptyMoveTableIsSilent();
+        TestT42XCostIsAReportClassNotASearchExclusion();
+        TestT42XCostCardIsPlayableAndSpendsAllEnergy();
 
         Console.WriteLine();
         Console.WriteLine(_failures == 0 ? "ALL PASS" : $"{_failures} FAILURE(S)");

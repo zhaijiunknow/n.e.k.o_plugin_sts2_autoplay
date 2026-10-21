@@ -58,9 +58,7 @@ internal static class AfterDamageReceivedMirrors
     {
         var registry = new Registry(AfterDamageReceived);
 
-        // Combat predictions are scoped to outcomes that can still affect the current player turn.
-        // Models that only mutate later-turn or room-end state are ignored here.
-        registry.RegisterIgnored<AsleepPower>();
+        registry.Register<AsleepPower>(HandleAsleepPower);
         registry.Register<BeatingRemnant>(HandleBeatingRemnant);
         registry.Register<CentennialPuzzle>(HandleCentennialPuzzle);
         registry.Register<CurlUpPower>(HandleCurlUpPower);
@@ -79,10 +77,39 @@ internal static class AfterDamageReceivedMirrors
         registry.Register<SelfFormingClay>(HandleSelfFormingClay);
         registry.Register<ShriekPower>(HandleShriekPower);
         registry.Register<SlipperyPower>(HandleSlipperyPower);
-        registry.RegisterIgnored<SlumberPower>();
+        registry.Register<SlumberPower>(HandleSlumberPower);
         registry.Register<TheGambitPower>(HandleTheGambitPower);
 
         return registry;
+    }
+
+    private static void HandleAsleepPower(AsleepPower power, AfterDamageReceivedMirrorContext context)
+    {
+        if (context.Target == power.Owner && context.Result.UnblockedDamage != 0)
+        {
+            ICombatPredictionEffectSink effects = Effects(context);
+            if (context.CombatState is not ICombatPredictionHookListenerSource listeners
+                || context.CombatState is not ICombatPredictionMonsterStateSink monsterState)
+                throw new InvalidOperationException("Asleep requires branch power and monster state.");
+            foreach (PlatingPower plating in listeners.HookListeners.OfType<PlatingPower>()
+                         .Where(current => current.Owner == power.Owner).ToArray())
+                effects.SetPowerAmount(plating, 0);
+            monsterState.SetMonsterBool(power.Owner, "_isAwake", true);
+            effects.ForceStunnedMove(power.Owner, "SLASH_MOVE");
+            effects.SetPowerAmount(power, 0);
+        }
+    }
+
+    private static void HandleSlumberPower(SlumberPower power, AfterDamageReceivedMirrorContext context)
+    {
+        if (context.Target == power.Owner && context.Result.UnblockedDamage != 0)
+        {
+            ICombatPredictionEffectSink effects = Effects(context);
+            int remaining = power.Amount - 1;
+            effects.SetPowerAmount(power, remaining);
+            if (remaining <= 0)
+                effects.ForceStunnedMove(power.Owner, "ROLL_OUT_MOVE");
+        }
     }
 
     private static void HandleBeatingRemnant(BeatingRemnant relic, AfterDamageReceivedMirrorContext context)
@@ -281,7 +308,8 @@ internal static class AfterDamageReceivedMirrors
             }
             else
             {
-                Effects(context).ApplyPower(typeof(StrengthPower), power.Owner, power.Amount, power.Owner);
+                // 原版 RupturePower.AfterDamageReceived 传 cardSource: null。
+                Effects(context).ApplyPowerFromSource(typeof(StrengthPower), power.Owner, power.Amount, power.Owner, cardSource: null);
             }
         }
     }
@@ -290,11 +318,13 @@ internal static class AfterDamageReceivedMirrors
     {
         if (context.Target == relic.Owner.Creature && context.Result.UnblockedDamage > 0)
         {
-            Effects(context).ApplyPower(
+            // 原版 SelfFormingClay 走遗物来源，cardSource 是 null。
+            Effects(context).ApplyPowerFromSource(
                 typeof(SelfFormingClayPower),
                 relic.Owner.Creature,
                 relic.DynamicVars["BlockNextTurn"].IntValue,
-                relic.Owner.Creature);
+                relic.Owner.Creature,
+                cardSource: null);
         }
     }
 
@@ -344,14 +374,14 @@ internal sealed class CentennialPuzzlePredictionState(CentennialPuzzle relic) : 
 
 internal sealed class DemonTonguePredictionState(DemonTongue relic) : IPredictionStateForkable
 {
-    public bool TriggeredThisTurn { get; set; } = GameRef.Get<bool>(relic, "_triggeredThisTurn");
+    public bool TriggeredThisTurn { get; set; } = T44PrivateAccess.DemonTongue_TriggeredThisTurn(relic);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }
 
 internal sealed class BeatingRemnantPredictionState(BeatingRemnant relic) : IPredictionStateForkable
 {
-    public decimal DamageReceivedThisTurn { get; set; } = GameRef.Get<int>(relic, "_damageReceivedThisTurn");
+    public decimal DamageReceivedThisTurn { get; set; } = T44PrivateAccess.BeatingRemnant_DamageReceivedThisTurn(relic);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }
@@ -359,7 +389,7 @@ internal sealed class BeatingRemnantPredictionState(BeatingRemnant relic) : IPre
 internal sealed class HardenedShellPredictionState(HardenedShellPower power) : IPredictionStateForkable
 {
     public decimal DamageReceivedThisTurn { get; set; } =
-        (decimal)((decimal)(GameRef.Get(GameRef.InvokeGeneric(power, "GetInternalData", "Data"), "damageReceivedThisTurn")));
+        T44PrivateAccess.Read<System.Decimal>(T44PrivateAccess.InternalData(power), "damageReceivedThisTurn");
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

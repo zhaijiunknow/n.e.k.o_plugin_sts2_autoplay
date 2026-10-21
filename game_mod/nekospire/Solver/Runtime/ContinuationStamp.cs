@@ -1,4 +1,5 @@
 using System.Text;
+using STS2RitsuLib;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
@@ -7,7 +8,6 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Models.Powers;
-using MegaCrit.Sts2.Core.Models.Orbs;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Mirrors.Orbs;
@@ -49,7 +49,7 @@ internal sealed record ContinuationStamp(string StateText)
             }
             else
             {
-                differences.Add(DescribeValueDifference(expectedName, expectedValue, actualValue));
+                differences.AddRange(DescribeValueDifference(expectedName, expectedValue, actualValue));
             }
             if (differences.Count >= maximumDifferences)
                 return differences;
@@ -96,6 +96,11 @@ internal sealed record ContinuationStamp(string StateText)
         AppendPotions(text, player, player.GetPotionAtSlotIndex);
         SimulatedCombatState.AppendLiveStatefulRelics(text, player);
         RelicPredictionStateSupport.AppendLiveContinuation(text, player);
+        ModelPredictionStateMirrors.AppendLiveContinuation(text, state);
+        if (AdaptedCardOnPlayMirrors.CaptureLiveStamp() is { } onPlayStamp)
+            text.Append(";onplay_configuration=").Append(onPlayStamp);
+        if (PredictionModHookSubscriberCapture.CaptureLiveLoadoutSummonPowerState(state) is { } loadoutSummonState)
+            text.Append(";loadout_summon_powers=").Append(loadoutSummonState);
         AppendPowers(text, state.Creatures.SelectMany(creature => creature.Powers));
         AppendRng(text,
             state.RunState.Rng.Shuffle.CaptureState(),
@@ -107,6 +112,7 @@ internal sealed record ContinuationStamp(string StateText)
             state.RunState.Rng.CombatOrbGeneration.CaptureState(),
             state.RunState.Rng.MonsterAi.CaptureState(),
             state.RunState.Rng.Niche.CaptureState());
+        text.Append(";max_hand_size=").Append(RitsuLibFramework.GetMaxHandSize(player));
         return new ContinuationStamp(text.ToString());
     }
 
@@ -155,17 +161,24 @@ internal sealed record ContinuationStamp(string StateText)
             text,
             simulator,
             combat.RelicsOf(player));
-        AppendPowers(text, combat.EffectivePowers());
+        StateFingerprintBuilder adapterFingerprint = new();
+        ModelPredictionStateMirrors.AppendPredicted(ref adapterFingerprint, text, simulator, combat);
+        if (combat.AdaptedOnPlay is { } adaptedOnPlay)
+            text.Append(";onplay_configuration=").Append(adaptedOnPlay.Stamp);
+        if (combat.HasInactiveLoadoutSummonPowers)
+            text.Append(";loadout_summon_powers=empty");
+        AppendPowers(text, combat.EffectivePowers(), simulator);
         AppendRng(text,
-            simulator.Rng.Shuffle.CaptureState(),
-            simulator.Rng.CombatCardGeneration.CaptureState(),
-            simulator.Rng.CombatPotionGeneration.CaptureState(),
-            simulator.Rng.CombatCardSelection.CaptureState(),
-            simulator.Rng.CombatEnergyCosts.CaptureState(),
-            simulator.Rng.CombatTargets.CaptureState(),
-            simulator.Rng.CombatOrbGeneration.CaptureState(),
-            simulator.Rng.MonsterAi.CaptureState(),
-            simulator.Rng.Niche.CaptureState());
+            simulator.Rng.ShuffleState,
+            simulator.Rng.CombatCardGenerationState,
+            simulator.Rng.CombatPotionGenerationState,
+            simulator.Rng.CombatCardSelectionState,
+            simulator.Rng.CombatEnergyCostsState,
+            simulator.Rng.CombatTargetsState,
+            simulator.Rng.CombatOrbGenerationState,
+            simulator.Rng.MonsterAiState,
+            simulator.Rng.NicheState);
+        text.Append(";max_hand_size=").Append(simulator.GetMaxHandSize(player));
         return new ContinuationStamp(text.ToString());
     }
 
@@ -183,7 +196,15 @@ internal sealed record ContinuationStamp(string StateText)
             : (field[..separator], field[(separator + 1)..]);
     }
 
-    private static string DescribeValueDifference(string name, string expected, string actual)
+    /// <summary>
+    /// 单个状态字段的差异描述。牌堆 / Power 字段可能同时有多处不同，必须逐处报出：
+    /// 同名牌在文本里只靠 <c>DeckVersion != null</c> 一位区分，只报第一个不同下标会把
+    /// 「预测侧丢了牌组身份」和「预测侧把身份记在另一个同名牌上」压成同一条现场证据，
+    /// 使现场包无法裁决。超出上限时显式写出剩余数量，不做静默截断。
+    /// </summary>
+    private const int MaximumItemDifferencesPerField = 8;
+
+    private static IReadOnlyList<string> DescribeValueDifference(string name, string expected, string actual)
     {
         string[]? partNames = name switch
         {
@@ -206,7 +227,7 @@ internal sealed record ContinuationStamp(string StateText)
                 if (string.Equals(expectedPart, actualPart, StringComparison.Ordinal))
                     continue;
                 string partName = index < partNames.Length ? partNames[index] : $"part_{index}";
-                return $"field={name}.{partName} expected={LogValue(expectedPart)} actual={LogValue(actualPart)}";
+                return [$"field={name}.{partName} expected={LogValue(expectedPart)} actual={LogValue(actualPart)}"];
             }
         }
 
@@ -215,18 +236,29 @@ internal sealed record ContinuationStamp(string StateText)
             IReadOnlyList<string> expectedItems = SplitTopLevelItems(expected);
             IReadOnlyList<string> actualItems = SplitTopLevelItems(actual);
             int count = Math.Max(expectedItems.Count, actualItems.Count);
+            List<string> itemDifferences = [];
+            int differingItems = 0;
             for (int index = 0; index < count; index++)
             {
                 string expectedItem = index < expectedItems.Count ? expectedItems[index] : "<missing>";
                 string actualItem = index < actualItems.Count ? actualItems[index] : "<missing>";
                 if (string.Equals(expectedItem, actualItem, StringComparison.Ordinal))
                     continue;
-                return $"field={name}[{index}] expected={LogValue(expectedItem)} actual={LogValue(actualItem)} " +
-                       $"expected_count={expectedItems.Count} actual_count={actualItems.Count}";
+                differingItems++;
+                if (itemDifferences.Count >= MaximumItemDifferencesPerField)
+                    continue;
+                itemDifferences.Add($"field={name}[{index}] expected={LogValue(expectedItem)} actual={LogValue(actualItem)} " +
+                                    $"expected_count={expectedItems.Count} actual_count={actualItems.Count}");
             }
+            if (itemDifferences.Count == 0)
+                return [$"field={name} expected={LogValue(expected)} actual={LogValue(actual)}"];
+            if (differingItems > itemDifferences.Count)
+                itemDifferences.Add($"field={name} additional_differences={differingItems - itemDifferences.Count} " +
+                                    $"expected_count={expectedItems.Count} actual_count={actualItems.Count}");
+            return itemDifferences;
         }
 
-        return $"field={name} expected={LogValue(expected)} actual={LogValue(actual)}";
+        return [$"field={name} expected={LogValue(expected)} actual={LogValue(actual)}"];
     }
 
     private static IReadOnlyList<string> SplitTopLevelItems(string value)
@@ -348,19 +380,19 @@ internal sealed record ContinuationStamp(string StateText)
         switch (card)
         {
             case Claw claw:
-                text.Append(GameRef.Get<int>(claw, "ExtraDamageFromClawPlays"));
+                text.Append(T44PrivateAccess.Claw_ExtraDamageFromClawPlays(claw));
                 break;
             case GeneticAlgorithm geneticAlgorithm:
                 text.Append(geneticAlgorithm.IncreasedBlock);
                 break;
             case Maul maul:
-                text.Append(GameRef.Get<decimal>(maul, "_extraDamageFromMaulPlays"));
+                text.Append(T44PrivateAccess.Maul_ExtraDamageFromMaulPlays(maul));
                 break;
             case MadScience madScience:
                 text.Append(madScience.TinkerTimeType).Append('/').Append(madScience.TinkerTimeRider);
                 break;
             case Rampage rampage:
-                text.Append(GameRef.Get<int>(rampage, "ExtraDamageFromPlays"));
+                text.Append(T44PrivateAccess.Rampage_ExtraDamageFromPlays(rampage));
                 break;
             case TheScythe scythe:
                 text.Append(scythe.IncreasedDamage);
@@ -369,7 +401,10 @@ internal sealed record ContinuationStamp(string StateText)
                 text.Append('-');
                 break;
         }
-        text.Append("/baselib=");
+        CardCostStateSupport.Append(text, card);
+        text.Append("/keywords=[");
+        text.AppendJoin(',', card.GetKeywordsWithSources(KeywordSources.Local).Order());
+        text.Append("]/baselib=");
         if (!PredictionModModelSupport.AppendBaseLibCardModifierState(
                 text,
                 card,
@@ -403,18 +438,16 @@ internal sealed record ContinuationStamp(string StateText)
                 .Append(OrbMirrors.GetEvokeValue(simulator, orb)).Append("],");
     }
 
-    private static void AppendPowers(StringBuilder text, IEnumerable<PowerModel> powers)
+    private static void AppendPowers(StringBuilder text, IEnumerable<PowerModel> powers, CombatPredictionSimulator? simulator = null)
     {
         text.Append(";P=");
-        foreach (PowerModel power in powers
-            .Where(power => power.Amount != 0)
-            .OrderBy(power => power.Owner.CombatId)
-            .ThenBy(power => power.Id.Entry, StringComparer.Ordinal))
+        foreach (PowerModel power in powers.Where(power => power.Amount != 0))
         {
             text.Append(power.Owner.CombatId).Append(':').Append(power.Id.Entry).Append('=')
                 .Append(power.Amount).Append('/')
-                .Append(PowerLifecycleSupport.SemanticallyRelevantAmountOnTurnStart(power))
-                .Append('[');
+                .Append(PowerLifecycleSupport.SemanticallyRelevantAmountOnTurnStart(power));
+            if (PowerLifecycleSupport.SemanticallyRelevantSkipNextDurationTick(power)) text.Append("/skip");
+            text.Append('[');
             foreach (var dynamicVar in power.DynamicVars.OrderBy(item => item.Key, StringComparer.Ordinal))
             {
                 if (!SemanticStateFieldPolicy.IsSemantic(power, dynamicVar.Key, dynamicVar.Value))
@@ -424,6 +457,21 @@ internal sealed record ContinuationStamp(string StateText)
                     text.Append(':').Append(stringVar.StringValue);
                 text.Append(',');
             }
+            if (power is SurroundedPower surrounded)
+                text.Append("Facing=").Append(simulator == null ? surrounded.Facing
+                    : PowerPredictionStateSupport.SurroundedFacing(simulator, surrounded)).Append(',');
+            if (power is NightmarePower nightmare)
+            {
+                CardModel selected = simulator == null
+                    ? T44PrivateAccess.Read<MegaCrit.Sts2.Core.Models.CardModel>(T44PrivateAccess.InternalData(nightmare), "selectedCard")
+                        ?? throw new InvalidOperationException("Native Nightmare has no selected card at continuation capture.")
+                    : ((SimulatedCombatState)simulator.State.CombatState).GetNightmareSelection(nightmare).Preview;
+                text.Append("Selected=");
+                AppendCard(text, selected, discoverUnregisteredBaseLibModifiers: simulator == null);
+            }
+            if (power is OrbitPower orbit)
+                text.Append("EnergyRemainder=").Append(simulator == null ? (4 - orbit.DisplayAmount) % 4
+                    : ((SimulatedCombatState)simulator.State.CombatState).GetOrbitEnergyRemainder(orbit)).Append(',');
             text.Append("],");
         }
     }

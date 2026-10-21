@@ -29,6 +29,7 @@ internal static class AfterCardExhaustedMirrors
 
     public static void Invoke(AbstractModel listener, AfterCardExhaustedMirrorContext context)
     {
+        using var dispatch = context.Simulator.BeginExecutionDispatch();
         Registry.Invoke(listener, context);
     }
 
@@ -61,6 +62,8 @@ internal static class AfterCardExhaustedMirrors
                     PileType.Hand,
                     relic.Owner,
                     resultKind: CardGenerationResultKind.Contextual);
+                if (context.Simulator.HasPendingChoice)
+                    return;
                 state.WasUsedThisCombat = true;
                 context.Simulator.RecordRelicTrigger(relic, "：复制到手牌");
             }
@@ -69,12 +72,12 @@ internal static class AfterCardExhaustedMirrors
 
     private static void HandleDarkEmbracePower(DarkEmbracePower power, AfterCardExhaustedMirrorContext context)
     {
+        context.Simulator.AcknowledgeExecutionDispatch();
         if (context.PreviewCard.Owner.Creature == power.Owner && power.Owner.Player is { } player)
         {
             if (context.CausedByEthereal)
             {
-                // Ethereal exhaust only records the count here in vanilla; the actual draw happens
-                // later in end-turn cleanup, which this simulation path does not include.
+                context.StateStore.Get(power, () => new DarkEmbracePredictionState(power)).EtherealCount++;
             }
             else
             {
@@ -99,21 +102,22 @@ internal static class AfterCardExhaustedMirrors
     {
         if (context.PreviewCard.Owner == relic.Owner)
         {
+            var state = context.StateStore.Get(relic, () => new JossPaperPredictionState(relic));
             if (context.CausedByEthereal)
             {
-                // Ethereal exhaust only records the count here in vanilla; the actual draw happens
-                // later in end-turn cleanup, which this simulation path does not include.
+                state.EtherealCount++;
             }
             else
             {
-                var state = context.StateStore.Get(relic, () => new JossPaperPredictionState(relic));
-                var threshold = relic.DynamicVars[GameRef.GetStatic<string>(typeof(JossPaper), "_exhaustAmountKey")].IntValue;
+                var threshold = relic.DynamicVars[T44PrivateAccess.JossPaper_ExhaustAmountKey()].IntValue;
 
                 state.CardsExhausted++;
                 if (state.CardsExhausted >= threshold)
                 {
                     int draws = state.CardsExhausted / threshold;
                     context.Simulator.Draw(relic.Owner, draws);
+                    if (context.Simulator.HasPendingChoice)
+                        return;
                     state.CardsExhausted %= threshold;
                     if (context.Simulator.IsRecordingActionRelicTriggers)
                         context.Simulator.RecordRelicTrigger(relic, $"：抽{draws}");
@@ -127,6 +131,8 @@ internal static class AfterCardExhaustedMirrors
         if (relic.Owner == context.PreviewCard.Owner)
         {
             context.Simulator.Damage(context.State.HittableEnemies, relic.DynamicVars.Damage, relic.Owner.Creature);
+            if (context.Simulator.HasPendingChoice)
+                return;
             if (context.Simulator.IsRecordingActionRelicTriggers)
                 context.Simulator.RecordRelicTrigger(relic, $"：全体伤害{relic.DynamicVars.Damage.IntValue}");
         }
@@ -140,6 +146,8 @@ internal static class AfterCardExhaustedMirrors
             if (target is not null)
             {
                 context.Simulator.Damage(target, relic.DynamicVars.Damage, relic.Owner.Creature);
+                if (context.Simulator.HasPendingChoice)
+                    return;
                 if (context.Simulator.IsRecordingActionRelicTriggers)
                     context.Simulator.RecordRelicTrigger(relic, $"：伤害{relic.DynamicVars.Damage.IntValue}");
             }
@@ -161,9 +169,16 @@ internal static class AfterCardExhaustedMirrors
     }
 }
 
+internal sealed class DarkEmbracePredictionState(DarkEmbracePower power) : IPredictionStateForkable
+{
+    public int EtherealCount { get; set; } = T44PrivateAccess.Read<int>(T44PrivateAccess.InternalData(power), "etherealCount");
+
+    public object Fork(PredictionForkContext context) => MemberwiseClone();
+}
+
 internal sealed class BurningSticksPredictionState(BurningSticks relic) : IPredictionStateForkable
 {
-    public bool WasUsedThisCombat { get; set; } = GameRef.Get<bool>(relic, "WasUsedThisCombat");
+    public bool WasUsedThisCombat { get; set; } = T44PrivateAccess.BurningSticks_WasUsedThisCombat(relic);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }
@@ -171,6 +186,7 @@ internal sealed class BurningSticksPredictionState(BurningSticks relic) : IPredi
 internal sealed class JossPaperPredictionState(JossPaper relic) : IPredictionStateForkable
 {
     public int CardsExhausted { get; set; } = relic.CardsExhausted;
+    public int EtherealCount { get; set; } = T44PrivateAccess.JossPaper_EtherealCount(relic);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

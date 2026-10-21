@@ -17,18 +17,32 @@ internal sealed class CounterPredictionState(int value) : IPredictionStateForkab
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }
 
-internal sealed class ChainsOfBindingPredictionState(ChainsOfBindingPower power) : IPredictionStateForkable
+internal sealed class ChainsOfBindingPredictionState : IPredictionStateForkable
 {
-    public bool BoundCardPlayed { get; set; } =
-        (bool)((bool)(GameRef.Get(GameRef.InvokeGeneric(power, "GetInternalData", "Data"), "boundCardPlayed")));
+    public bool BoundCardPlayed { get; set; }
 
-    public int BoundCardsAfflictedThisTurn { get; set; } =
-        CombatManager.Instance.History.Entries
-            .OfType<CardAfflictedEntry>()
-            .Count(entry =>
-                entry.HappenedThisTurn(power.CombatState)
-                && entry.Actor == power.Owner
-                && entry.Affliction is Bound);
+    private int _afflictionTurn;
+    private int _boundCardsAfflicted;
+
+    public static ChainsOfBindingPredictionState CaptureRoot(ChainsOfBindingPower power)
+        => new()
+        {
+            BoundCardPlayed = T44PrivateAccess.Read<bool>(T44PrivateAccess.InternalData(power), "boundCardPlayed"),
+            _afflictionTurn = power.Owner.Player?.PlayerCombatState?.TurnNumber ?? 0,
+            _boundCardsAfflicted = CombatManager.Instance.History.Entries
+                .OfType<CardAfflictedEntry>()
+                .Count(entry => entry.HappenedThisTurn(power.CombatState)
+                    && entry.Actor == power.Owner && entry.Affliction is Bound)
+        };
+
+    public int GetBoundCardsAfflictedThisTurn(int turn)
+        => _afflictionTurn == turn ? _boundCardsAfflicted : 0;
+
+    public void RecordBoundCardAfflicted(int turn)
+    {
+        _boundCardsAfflicted = GetBoundCardsAfflictedThisTurn(turn) + 1;
+        _afflictionTurn = turn;
+    }
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }
@@ -59,14 +73,19 @@ internal sealed class PenNibPredictionState(PenNib relic) : IPredictionStateFork
     }
 }
 
-internal sealed class PaelsLegionPredictionState(PaelsLegion relic)
+internal sealed class PaelsLegionPredictionState(PaelsLegion relic, bool affectedCardPlayFinished = false)
     : IPredictionStateForkable, IPredictionForkBoundary
 {
-    public int Cooldown { get; set; } = GameRef.Get<int>(relic, "_cooldown");
+    public int Cooldown { get; set; } = T44PrivateAccess.PaelsLegion_Cooldown(relic);
 
-    public bool TriggeredBlockLastTurn { get; set; } = GameRef.Get<bool>(relic, "_triggeredBlockLastTurn");
+    public bool TriggeredBlockLastTurn { get; set; } = T44PrivateAccess.PaelsLegion_TriggeredBlockLastTurn(relic);
 
-    public CardPlay? AffectedCardPlay { get; set; } = GameRef.Get<MegaCrit.Sts2.Core.Entities.Cards.CardPlay>(relic, "_affectedCardPlay");
+    // A finished native reference still prevents the relic from pairing with another play.
+    public bool HasCompletedAffectedCardPlay { get; } = affectedCardPlayFinished;
+
+    public CardPlay? AffectedCardPlay { get; set; } = affectedCardPlayFinished ? null : T44PrivateAccess.PaelsLegion_AffectedCardPlay(relic);
+
+    public bool HasAffectedCardPlay => HasCompletedAffectedCardPlay || AffectedCardPlay != null;
 
     public object Fork(PredictionForkContext context)
     {
@@ -83,9 +102,9 @@ internal sealed class PaelsLegionPredictionState(PaelsLegion relic)
 
 internal sealed class VambracePredictionState(Vambrace relic) : IPredictionStateForkable
 {
-    public CardModel? TriggeringCard { get; set; } = GameRef.Get<MegaCrit.Sts2.Core.Models.CardModel>(relic, "_triggeringCard");
+    public CardModel? TriggeringCard { get; set; } = T44PrivateAccess.Vambrace_TriggeringCard(relic);
 
-    public bool BlockGainedThisCombat { get; set; } = GameRef.Get<bool>(relic, "_blockGainedThisCombat");
+    public bool BlockGainedThisCombat { get; set; } = T44PrivateAccess.Vambrace_BlockGainedThisCombat(relic);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }
@@ -93,7 +112,7 @@ internal sealed class VambracePredictionState(Vambrace relic) : IPredictionState
 internal sealed class VoidFormPredictionState(VoidFormPower power) : IPredictionStateForkable
 {
     public int CardsPlayedThisTurn { get; set; } =
-        (int)((int)(GameRef.Get(GameRef.InvokeGeneric(power, "GetInternalData", "Data"), "cardsPlayedThisTurn")));
+        T44PrivateAccess.Read<int>(T44PrivateAccess.InternalData(power), "cardsPlayedThisTurn");
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

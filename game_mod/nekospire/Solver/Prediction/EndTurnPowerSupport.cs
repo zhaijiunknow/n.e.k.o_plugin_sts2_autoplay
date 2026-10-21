@@ -5,13 +5,14 @@ using MegaCrit.Sts2.Core.Models.Orbs;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.InCombat.Mirrors.Hooks.Card;
+using CombatSolver.Engine.InCombat.Mirrors.Hooks;
 using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver;
 
 internal static partial class EndTurnPowerSupport
 {
-    public static void TriggerRegular(
+    public static bool TriggerRegular(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         CombatSide side,
@@ -19,8 +20,12 @@ internal static partial class EndTurnPowerSupport
         int etherealExhaustCount = 0)
     {
         HashSet<Creature> participantSet = participants.ToHashSet();
-        foreach (PowerModel power in combat.EffectivePowers().ToArray())
+        // EffectivePowers 的数组发布后不会被就地改写（失效只把缓存字段置空），所以先取一次
+        // 快照按下标推进即可，与 ToArray 的防御性拷贝看到的元素与顺序完全一致。
+        IReadOnlyList<PowerModel> effectivePowers = combat.EffectivePowers();
+        for (int powerIndex = 0; powerIndex < effectivePowers.Count; powerIndex++)
         {
+            PowerModel power = effectivePowers[powerIndex];
             if (power.Amount <= 0)
                 continue;
 
@@ -28,6 +33,20 @@ internal static partial class EndTurnPowerSupport
             bool ownerParticipates = participantSet.Contains(owner);
             switch (power)
             {
+                // 原版按监听器顺序分发 AfterSideTurnEnd，临时属性回收排在该能力自己的位置：
+                // TemporaryFocusPower 的回收可能晚于同侧其它 Power（例如 ConsumingShadowPower 的末球激发）。
+                case TemporaryFocusPower temporaryFocus when ownerParticipates:
+                    combat.RetireTemporaryStat(temporaryFocus);
+                    break;
+                case TemporaryDexterityPower temporaryDexterity when ownerParticipates:
+                    combat.RetireTemporaryStat(temporaryDexterity);
+                    break;
+                case TemporaryStrengthPower temporaryStrength when ownerParticipates:
+                    combat.RetireTemporaryStat(temporaryStrength);
+                    break;
+                case RitualPower when ownerParticipates:
+                    PersistentPowerSupport.TriggerRitual(combat, owner);
+                    break;
                 case ColossusPower when side == CombatSide.Enemy:
                     combat.SetAmount<ColossusPower>(owner, power.Amount - 1);
                     break;
@@ -38,7 +57,11 @@ internal static partial class EndTurnPowerSupport
                     combat.SetAmount<CorrosiveWavePower>(owner, 0);
                     break;
                 case DemisePower when ownerParticipates && simulator.State.GetCreature(owner).IsAlive:
-                    simulator.Damage(owner, power.Amount, ValueProp.Unblockable | ValueProp.Unpowered, null);
+                    using (simulator.PushDamageSource(
+                        CombatDamageSource.For(CombatDamageSourceKind.Power, nameof(DemisePower))))
+                    {
+                        simulator.Damage(owner, power.Amount, ValueProp.Unblockable | ValueProp.Unpowered, null);
+                    }
                     break;
                 case EscapeArtistPower when ownerParticipates && power.Amount > 1:
                     combat.SetAmount<EscapeArtistPower>(owner, power.Amount - 1);
@@ -59,14 +82,15 @@ internal static partial class EndTurnPowerSupport
                     combat.Apply<StrengthPower>(owner, power.Amount, owner);
                     break;
                 case ConsumingShadowPower when ownerParticipates && owner.Player is { } player:
-                    EvokeLastOrbs(simulator, player, power.Amount);
+                    if (!EvokeLastOrbs(simulator, player, power.Amount))
+                        return false;
                     break;
                 case NemesisPower when ownerParticipates:
                     TriggerNemesis(combat, owner);
                     break;
                 case JugglingPower juggling when ownerParticipates:
                     simulator.StateStore
-                        .Get(juggling, () => new JugglingPredictionState(juggling))
+                        .Get(juggling, static model => new JugglingPredictionState(model))
                         .AttacksPlayedThisTurn = 0;
                     break;
                 case TenderPower when ownerParticipates:
@@ -101,11 +125,20 @@ internal static partial class EndTurnPowerSupport
                     else
                         combat.MarkBattlewornDummyTimedOut();
                     break;
-                case DarkEmbracePower when ownerParticipates
-                                                 && etherealExhaustCount > 0
-                                                 && owner.Player is { } player:
-                    simulator.Draw(player, power.Amount * etherealExhaustCount);
+                case NoDrawPower when ownerParticipates:
+                    simulator.StateStore.GetPowerAmount(power).Consume();
+                    combat.SetPowerAmount(power, 0);
                     break;
+                case DarkEmbracePower darkEmbrace when ownerParticipates && owner.Player is { } player:
+                {
+                    var state = simulator.StateStore.Get(darkEmbrace,
+                        static model => new CombatSolver.Engine.InCombat.Mirrors.Hooks.Card.DarkEmbracePredictionState(model));
+                    simulator.Draw(player, power.Amount * state.EtherealCount);
+                    if (simulator.HasPendingChoice)
+                        return false;
+                    state.EtherealCount = 0;
+                    break;
+                }
                 case DoomPower when ownerParticipates
                                     && side != CombatSide.Enemy
                                     && simulator.State.GetCreature(owner).IsAlive
@@ -122,10 +155,12 @@ internal static partial class EndTurnPowerSupport
                     combat.SetPowerAmount(power, power.Amount - 1);
                     break;
             }
+            if (simulator.HasPendingChoice)
+                return false;
         }
         foreach (Creature owner in participantSet)
             combat.ResetPowerLifecycleTurn(owner);
-        TriggerBatch048(simulator, combat, side, participantSet);
+        return TriggerBatch048(simulator, combat, side, participantSet);
     }
 
     public static void TriggerVeryEarly(
@@ -149,23 +184,14 @@ internal static partial class EndTurnPowerSupport
                 simulator.State.GetCreature(owner).IsAlive
                 && combat.GetAmount<DoomPower>(owner) >= simulator.State.GetCreature(owner).CurrentHp)
             .ToArray();
-        combat.DoomKill(simulator, doomed);
-    }
-
-    public static void TriggerLate(
-        CombatPredictionSimulator simulator,
-        SimulatedCombatState combat,
-        IEnumerable<Creature> participants)
-    {
-        foreach (Creature owner in participants)
+        using (simulator.PushDamageSource(
+            CombatDamageSource.For(CombatDamageSourceKind.Power, nameof(DoomPower))))
         {
-            int amount = combat.GetAmount<DisintegrationPower>(owner);
-            if (amount > 0 && simulator.State.GetCreature(owner).IsAlive)
-                simulator.Damage(owner, amount, ValueProp.Unpowered, owner);
+            combat.DoomKill(simulator, doomed);
         }
     }
 
-    private static void EvokeLastOrbs(
+    private static bool EvokeLastOrbs(
         CombatPredictionSimulator simulator,
         MegaCrit.Sts2.Core.Entities.Players.Player player,
         int amount)
@@ -175,7 +201,10 @@ internal static partial class EndTurnPowerSupport
         {
             OrbModel orb = queue.Orbs[^1];
             simulator.OrbEvoke(player, orb);
+            if (simulator.HasPendingChoice)
+                return false;
         }
+        return true;
     }
 
     private static void TriggerNemesis(SimulatedCombatState combat, Creature owner)

@@ -1,4 +1,5 @@
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 using CombatSolver.Engine.Common;
@@ -84,12 +85,16 @@ internal sealed class SimPlayerCombatState
     public int Energy { get; private set; }
 
     public int Stars { get; private set; }
+    public PlayerTurnPhase Phase { get; set; }
+    public bool HooksActive { get; set; }
 
     public SimPlayerCombatState(PlayerCombatState liveState)
     {
         _liveState = liveState;
         Energy = liveState.Energy;
         Stars = liveState.Stars;
+        Phase = liveState.Phase;
+        HooksActive = T44PrivateAccess.PlayerCombatState_Player(liveState).IsActiveForHooks;
     }
 
     private SimPlayerCombatState(PlayerCombatState liveState, int energy, int stars)
@@ -159,7 +164,7 @@ internal sealed class SimPlayerCombatState
     {
         if (amount < 0m)
             throw new ArgumentException("Must not be negative.", nameof(amount));
-        Stars = (int)Math.Max(Stars + amount, 0m);
+        Stars = (int)Math.Clamp(Stars + amount, 0m, 999999999m);
     }
 
     // Mirrors PlayerCombatState.LoseStars.
@@ -179,6 +184,8 @@ internal sealed class SimPlayerCombatState
     {
         SimPlayerCombatState fork = new(_liveState, Energy, Stars)
         {
+            Phase = Phase,
+            HooksActive = HooksActive,
             _orbQueue = _orbQueue?.Fork(context),
             _hand = _hand?.Fork(context),
             _drawPile = _drawPile?.Fork(context),

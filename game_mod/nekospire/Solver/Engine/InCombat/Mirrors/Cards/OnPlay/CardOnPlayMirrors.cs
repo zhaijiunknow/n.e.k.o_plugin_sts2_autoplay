@@ -12,7 +12,7 @@ namespace CombatSolver.Engine.InCombat.Mirrors.Cards.OnPlay;
 using Registry = MethodMirrorRegistry<CardModel, CardOnPlayMirrorContext>;
 
 // Simulation-facing facade and central registration index for mirrored CardModel.OnPlay behavior.
-internal static class CardOnPlayMirrors
+internal static partial class CardOnPlayMirrors
 {
     private static readonly MirrorMethodSpec OnPlay = new(
         typeof(CardModel),
@@ -46,14 +46,25 @@ internal static class CardOnPlayMirrors
         // The mutable preview is the receiver because OnPlay handlers may mutate the played card.
         // CardOnPlayMirrorContext maps its source back to the original card and exposes that same
         // original model as the StateStore key.
-        MirrorDispatchResult result = Registry.Invoke(card.MutablePreview, new()
+        using (simulator.BeginExecutionDispatch())
         {
-            Simulator = simulator,
-            Card = card,
-            CardPlay = cardPlay
-        });
-        if (simulator.State.CombatState is SimulatedCombatState combat)
-            CardEffectSpecRegistry.Apply(simulator, combat, card, cardPlay.Target);
+            if (simulator.State.CombatState is SimulatedCombatState adaptedCombat
+                && adaptedCombat.AdaptedOnPlay is { } adapted
+                && adapted.TryInvoke(simulator, card, cardPlay, out MirrorDispatchResult replacement))
+                return replacement;
+        }
+        MirrorDispatchResult result;
+        using (simulator.BeginExecutionDispatch())
+            result = Registry.Invoke(card.MutablePreview, new()
+            {
+                Simulator = simulator,
+                Card = card,
+                CardPlay = cardPlay
+            });
+        if (simulator.HasPendingChoice)
+            simulator.AppendExecutionContinuation(new CardSpecExecutionFrame(card, cardPlay));
+        else
+            ApplyRemainingCardSpec(simulator, card, cardPlay);
         return result;
     }
 
@@ -62,16 +73,20 @@ internal static class CardOnPlayMirrors
         var registry = new Registry(OnPlay);
 
         registry.Register<HowlFromBeyond>(GeneralCardMirrors.GeneralAttackOnPlay);
+        registry.Register<Mangle>(GeneralCardMirrors.GeneralAttackOnPlay);
         registry.Register<IAmInvincible>(GeneralCardMirrors.GeneralBlockOnPlay);
         registry.Register<AstralPulse>(BespokeCardMirrors.AstralPulseOnPlay);
+        registry.Register<BoneShards>(BespokeCardMirrors.BoneShardsOnPlay);
         registry.Register<DaggerSpray>(BespokeCardMirrors.DaggerSprayOnPlay);
         registry.Register<PactsEnd>(BespokeCardMirrors.PactsEndOnPlay);
         registry.Register<TwinStrike>(BespokeCardMirrors.TwinStrikeOnPlay);
+        registry.Register<HeavenlyDrill>(BespokeCardMirrors.HeavenlyDrillOnPlay);
         registry.Register<Dismantle>(BespokeCardMirrors.DismantleOnPlay);
         registry.Register<Entrench>(BespokeCardMirrors.EntrenchOnPlay);
         registry.Register<FiendFire>(BespokeCardMirrors.FiendFireOnPlay);
         registry.Register<LeadingStrike>(BespokeCardMirrors.LeadingStrikeOnPlay);
         registry.Register<Maul>(BespokeCardMirrors.MaulOnPlay);
+        registry.Register<Misery>(BespokeCardMirrors.MiseryOnPlay);
         registry.Register<Sacrifice>(BespokeCardMirrors.SacrificeOnPlay);
         registry.Register<Spite>(BespokeCardMirrors.SpiteOnPlay);
         registry.Register<TheScythe>(BespokeCardMirrors.TheScytheOnPlay);
@@ -83,6 +98,9 @@ internal static class CardOnPlayMirrors
         registry.Register<Alchemize>(PotionGenerationCardMirrors.AlchemizeOnPlay);
 
         registry.Register<CalculatedGamble>(CardDrawCardMirrors.CalculatedGambleOnPlay);
+        registry.Register<Adrenaline>(CardDrawCardMirrors.AdrenalineOnPlay);
+        registry.Register<Offering>(CardDrawCardMirrors.OfferingOnPlay);
+        registry.Register<Neurosurge>(CardDrawCardMirrors.NeurosurgeOnPlay);
         registry.Register<BurningPact>(static (_, _) => { });
         registry.Register<CompileDriver>(CardDrawCardMirrors.CompileDriverOnPlay);
         registry.Register<Constellation>(CardDrawCardMirrors.ConstellationOnPlay);
@@ -97,6 +115,7 @@ internal static class CardOnPlayMirrors
         registry.Register<Restlessness>(CardDrawCardMirrors.RestlessnessOnPlay);
         registry.Register<Scrape>(CardDrawCardMirrors.ScrapeOnPlay);
         registry.Register<Scrawl>(CardDrawCardMirrors.ScrawlOnPlay);
+        registry.Register<SpoilsOfBattle>(CardDrawCardMirrors.SpoilsOfBattleOnPlay);
 
         registry.Register<FlakCannon>(RandomTargetAttackCardMirrors.FlakCannonOnPlay);
         registry.Register<Ricochet>(RandomTargetAttackCardMirrors.RicochetOnPlay);

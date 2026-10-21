@@ -5,7 +5,6 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Extensions;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
-using MegaCrit.Sts2.Core.Models.CardPools;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
@@ -16,7 +15,7 @@ using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver;
 
-internal static class TurnStartPowerSupport
+internal static partial class TurnStartPowerSupport
 {
     public static void PrepareVoidFormApplication(
         CombatPredictionSimulator simulator,
@@ -36,23 +35,67 @@ internal static class TurnStartPowerSupport
         SimulatedCombatState combat,
         IReadOnlyList<Creature> participants)
     {
+        // EffectivePowers 返回的数组一旦发布就不会被就地改写（失效只是把缓存字段置空，
+        // 旧数组内容不变），所以先取一次快照按下标推进，与原来的 ToArray/OfType 迭代器
+        // 看到的元素与顺序完全一致，只是不再复制数组、不再建迭代器。
         if (combat.CurrentSide == CombatSide.Player && combat.RoundNumber <= 1)
         {
-            foreach (PlatingPower plating in combat.EffectivePowers().OfType<PlatingPower>())
+            IReadOnlyList<PowerModel> platingPowers = combat.EffectivePowers();
+            for (int powerIndex = 0; powerIndex < platingPowers.Count; powerIndex++)
             {
+                if (platingPowers[powerIndex] is not PlatingPower plating)
+                    continue;
                 if (plating.Amount > 0 && plating.Owner.IsEnemy)
+                {
                     simulator.GainBlock(plating.Owner, plating.Amount, ValueProp.Unpowered);
+                    if (combat.HasPendingChoice)
+                        return true;
+                }
             }
         }
 
-        foreach (AggressionPower aggression in combat.EffectivePowers().OfType<AggressionPower>().ToArray())
+        IReadOnlyList<PowerModel> aggressionPowers = combat.EffectivePowers();
+        for (int powerIndex = 0; powerIndex < aggressionPowers.Count; powerIndex++)
         {
+            if (aggressionPowers[powerIndex] is not AggressionPower aggression)
+                continue;
             if (aggression.Amount <= 0
                 || !participants.Contains(aggression.Owner)
                 || aggression.Owner.Player is not { } aggressionPlayer)
             {
                 continue;
             }
+            ApplyBeforeSideTurnStartPower(simulator, combat, aggression, participants);
+            if (combat.HasPendingChoice)
+                return true;
+        }
+
+        IReadOnlyList<PowerModel> effectivePowers = combat.EffectivePowers();
+        for (int powerIndex = 0; powerIndex < effectivePowers.Count; powerIndex++)
+        {
+            PowerModel power = effectivePowers[powerIndex];
+            if (power.Amount <= 0)
+                continue;
+
+            if (power is not PlatingPower and not AggressionPower)
+                ApplyBeforeSideTurnStartPower(simulator, combat, power, participants);
+            if (combat.HasPendingChoice)
+                return true;
+        }
+        return false;
+    }
+
+    internal static void ApplyBeforeSideTurnStartPower(CombatPredictionSimulator simulator,
+        SimulatedCombatState combat, PowerModel power, IReadOnlyList<Creature> participants)
+    {
+        if (power.Amount <= 0)
+            return;
+        if (power is PlatingPower plating && combat.CurrentSide == CombatSide.Player
+            && combat.RoundNumber <= 1 && plating.Owner.IsEnemy)
+            simulator.GainBlock(plating.Owner, plating.Amount, ValueProp.Unpowered);
+        if (power is AggressionPower aggression && participants.Contains(aggression.Owner)
+            && aggression.Owner.Player is { } aggressionPlayer)
+        {
             SimPlayerCombatState playerState = simulator.State.GetPlayerCombatState(aggressionPlayer);
             PredictedCard[] selected = playerState.DiscardPile.Cards
                 .Where(static card => card.Preview.Type == CardType.Attack)
@@ -62,38 +105,37 @@ internal static class TurnStartPowerSupport
                 .ToArray();
             foreach (PredictedCard card in selected)
             {
-                simulator.AddToPile([card], PileType.Hand);
+                // 单张牌走单张重载：多张重载对 N==1 的两阶段流程与它逐步等价（同样的所有者
+                // 解析、同样的合法性判定、同样的手牌上限溢出改投弃牌堆、同一次 Shuffle 取位、
+                // 同样的入场事件），但会额外分配一个单元素数组和一张结果表。
+                simulator.AddToPile(card, PileType.Hand);
+                if (combat.HasPendingChoice)
+                    return;
                 if (card.Preview.IsUpgradable)
                     card.Upgrade();
             }
         }
-
-        foreach (PowerModel power in combat.EffectivePowers().ToArray())
+        switch (power)
         {
-            if (power.Amount <= 0)
-                continue;
-
-            switch (power)
-            {
-                case HardenedShellPower shell:
-                    simulator.StateStore
-                        .Get(shell, () => new HardenedShellPredictionState(shell))
-                        .DamageReceivedThisTurn = 0;
-                    break;
-                case SlothPower sloth when participants.Contains(sloth.Owner):
-                    simulator.StateStore
-                        .Get(sloth, () => new CounterPredictionState(
-                            combat.GetCardsPlayedThisTurn(sloth.Owner)))
-                        .Value = 0;
-                    break;
-                case VoidFormPower voidForm when participants.Contains(voidForm.Owner):
-                    simulator.StateStore
-                        .Get(voidForm, () => new VoidFormPredictionState(voidForm))
-                        .CardsPlayedThisTurn = 0;
-                    break;
-            }
+            case HardenedShellPower shell:
+                simulator.StateStore
+                    .Get(shell, static model => new HardenedShellPredictionState(model))
+                    .DamageReceivedThisTurn = 0;
+                break;
+            case SlothPower sloth when participants.Contains(sloth.Owner):
+                // Static factories: a lambda capturing `combat` would allocate its closure on
+                // every call of this method, not only for Sloth.
+                simulator.StateStore
+                    .Get(sloth, (combat, sloth), static state => new CounterPredictionState(
+                        state.combat.GetCardsPlayedThisTurn(state.sloth.Owner)))
+                    .Value = 0;
+                break;
+            case VoidFormPower voidForm when participants.Contains(voidForm.Owner):
+                simulator.StateStore
+                    .Get(voidForm, static model => new VoidFormPredictionState(model))
+                    .CardsPlayedThisTurn = 0;
+                break;
         }
-        return false;
     }
 
     public static bool TriggerBeforeHandDraw(
@@ -101,20 +143,45 @@ internal static class TurnStartPowerSupport
         SimulatedCombatState combat,
         Player player,
         TurnStartChoiceCursor choices)
+        => ContinueBeforeHandDraw(simulator, combat, player, choices, combat.EffectivePowers().ToArray(), 0);
+
+    private static bool ContinueBeforeHandDraw(CombatPredictionSimulator simulator, SimulatedCombatState combat,
+        Player player, TurnStartChoiceCursor choices, IReadOnlyList<PowerModel> powers, int nextIndex,
+        ForegoneStage stage = ForegoneStage.Start)
     {
-        foreach (PowerModel power in combat.EffectivePowers().ToArray())
+        for (int powerIndex = nextIndex; powerIndex < powers.Count; powerIndex++)
         {
+            PowerModel power = powers[powerIndex];
+            if (stage == ForegoneStage.Reset)
+            {
+                combat.SetPowerAmount(power, 0);
+                stage = ForegoneStage.Start;
+                continue;
+            }
             if (power.Amount <= 0 || !ReferenceEquals(power.Owner.Player, player))
                 continue;
+
+            if (power is NightmarePower or InfiniteBladesPower or SentryModePower)
+            {
+                if (combat.GenerateTurnStartPowerCards(simulator, player, power))
+                {
+                    simulator.RejectExecutionContinuation();
+                    return true;
+                }
+                continue;
+            }
 
             if (power is ForegoneConclusionPower)
             {
                 SimPlayerCombatState state = simulator.State.GetPlayerCombatState(player);
-                if (state.DrawPile.IsEmpty && !state.DiscardPile.IsEmpty)
+                if (stage == ForegoneStage.Start && state.DrawPile.IsEmpty && !state.DiscardPile.IsEmpty)
                 {
                     simulator.Shuffle(player);
                     if (combat.HasPendingChoice)
+                    {
+                        simulator.AppendExecutionContinuation(new BeforeHandDrawPowerFrame(player, powers, powerIndex, ForegoneStage.Select));
                         return true;
+                    }
                 }
                 if (!TurnStartChoiceSupport.Resolve(
                         simulator,
@@ -126,71 +193,69 @@ internal static class TurnStartPowerSupport
                         power.Amount,
                         PileType.Draw))
                 {
+                    simulator.AppendExecutionContinuation(new BeforeHandDrawPowerFrame(player, powers, powerIndex, ForegoneStage.Reset));
                     return true;
                 }
+                stage = ForegoneStage.Start;
                 combat.SetPowerAmount(power, 0);
                 continue;
             }
 
-            IEnumerable<CardModel>? options = null;
+            CharacterCombatGenerationPool? generationPool = null;
             int count = power.Amount;
             bool ethereal = false;
             bool generateOneAtATime = false;
+            bool generateColorless = false;
             switch (power)
             {
                 case CallOfTheVoidPower:
-                    options = player.Character.CardPool
-                        .GetUnlockedCards(player.UnlockState, combat.CardMultiplayerConstraint)
-                        .Where(card => card.Rarity is not (CardRarity.Basic or CardRarity.Ancient));
+                    generationPool = CharacterCombatGenerationPool.NonBasicAndAncient;
                     ethereal = true;
                     generateOneAtATime = true;
                     break;
                 case CreativeAiPower:
-                    options = player.Character.CardPool
-                        .GetUnlockedCards(player.UnlockState, combat.CardMultiplayerConstraint)
-                        .Where(card => card.Type == CardType.Power);
+                    generationPool = CharacterCombatGenerationPool.Powers;
                     generateOneAtATime = true;
                     break;
                 case HelloWorldPower when power.AmountOnTurnStart >= 1:
-                    options = player.Character.CardPool
-                        .GetUnlockedCards(player.UnlockState, combat.CardMultiplayerConstraint)
-                        .Where(card => card.Rarity == CardRarity.Common);
+                    generationPool = CharacterCombatGenerationPool.Common;
                     count = power.AmountOnTurnStart;
                     break;
                 case SpectrumShiftPower:
-                    options = ModelDb.CardPool<ColorlessCardPool>()
-                        .GetUnlockedCards(player.UnlockState, combat.CardMultiplayerConstraint);
+                    generateColorless = true;
                     break;
             }
-            if (options == null || count <= 0)
+            if ((!generateColorless && generationPool == null) || count <= 0)
                 continue;
 
             List<PredictedCard> generated;
-            if (generateOneAtATime)
+            if (generateColorless)
             {
-                generated = [];
-                for (int index = 0; index < count; index++)
-                {
-                    PredictedCard? card = options
-                        .GetDistinctForCombat(
-                            player,
-                            1,
-                            simulator.Rng.CombatCardGeneration,
-                            combat.CardMultiplayerConstraint)
-                        .FirstOrDefault();
-                    if (card != null)
-                        generated.Add(card);
-                }
+                generated = simulator.GetDistinctUnlockedColorlessForCombat(
+                    player, count, simulator.Rng.CombatCardGeneration,
+                    combat.CardMultiplayerConstraint).ToList();
             }
             else
             {
-                generated = options
-                    .GetDistinctForCombat(
-                        player,
-                        count,
-                        simulator.Rng.CombatCardGeneration,
-                        combat.CardMultiplayerConstraint)
-                    .ToList();
+                var candidates = simulator.PrepareCharacterGenerationCandidates(
+                    player, player.Character.CardPool, generationPool!.Value,
+                    combat.CardMultiplayerConstraint);
+                if (generateOneAtATime)
+                {
+                    generated = [];
+                    for (int index = 0; index < count; index++)
+                    {
+                        PredictedCard? card = candidates.GetDistinctForCombat(
+                            player, 1, simulator.Rng.CombatCardGeneration).FirstOrDefault();
+                        if (card != null)
+                            generated.Add(card);
+                    }
+                }
+                else
+                {
+                    generated = candidates.GetDistinctForCombat(
+                        player, count, simulator.Rng.CombatCardGeneration).ToList();
+                }
             }
             if (ethereal)
             {
@@ -203,6 +268,11 @@ internal static class TurnStartPowerSupport
                 player,
                 CardPilePosition.Bottom,
                 CardGenerationResultKind.Random);
+            if (combat.HasPendingChoice)
+            {
+                simulator.RejectExecutionContinuation();
+                return true;
+            }
         }
         return false;
     }
@@ -212,10 +282,19 @@ internal static class TurnStartPowerSupport
         SimulatedCombatState combat,
         Player player,
         TurnStartChoiceCursor choices)
+        => ContinueAfterPlayerTurnStart(simulator, combat, player, choices, combat.EffectivePowers().ToArray(), 0);
+
+    internal static bool ApplyAfterPlayerTurnStartPower(CombatPredictionSimulator simulator, SimulatedCombatState combat,
+        Player player, TurnStartChoiceCursor choices, PowerModel power)
+        => ContinueAfterPlayerTurnStart(simulator, combat, player, choices, [power], 0);
+
+    private static bool ContinueAfterPlayerTurnStart(CombatPredictionSimulator simulator, SimulatedCombatState combat,
+        Player player, TurnStartChoiceCursor choices, IReadOnlyList<PowerModel> powers, int nextIndex)
     {
         Creature owner = player.Creature;
-        foreach (var power in combat.EffectivePowers().ToArray())
+        for (int powerIndex = nextIndex; powerIndex < powers.Count; powerIndex++)
         {
+            PowerModel power = powers[powerIndex];
             if (power.Amount <= 0 || !ReferenceEquals(power.Owner, owner))
                 continue;
 
@@ -231,6 +310,7 @@ internal static class TurnStartPowerSupport
                             PlanChoiceEffect.Transform,
                             power.Amount))
                     {
+                        simulator.AppendExecutionContinuation(new AfterPlayerTurnStartPowerFrame(player, powers, powerIndex + 1));
                         return true;
                     }
                     break;
@@ -243,6 +323,11 @@ internal static class TurnStartPowerSupport
                             selfDamage,
                             ValueProp.Unblockable | ValueProp.Unpowered,
                             owner);
+                    }
+                    if (combat.HasPendingChoice)
+                    {
+                        simulator.RejectExecutionContinuation();
+                        return true;
                     }
                     simulator.GainBlock(owner, mantle.Amount, ValueProp.Unpowered);
                     break;
@@ -259,20 +344,46 @@ internal static class TurnStartPowerSupport
                             ValueProp.Unblockable | ValueProp.Unpowered,
                             owner);
                     }
+                    if (combat.HasPendingChoice)
+                    {
+                        simulator.RejectExecutionContinuation();
+                        return true;
+                    }
                     break;
                 case LoopPower:
                     SimOrbQueue queue = simulator.State.GetPlayerCombatState(player).OrbQueue;
                     if (queue.Orbs.Count == 0)
                         break;
                     for (int index = 0; index < power.Amount; index++)
+                    {
                         simulator.OrbPassive(queue.Orbs[0]);
+                        if (combat.HasPendingChoice)
+                        {
+                            simulator.RejectExecutionContinuation();
+                            return true;
+                        }
+                    }
                     break;
                 case RollingBoulderPower rolling:
-                    simulator.Damage(combat.HittableEnemies, rolling.Amount, ValueProp.Unpowered, owner);
+                    using (simulator.PushDamageSource(
+                        CombatDamageSource.For(CombatDamageSourceKind.Power, nameof(RollingBoulderPower))))
+                    {
+                        simulator.Damage(combat.HittableEnemies, rolling.Amount, ValueProp.Unpowered, owner);
+                    }
+                    if (combat.HasPendingChoice)
+                    {
+                        simulator.RejectExecutionContinuation();
+                        return true;
+                    }
                     combat.SetPowerAmount(rolling, rolling.Amount + rolling.DynamicVars.Damage.IntValue);
                     break;
                 case SummonNextTurnPower:
                     combat.SummonOsty(simulator, player, power.Amount);
+                    if (combat.HasPendingChoice)
+                    {
+                        simulator.RejectExecutionContinuation();
+                        return true;
+                    }
                     combat.SetPowerAmount(power, 0);
                     break;
                 case ToolsOfTheTradePower:
@@ -285,6 +396,7 @@ internal static class TurnStartPowerSupport
                             PlanChoiceEffect.Discard,
                             power.Amount))
                     {
+                        simulator.AppendExecutionContinuation(new AfterPlayerTurnStartPowerFrame(player, powers, powerIndex + 1));
                         return true;
                     }
                     break;
@@ -298,15 +410,21 @@ internal static class TurnStartPowerSupport
                             PlanChoiceEffect.Exhaust,
                             power.Amount))
                     {
+                        simulator.AppendExecutionContinuation(new AfterPlayerTurnStartPowerFrame(player, powers, powerIndex + 1));
                         return true;
                     }
                     break;
+            }
+            if (combat.HasPendingChoice)
+            {
+                simulator.RejectExecutionContinuation();
+                return true;
             }
         }
         return false;
     }
 
-    public static void TriggerAfterSideTurnStart(
+    public static bool TriggerAfterSideTurnStart(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
         CombatSide side,
@@ -327,7 +445,7 @@ internal static class TurnStartPowerSupport
         }
 
         if (side != CombatSide.Enemy)
-            return;
+            return !simulator.HasPendingChoice;
         foreach (SandpitPower sandpit in combat.EffectivePowers().OfType<SandpitPower>().ToArray())
         {
             if (sandpit.Amount <= 0)
@@ -344,11 +462,26 @@ internal static class TurnStartPowerSupport
             {
                 continue;
             }
-            simulator.Kill(target, force: true);
+            using (simulator.PushDamageSource(
+                CombatDamageSource.For(CombatDamageSourceKind.Power, nameof(SandpitPower))))
+                {
+                    simulator.Kill(target, force: true);
+                }
+                if (simulator.HasPendingChoice)
+                    return false;
             if (target.Player is { } player
                 && simulator.State.GetOsty(player) is { } osty
                 && simulator.State.GetCreature(osty).IsAlive)
-                simulator.Kill(osty, force: true);
+            {
+                using (simulator.PushDamageSource(
+                    CombatDamageSource.For(CombatDamageSourceKind.Power, nameof(SandpitPower))))
+                {
+                    simulator.Kill(osty, force: true);
+                }
+                if (simulator.HasPendingChoice)
+                    return false;
+            }
         }
+        return true;
     }
 }

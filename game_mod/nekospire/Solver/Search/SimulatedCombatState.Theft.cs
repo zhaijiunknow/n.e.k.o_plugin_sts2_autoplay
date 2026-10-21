@@ -15,6 +15,34 @@ internal sealed partial class SimulatedCombatState
         return _outstandingStolenGold!.Value + _outstandingStolenCards!.Value;
     }
 
+    public (int Gold, int Cards) UnrecoveredLoot(CombatPredictionSimulator simulator)
+    {
+        EnsureOutstandingStolenResourcesInitialized(simulator);
+        return (_outstandingStolenGold!.Value, _outstandingStolenCards!.Value);
+    }
+
+    // Current theft is not permanent: a living thief may still be killed.
+    // Reserve every resource held by a present living enemy as recoverable.
+    // Only already irrecoverable loot remains in the optimistic final bucket.
+    public int MinimumOutstandingStolenResource(CombatPredictionSimulator simulator)
+    {
+        int outstanding = OutstandingStolenResource(simulator);
+        long recoverable = 0;
+        foreach (var power in EffectivePowers())
+        {
+            if (!ContainsCreature(power.Owner) || !simulator.State.GetCreature(power.Owner).IsAlive)
+                continue;
+            recoverable += power switch
+            {
+                SwipePower { StolenCard: not null } => 1,
+                HeistPower heist => Math.Max(0, heist.Amount),
+                ThieveryPower thievery => Math.Max(0, thievery.DynamicVars.Gold.IntValue),
+                _ => 0,
+            };
+        }
+        return (int)Math.Max(0, outstanding - recoverable);
+    }
+
     public void RecordStolenCard(CombatPredictionSimulator simulator)
     {
         EnsureOutstandingStolenResourcesInitialized(simulator);

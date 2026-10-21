@@ -1,8 +1,5 @@
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
-using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Hooks;
@@ -24,6 +21,197 @@ namespace CombatSolver;
 
 internal sealed partial class CombatBeamSolver
 {
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int CompareBeamRankOrder(
+        double leftBeamRankScore,
+        int leftOffensiveProgressValue,
+        int leftActionCount,
+        double rightBeamRankScore,
+        int rightOffensiveProgressValue,
+        int rightActionCount)
+    {
+        int comparison = rightBeamRankScore.CompareTo(leftBeamRankScore);
+        if (comparison != 0)
+            return comparison;
+        comparison = leftActionCount.CompareTo(rightActionCount);
+        return comparison != 0
+            ? comparison
+            : rightOffensiveProgressValue.CompareTo(leftOffensiveProgressValue);
+    }
+
+    internal readonly record struct OrdinaryBeamTacticalValues(
+        int Turn,
+        int PotionCount,
+        int PotionStrategicCost,
+        int FutureSoldHp,
+        int CumulativePlayerHpLost,
+        int ActionCount,
+        double Score,
+        int ZeroCostPlayableCount,
+        int ReachableHandValue,
+        int HandCount,
+        bool HasRetainedRoutingChoice = false);
+
+    internal static void DiversifyOrdinaryBeamBoundary<T>(
+        IReadOnlyList<T> rankedPool,
+        List<T> selected,
+        IReadOnlyList<T> required,
+        Func<T, (double Score, int Actions, int OffensiveProgress, int Potions, bool Victory)> describe,
+        bool finalQualityFirst,
+        Func<T, OrdinaryBeamTacticalValues>? describeTactical = null,
+        bool includeSingleProgressGroup = false)
+        where T : class
+    {
+        if (finalQualityFirst || selected.Count >= rankedPool.Count)
+            return;
+
+        HashSet<T> requiredSet = new(required, ReferenceEqualityComparer.Instance);
+        Dictionary<T, int> selectedPositions = new(ReferenceEqualityComparer.Instance);
+        for (int index = 0; index < selected.Count; index++)
+            selectedPositions.Add(selected[index], index);
+
+        // Required replacement leaves selected unsorted. Locate the last ordinary survivor
+        // in the original ranking, not the last selected slot or the configured beam width.
+        int boundary = rankedPool.Count - 1;
+        while (boundary >= 0
+            && (requiredSet.Contains(rankedPool[boundary])
+                || !selectedPositions.ContainsKey(rankedPool[boundary])))
+        {
+            boundary--;
+        }
+        if (boundary < 0)
+            return;
+        var boundaryValue = describe(rankedPool[boundary]);
+        bool SamePrimary(T candidate)
+        {
+            var value = describe(candidate);
+            return value.Score.Equals(boundaryValue.Score)
+                && value.Actions == boundaryValue.Actions;
+        }
+
+        int end = boundary + 1;
+        while (end < rankedPool.Count && SamePrimary(rankedPool[end]))
+            end++;
+        if (end == boundary + 1)
+            return;
+        int start = boundary;
+        while (start > 0 && SamePrimary(rankedPool[start - 1]))
+            start--;
+
+        Dictionary<int, List<T>> byPotionCount = [];
+        for (int index = start; index < end; index++)
+        {
+            T candidate = rankedPool[index];
+            var value = describe(candidate);
+            // Completed outcomes remain exclusively under the existing final policy.
+            if (value.Victory)
+                return;
+            if (requiredSet.Contains(candidate))
+                continue;
+            if (!byPotionCount.TryGetValue(value.Potions, out List<T>? candidates))
+            {
+                candidates = [];
+                byPotionCount.Add(value.Potions, candidates);
+            }
+            candidates.Add(candidate);
+        }
+
+        foreach (List<T> candidates in byPotionCount.Values)
+        {
+            List<int> slots = [];
+            foreach (T candidate in candidates)
+            {
+                if (selectedPositions.TryGetValue(candidate, out int slot))
+                    slots.Add(slot);
+            }
+            if (slots.Count <= 1 || slots.Count == candidates.Count)
+                continue;
+
+            List<List<T>> progressGroups = candidates
+                .GroupBy(candidate => describe(candidate).OffensiveProgress)
+                .OrderByDescending(group => group.Key)
+                .Select(group => group.ToList())
+                .ToList();
+            // A single progress group can still contain different playable hands.
+            // The caller opts in only for explicit base-score experiments; other members retain
+            // their original diversity gate.
+            if (progressGroups.Count <= 1 && (!includeSingleProgressGroup || describeTactical == null))
+                continue;
+
+            if (describeTactical != null)
+            {
+                foreach (List<T> group in progressGroups)
+                    OrderOrdinaryBeamTacticalCohorts(group, describeTactical);
+            }
+
+            // The supplemental progress key still supplies the first representative, but
+            // one value cannot monopolize a partially retained primary tie. Tactical order
+            // changes only route-less, equal-policy cohort slots within a progress group;
+            // preserve routing positions, progress rotation and each potion count's seats.
+            List<T> replacements = new(slots.Count);
+            for (int round = 0; replacements.Count < slots.Count; round++)
+            {
+                foreach (List<T> group in progressGroups)
+                {
+                    if (round < group.Count)
+                        replacements.Add(group[round]);
+                    if (replacements.Count == slots.Count)
+                        break;
+                }
+            }
+            for (int index = 0; index < slots.Count; index++)
+                selected[slots[index]] = replacements[index];
+        }
+    }
+
+    private static void OrderOrdinaryBeamTacticalCohorts<T>(
+        List<T> group,
+        Func<T, OrdinaryBeamTacticalValues> describeTactical)
+        where T : class
+    {
+        Dictionary<(int Turn, TranspositionLabel Policy),
+            List<(int Position, T Candidate, OrdinaryBeamTacticalValues Values)>> cohorts = [];
+        for (int position = 0; position < group.Count; position++)
+        {
+            T candidate = group[position];
+            OrdinaryBeamTacticalValues values = describeTactical(candidate);
+            // Existing routing representatives already have their own diversity policy.
+            // Leave their positions fixed without blocking other positions in this group.
+            if (values.HasRetainedRoutingChoice)
+                continue;
+            var key = (values.Turn, new TranspositionLabel(
+                values.PotionCount,
+                values.PotionStrategicCost,
+                values.FutureSoldHp,
+                values.CumulativePlayerHpLost,
+                values.ActionCount,
+                values.Score));
+            if (!cohorts.TryGetValue(key, out var cohort))
+            {
+                cohort = [];
+                cohorts.Add(key, cohort);
+            }
+            cohort.Add((position, candidate, values));
+        }
+
+        foreach (var cohort in cohorts.Values)
+        {
+            if (cohort.Count <= 1)
+                continue;
+            // Stable LINQ ordering preserves raw rank for fully equal tactical values.
+            // Rewrite the cohort's original positions rather than flattening cohorts:
+            // interleaved, unequal policy labels must retain their existing seats.
+            T[] ordered = cohort
+                .OrderByDescending(item => item.Values.ZeroCostPlayableCount)
+                .ThenByDescending(item => item.Values.ReachableHandValue)
+                .ThenByDescending(item => item.Values.HandCount)
+                .Select(item => item.Candidate)
+                .ToArray();
+            for (int index = 0; index < cohort.Count; index++)
+                group[cohort[index].Position] = ordered[index];
+        }
+    }
+
     private readonly record struct RoutingChoiceSignature(
         int Turn,
         string SourceId,
@@ -47,6 +235,169 @@ internal sealed partial class CombatBeamSolver
         string CardId,
         int Upgrade,
         string CardStateKey);
+    private readonly record struct AmbiguousChoiceDecisionSignature(
+        int PotionCount,
+        StateFingerprint ParentStateKey,
+        int ParentActionCount,
+        int Turn,
+        string SourceId,
+        PlanChoiceEffect Effect,
+        PileType Pile,
+        int ChoiceCount,
+        string ContextId);
+    private readonly record struct OrderedMutationOutcomeFamilySignature(
+        int Turn,
+        int PotionCount,
+        int ChoiceCount,
+        StateFingerprint EffectMultisetKey,
+        StateFingerprint UnorderedOutcomeKey,
+        OrderedMutationBoundaryStamp? Boundary);
+    private readonly record struct OrderedMutationBoundaryStamp(
+        int FromTurn,
+        int FromShufflesCrossed,
+        int ToTurn,
+        int ToShufflesCrossed);
+    private readonly record struct OrderedMutationActivationCandidate(
+        SearchNode Node,
+        OrderedMutationRetentionLease Lease,
+        StateFingerprint SequenceKey);
+    private sealed record OrderedMutationActivationCohort(
+        OrderedMutationOutcomeFamilySignature Family,
+        IReadOnlyList<OrderedMutationActivationCandidate> Candidates,
+        bool HasOrdinaryAnchor);
+    private readonly record struct OrderedMutationContinuationLineageSignature(
+        StateFingerprint RootKey,
+        StateFingerprint InitialLeaseKey,
+        StateFingerprint LeaseKey,
+        StateFingerprint ParentLineageKey,
+        StateFingerprint ParentStateKey);
+    private readonly record struct OrderedMutationContinuationSourceFamilySignature(
+        StateFingerprint Key,
+        bool HasPersistentMutation);
+    private readonly record struct OrderedMutationContinuationOutcomeKey(
+        StateFingerprint OptionKey,
+        StateFingerprint ChildStateKey);
+    private readonly record struct OrderedMutationHandoffSourceLedgerKey(
+        StateFingerprint InitialLeaseKey,
+        StateFingerprint RecurrenceSourceFamilyKey);
+    private sealed record OrderedMutationContinuationPacket(
+        StateFingerprint RootKey,
+        StateFingerprint InitialLeaseKey,
+        StateFingerprint LeaseKey,
+        StateFingerprint ParentLineageKey,
+        StateFingerprint SourceFamilyKey,
+        StateFingerprint OptionUniverseKey,
+        bool HasPersistentMutationFamily,
+        bool HasSelectedSibling,
+        bool HasRotatedInteriorOption,
+        int PortfolioPriority,
+        SearchNode Parent,
+        IReadOnlyList<SearchNode> Candidates);
+    private readonly record struct OrderedMutationContinuationPacketOutcome(
+        OrderedMutationContinuationPacket Packet,
+        SearchNode Candidate);
+    private sealed record OrderedMutationLateInitialPacingResult(
+        List<OrderedMutationContinuationPacket> ContinuationPackets,
+        List<OrderedMutationContinuationPacket> CounterfactualPackets,
+        HashSet<SearchNode> PacedOutcomes,
+        HashSet<SearchNode> ExplorerOutcomes);
+    private readonly record struct OrderedMutationContinuationLaneKey(
+        StateFingerprint RootKey,
+        StateFingerprint InitialLeaseKey,
+        StateFingerprint LeaseKey,
+        StateFingerprint ParentLineageKey,
+        StateFingerprint SourceFamilyKey,
+        StateFingerprint OptionUniverseKey);
+    private readonly record struct OrderedMutationContinuationFamilyKey(
+        StateFingerprint RootKey,
+        StateFingerprint InitialLeaseKey,
+        StateFingerprint LeaseKey,
+        StateFingerprint SourceFamilyKey,
+        StateFingerprint OptionUniverseKey);
+    private readonly record struct OrderedMutationContinuationBudgetKey(
+        StateFingerprint RootKey,
+        StateFingerprint InitialLeaseKey,
+        StateFingerprint LeaseKey,
+        StateFingerprint ParentLineageKey,
+        StateFingerprint ParentStateKey,
+        StateFingerprint SourceFamilyKey);
+    private readonly record struct OrderedMutationParentObligationKey(
+        StateFingerprint RootKey,
+        StateFingerprint InitialLeaseKey,
+        StateFingerprint LeaseKey,
+        StateFingerprint ParentLineageKey,
+        StateFingerprint ParentStateKey);
+    private readonly record struct OrderedMutationParentObligationCandidate(
+        OrderedMutationParentObligationKey Obligation,
+        SearchNode Node,
+        bool IsAlreadySelected);
+    private sealed record OrderedMutationHandoffCohort(
+        OrderedMutationParentObligationKey Obligation,
+        OrderedMutationContinuationPacket AnchorPacket,
+        IReadOnlyList<OrderedMutationContinuationPacketOutcome> CompanionOutcomes,
+        bool AnchorAlreadySelected);
+    private enum OrderedMutationAdmissionClaimReason
+    {
+        Handoff = 0,
+        Observation = 1,
+        Counterfactual = 2,
+        Alternative = 3,
+        Ordinary = 4,
+    }
+    private readonly record struct OrderedMutationAdmissionClaimKey(
+        StateFingerprint RootKey,
+        StateFingerprint InitialLeaseKey,
+        StateFingerprint LeaseKey,
+        StateFingerprint ParentLineageKey,
+        StateFingerprint ParentStateKey,
+        StateFingerprint SourceFamilyKey,
+        OrderedMutationContinuationOutcomeKey Outcome);
+    private readonly record struct OrderedMutationAdmissionClaimSource(
+        OrderedMutationAdmissionClaimKey Key,
+        OrderedMutationContinuationPacket Packet,
+        SearchNode Candidate,
+        OrderedMutationAdmissionClaimReason Reason,
+        bool CrossedProofBoundary,
+        bool ContinuationHandoff,
+        bool RequestsObservation);
+    private sealed record OrderedMutationAdmissionClaim(
+        OrderedMutationAdmissionClaimKey Key,
+        OrderedMutationContinuationPacket Packet,
+        SearchNode Candidate,
+        IReadOnlySet<OrderedMutationAdmissionClaimReason> Reasons,
+        bool HandoffCrossedProofBoundary,
+        bool ObservationCrossedProofBoundary,
+        bool CounterfactualContinuationHandoff,
+        bool CounterfactualRequestsObservation,
+        bool OrdinaryCrossedProofBoundary,
+        bool OrdinaryContinuationHandoff,
+        bool OrdinaryRequestsObservation)
+    {
+        public OrderedMutationAdmissionClaimReason PrimaryReason => Reasons.Min();
+    }
+    private sealed record OrderedMutationAdmissionWorkItem(
+        OrderedMutationParentObligationKey Parent,
+        int PortfolioPriority,
+        OrderedMutationAdmissionClaimReason Reason,
+        OrderedMutationContinuationPacket Packet,
+        OrderedMutationHandoffCohort? Cohort,
+        OrderedMutationAdmissionClaim? Claim,
+        IReadOnlyList<OrderedMutationAdmissionClaim> AliasedClaims);
+
+    private static OrderedMutationParentObligationKey
+        BuildOrderedMutationParentObligationKey(SearchNode parent)
+    {
+        OrderedMutationRetentionLease lease = parent.OrderedMutationRetentionLease
+            ?? throw new InvalidOperationException(
+                "有序变异 parent obligation 缺少 lease。");
+        return new OrderedMutationParentObligationKey(
+            lease.RootKey,
+            lease.InitialKey,
+            lease.Key,
+            parent.OrderedMutationLineage?.SequenceKey ?? default,
+            parent.StateKey);
+    }
+
     private readonly record struct DirectRoutingChoice(
         SearchNode Node,
         SearchNode ChoiceNode,
@@ -60,9 +411,11 @@ internal sealed partial class CombatBeamSolver
         string FirstCardId,
         uint? FirstCardTargetCombatId);
 
-    private sealed class BeamRetentionPolicy(
+    private sealed partial class BeamRetentionPolicy(
         SolverSearchProfile _profile,
         bool _isActEndingBoss,
+        BossHpRelief _bossHpRelief,
+        PostCombatRelicHealProfile _postCombatRelicHeal,
         int _initialEnemyCount,
         int _initialPlayerHp,
         int _initialPlayerMaxHp,
@@ -71,12 +424,28 @@ internal sealed partial class CombatBeamSolver
         SolverPotionPolicy _potionPolicy,
         PotionStrategySnapshot _potionStrategy,
         bool _enforcePotionDirectives,
-        bool _renewablePotionShapedRock,
+        int _potionReplacementHpCredit,
         SearchRunContext _run,
-        Func<SearchNode, StandPatEvaluation> _evaluateStandPat)
+        Func<SearchNode, StandPatEvaluation> _evaluateStandPat,
+        Action<IEnumerable<SearchNode>>? _prepareStandPat = null,
+        DevelopmentSearchStrategy? _developmentStrategy = null,
+        PlanCommitment? _planCommitment = null)
     {
+        private void ForEachRetentionIndex(
+            int count,
+            ParallelExpansionWorkProfile.Kind kind,
+            Action<int> evaluate)
+        {
+            if (count >= 4 && _run.ActiveParallelExpansion is { } executor)
+                executor.EvaluateRetentionIndices(count, kind, evaluate);
+            else
+                for (int index = 0; index < count; index++)
+                    evaluate(index);
+        }
+
         private const int PersistentRoutingContextRounds = 8;
         private const int RoutingChoiceLimit = 96;
+        private const int AmbiguousCompressedChoiceLimit = 48;
         private sealed record OrderedPileCohort(IReadOnlyList<SearchNode> PrefixVariants);
         private readonly record struct PocketwatchCadenceSignature(
             int PotionCount,
@@ -110,7 +479,7 @@ internal sealed partial class CombatBeamSolver
 
         public List<SearchNode> RankFinal(IEnumerable<SearchNode> nodes)
         {
-            List<SearchNode> candidates = nodes.ToList();
+            List<SearchNode> candidates = nodes.Distinct((IEqualityComparer<SearchNode>)ReferenceEqualityComparer.Instance).ToList();
             List<SearchNode> ranked = RankBest(
                 candidates,
                 _profile.BeamWidth * 4,
@@ -133,6 +502,8 @@ internal sealed partial class CombatBeamSolver
                             potionFreeBaseline,
                             _initialPlayerHp,
                             _initialPlayerMaxHp,
+                            _bossHpRelief,
+                            _postCombatRelicHeal,
                             _theftPolicy) < 0))
                 {
                     potionFreeBaseline = candidate;
@@ -180,7 +551,7 @@ internal sealed partial class CombatBeamSolver
 
         private FinalPolicyQualificationFacts BuildFinalPolicyQualificationFacts(SearchNode node)
         {
-            int explicitPotionStrategicCost = 0;
+            int explicitPotionStrategicCost = node.Snapshot.ExplicitPotionStrategicCost;
             int explicitAmbergrisCount = 0;
             for (SearchNode? cursor = node; cursor?.Action is { } action; cursor = cursor.Parent)
             {
@@ -188,68 +559,31 @@ internal sealed partial class CombatBeamSolver
                     continue;
                 if (string.IsNullOrEmpty(action.PotionId))
                     throw new InvalidOperationException("用药动作缺少药水 ID。");
-                explicitPotionStrategicCost += PotionUsePolicy.StrategicHpCost(
-                    action.PotionId,
-                    _renewablePotionShapedRock);
                 if (string.Equals(action.PotionId, "AMBERGRIS", StringComparison.Ordinal))
                     explicitAmbergrisCount++;
             }
 
-            int forcedUseCount = 0;
-            int forcedStrategicHpCost = 0;
-            int forcedAmbergrisCount = 0;
-            bool forcedUsesSatisfied = true;
-            if (_enforcePotionDirectives)
-            {
-                foreach (PotionSlotDirective directive in _potionStrategy.Directives)
-                {
-                    if (directive.Directive != SolverPotionDirective.Force)
-                        continue;
-                    bool used = false;
-                    for (SearchNode? cursor = node; cursor?.Action is { } action; cursor = cursor.Parent)
-                    {
-                        if (action.Kind != PlanActionKind.UsePotion
-                            || action.PotionSlot != directive.Slot
-                            || !string.Equals(
-                                action.PotionId,
-                                directive.PotionId,
-                                StringComparison.Ordinal))
-                        {
-                            continue;
-                        }
-                        used = true;
-                        break;
-                    }
-                    if (!used)
-                    {
-                        forcedUsesSatisfied = false;
-                        continue;
-                    }
-                    forcedUseCount++;
-                    forcedStrategicHpCost += PotionUsePolicy.StrategicHpCost(
-                        directive.PotionId,
-                        _renewablePotionShapedRock);
-                    if (string.Equals(directive.PotionId, "AMBERGRIS", StringComparison.Ordinal))
-                        forcedAmbergrisCount++;
-                }
-            }
+            ForcedPotionUseEvaluation forced = _enforcePotionDirectives
+                ? _potionStrategy.EvaluateForcedUses(node)
+                : new ForcedPotionUseEvaluation(true, 0, 0, 0);
 
             int explicitPotionUseCount = ExplicitPotionUseCount(node);
-            int optionalPotionUseCount = Math.Max(0, explicitPotionUseCount - forcedUseCount);
-            int optionalPotionStrategicCost = Math.Max(
-                0,
-                explicitPotionStrategicCost - forcedStrategicHpCost);
-            int optionalAmbergrisCount = Math.Max(0, explicitAmbergrisCount - forcedAmbergrisCount);
+            int optionalPotionUseCount = Math.Max(0, explicitPotionUseCount - forced.ForcedUseCount);
+            int optionalPotionStrategicCost = PotionUsePolicy.ApplyReplacementCredit(
+                Math.Max(0, explicitPotionStrategicCost - forced.ForcedStrategicHpCost),
+                optionalPotionUseCount,
+                _potionReplacementHpCredit);
+            int optionalAmbergrisCount = Math.Max(0, explicitAmbergrisCount - forced.ForcedAmbergrisCount);
             SolverPotionPolicy effectivePotionPolicy = _potionPolicy switch
             {
-                SolverPotionPolicy.RequireAtLeastOne when forcedUseCount > 0
+                SolverPotionPolicy.RequireAtLeastOne when forced.ForcedUseCount > 0
                     => SolverPotionPolicy.Smart,
                 SolverPotionPolicy.Disabled when optionalPotionUseCount > 0
                     => SolverPotionPolicy.Smart,
                 _ => _potionPolicy,
             };
             return new FinalPolicyQualificationFacts(
-                forcedUsesSatisfied,
+                forced.AllForcedUsesSatisfied,
                 explicitPotionUseCount,
                 effectivePotionPolicy,
                 optionalPotionUseCount,
@@ -337,27 +671,133 @@ internal sealed partial class CombatBeamSolver
                     right.OptionalAmbergrisFinalPlayerHpCohort);
         }
 
+        public static (int Value, int Count) GetLongTermResourceMaximum(
+            IReadOnlyList<SearchNode> nodes)
+        {
+            int highestValue = int.MinValue;
+            int highestCount = 0;
+            for (int index = 0; index < nodes.Count; index++)
+            {
+                int value = nodes[index].Snapshot.LongTermResourceValue;
+                if (value > highestValue)
+                {
+                    highestValue = value;
+                    highestCount = 1;
+                }
+                else if (value == highestValue)
+                {
+                    highestCount++;
+                }
+            }
+            return (highestValue, highestCount);
+        }
+
         public List<SearchNode> RankLongTermResource(
             IReadOnlyList<SearchNode> nodes,
-            int limit)
+            int limit,
+            (int Value, int Count) maximum)
         {
-            if (nodes.Count == 0)
+            if (maximum.Count == nodes.Count)
                 return [];
-            int highestValue = nodes.Max(node => node.Snapshot.LongTermResourceValue);
-            if (nodes.All(node => node.Snapshot.LongTermResourceValue == highestValue))
-                return [];
+            List<SearchNode> highest = new(maximum.Count);
+            for (int index = 0; index < nodes.Count; index++)
+            {
+                if (nodes[index].Snapshot.LongTermResourceValue == maximum.Value)
+                    highest.Add(nodes[index]);
+            }
             return RankBest(
-                nodes.Where(node => node.Snapshot.LongTermResourceValue == highestValue),
+                highest,
                 limit,
                 preserveDefensiveRoute: true);
+        }
+
+        // One signature lookup reaches both the ordered candidates and their five extrema.
+        // Keep this as a List so the existing family/option ordering consumes the same sequence.
+        private sealed class RoutingChoiceNodes(SearchNode first) : List<SearchNode>
+        {
+            public SearchNode BestScore = first;
+            public SearchNode BestOffense = first;
+            public SearchNode BestDefense = first;
+            public SearchNode BestSetup = first;
+            public SearchNode BestPileOrder = first;
+            public RoutingRankSummary? RankSummary;
+        }
+
+        private readonly record struct RoutingRankSummary(
+            double MaximumBeamScore, double MaximumParentScore, int MinimumParentRank);
+
+        private sealed class RoutingChoiceScratch
+        {
+            public Dictionary<RoutingChoiceSignature, List<SearchNode>> NodesByChoice { get; } = [];
+            public void Clear() => NodesByChoice.Clear();
+        }
+
+        private RoutingChoiceScratch? _routingChoiceScratch;
+
+        private RoutingChoiceScratch RentRoutingChoiceScratch()
+        {
+            RoutingChoiceScratch? scratch = _routingChoiceScratch;
+            if (scratch is null)
+                return new RoutingChoiceScratch();
+            _routingChoiceScratch = null;
+            scratch.Clear();
+            return scratch;
+        }
+
+        private void ReturnRoutingChoiceScratch(RoutingChoiceScratch scratch)
+        {
+            // 归还时清空，避免把这一轮的 SearchNode 一直钉在缓冲里。
+            scratch.Clear();
+            _routingChoiceScratch = scratch;
+        }
+
+        private Comparison<SearchNode>? _finalCandidateComparison;
+
+        private void SortByBeamRank(List<SearchNode> ranked)
+        {
+            if (ranked.Count < 2)
+                return;
+            // Score inputs are frozen during this sort. Preserve the same List.Sort
+            // comparison and tie behavior while evaluating the formula once per entry.
+            List<(SearchNode Node, double Score)> scored = new(ranked.Count);
+            foreach (SearchNode node in ranked)
+                scored.Add((node, BeamRankScore(node)));
+            scored.Sort(static (left, right) =>
+            {
+                return CompareBeamRankOrder(
+                    left.Score, left.Node.Snapshot.OffensiveProgressValue, left.Node.ActionCount,
+                    right.Score, right.Node.Snapshot.OffensiveProgressValue, right.Node.ActionCount);
+            });
+            for (int index = 0; index < ranked.Count; index++)
+                ranked[index] = scored[index].Node;
+        }
+
+        private Comparison<SearchNode> FinalCandidateComparison
+            => _finalCandidateComparison ??= CompareFinalCandidates;
+        public List<SearchNode> RankDeferredCandidates(IEnumerable<SearchNode> nodes, int limit)
+        {
+            List<SearchNode> ranked = nodes.ToList();
+            SortByBeamRank(ranked);
+            if (ranked.Count > limit)
+                ranked.RemoveRange(limit, ranked.Count - limit);
+            return ranked;
         }
 
         public List<SearchNode> RankBest(
             IEnumerable<SearchNode> nodes,
             int limit,
             bool preserveDefensiveRoute = false,
-            bool finalQualityFirst = false)
+            bool finalQualityFirst = false,
+            bool useSecondRankBand = false,
+            Action<GlobalRetentionDecision>? observe = null)
         {
+            Dictionary<SearchNode, RoutingChoiceSignature>? observedRoutingSignatures =
+                observe != null && preserveDefensiveRoute
+                    ? new(ReferenceEqualityComparer.Instance)
+                    : null;
+            HashSet<SearchNode>? observedOptionLeaders = observe != null && preserveDefensiveRoute
+                ? new(ReferenceEqualityComparer.Instance)
+                : null;
             List<SearchNode> ranked;
             if (finalQualityFirst)
             {
@@ -380,76 +820,99 @@ internal sealed partial class CombatBeamSolver
                 ranked = [.. bestByState.Values];
             }
 
-            ranked.Sort(finalQualityFirst
-                ? CompareFinalCandidates
-                : (left, right) =>
-                {
-                    int byScore = BeamRankScore(right).CompareTo(BeamRankScore(left));
-                    return byScore != 0 ? byScore : left.ActionCount.CompareTo(right.ActionCount);
-                });
+            if (finalQualityFirst)
+                ranked.Sort(FinalCandidateComparison);
+            else
+                SortByBeamRank(ranked);
             List<SearchNode> routingChoices = [];
             if (preserveDefensiveRoute)
             {
-                Dictionary<RoutingChoiceSignature, SearchNode> bestScoreByRoutingChoice = [];
-                Dictionary<RoutingChoiceSignature, SearchNode> bestOffenseByRoutingChoice = [];
-                Dictionary<RoutingChoiceSignature, SearchNode> bestDefenseByRoutingChoice = [];
-                Dictionary<RoutingChoiceSignature, SearchNode> bestSetupByRoutingChoice = [];
-                Dictionary<RoutingChoiceSignature, SearchNode> bestPileOrderByRoutingChoice = [];
-                Dictionary<RoutingChoiceSignature, List<SearchNode>> nodesByRoutingChoice = [];
-                foreach (SearchNode node in ranked)
+                foreach (SearchNode candidate in BuildAmbiguousCompressedChoicePortfolio(ranked, limit))
+                    AddRoutingCandidate(routingChoices, candidate, RoutingChoiceLimit);
+                RoutingChoiceScratch scratch = RentRoutingChoiceScratch();
+                Dictionary<RoutingChoiceSignature, List<SearchNode>> nodesByRoutingChoice = scratch.NodesByChoice;
+                // The routing signature is a pure walk of the node's parent chain, so it can be
+                // computed off-thread; grouping stays serial to preserve insertion order.
+                RoutingChoiceSignature?[] signatureByIndex = new RoutingChoiceSignature?[ranked.Count];
+                if (ranked.Count >= 64)
                 {
-                    RoutingChoiceSignature? signature = RetainedRoutingChoice(node);
+                    ForEachRetentionIndex(ranked.Count,
+                        ParallelExpansionWorkProfile.Kind.RoutingSignature, index =>
+                        signatureByIndex[index] = RetainedRoutingChoice(ranked[index]));
+                }
+                else
+                {
+                    for (int index = 0; index < ranked.Count; index++)
+                        signatureByIndex[index] = RetainedRoutingChoice(ranked[index]);
+                }
+                for (int rankedIndex = 0; rankedIndex < ranked.Count; rankedIndex++)
+                {
+                    SearchNode node = ranked[rankedIndex];
+                    RoutingChoiceSignature? signature = signatureByIndex[rankedIndex];
                     if (signature == null)
                         continue;
+                    if (observedRoutingSignatures != null)
+                        observedRoutingSignatures[node] = signature.Value;
                     if (!nodesByRoutingChoice.TryGetValue(signature.Value, out List<SearchNode>? routingNodes))
                     {
-                        routingNodes = [];
+                        routingNodes = new RoutingChoiceNodes(node);
                         nodesByRoutingChoice.Add(signature.Value, routingNodes);
                     }
+                    else
+                    {
+                        RoutingChoiceNodes group = (RoutingChoiceNodes)routingNodes;
+                        if (IsBetterSearchNode(node, group.BestScore))
+                            group.BestScore = node;
+                        if (IsBetterOffensive(node, group.BestOffense))
+                            group.BestOffense = node;
+                        if (IsBetterDefensive(node, group.BestDefense))
+                            group.BestDefense = node;
+                        if (IsBetterSetup(node, group.BestSetup))
+                            group.BestSetup = node;
+                        if (node.Snapshot.ProjectedShuffleOrderValue > group.BestPileOrder.Snapshot.ProjectedShuffleOrderValue
+                            || node.Snapshot.ProjectedShuffleOrderValue == group.BestPileOrder.Snapshot.ProjectedShuffleOrderValue
+                                && IsBetterSearchNode(node, group.BestPileOrder))
+                            group.BestPileOrder = node;
+                    }
                     routingNodes.Add(node);
-                    if (!bestScoreByRoutingChoice.TryGetValue(signature.Value, out SearchNode? current)
-                        || IsBetterSearchNode(node, current))
-                    {
-                        bestScoreByRoutingChoice[signature.Value] = node;
-                    }
-                    bestOffenseByRoutingChoice.TryGetValue(signature.Value, out SearchNode? currentOffense);
-                    if (IsBetterOffensive(node, currentOffense))
-                        bestOffenseByRoutingChoice[signature.Value] = node;
-                    bestDefenseByRoutingChoice.TryGetValue(signature.Value, out SearchNode? currentDefense);
-                    if (IsBetterDefensive(node, currentDefense))
-                        bestDefenseByRoutingChoice[signature.Value] = node;
-                    bestSetupByRoutingChoice.TryGetValue(signature.Value, out SearchNode? currentSetup);
-                    if (IsBetterSetup(node, currentSetup))
-                        bestSetupByRoutingChoice[signature.Value] = node;
-                    if (!bestPileOrderByRoutingChoice.TryGetValue(signature.Value, out SearchNode? currentPileOrder)
-                        || node.Snapshot.ProjectedShuffleOrderValue
-                            > currentPileOrder.Snapshot.ProjectedShuffleOrderValue
-                        || node.Snapshot.ProjectedShuffleOrderValue
-                            == currentPileOrder.Snapshot.ProjectedShuffleOrderValue
-                            && IsBetterSearchNode(node, currentPileOrder))
-                    {
-                        bestPileOrderByRoutingChoice[signature.Value] = node;
-                    }
                 }
+                // The ordered groups are now complete. Parent ranks and score inputs remain
+                // unchanged until AssignRetentionRanks, after this entire routing block.
+                // Use the original reductions once, including their NaN behavior.
+                RoutingChoiceNodes[] summaryGroups = nodesByRoutingChoice.Values
+                    .Cast<RoutingChoiceNodes>().ToArray();
+                ForEachRetentionIndex(summaryGroups.Length,
+                    ParallelExpansionWorkProfile.Kind.RoutingSummary, index =>
+                {
+                    RoutingChoiceNodes group = summaryGroups[index];
+                    group.RankSummary = new(
+                        group.Max(BeamRankScore),
+                        ComputeRoutingParentScore(group),
+                        ComputeRoutingParentRetentionRank(group));
+                });
+                _run.RoutingChoiceSummaryBuilds += summaryGroups.Length;
                 List<IReadOnlyList<SearchNode>> paretoByRoutingChoice = [];
                 List<IReadOnlyList<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>>> routingFamilies =
                     nodesByRoutingChoice
-                        .OrderByDescending(pair => pair.Value.Max(BeamRankScore))
+                        .OrderByDescending(pair => MaximumRoutingBeamScore(pair.Value))
                         .GroupBy(pair => BuildRoutingChoiceFamilySignature(pair.Key))
                         .OrderBy(family => family.Min(pair => RoutingParentRetentionRank(pair.Value)))
                         .ThenByDescending(family => family.Max(pair => RoutingParentScore(pair.Value)))
-                        .ThenByDescending(family => family.Max(pair => pair.Value.Max(BeamRankScore)))
+                        .ThenByDescending(family => family.Max(pair => MaximumRoutingBeamScore(pair.Value)))
                         .Select(family => (IReadOnlyList<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>>)
                             OrderRoutingChoiceEventContexts(family))
                         .ToList();
-                List<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> orderedRoutingContexts = [];
+                // Each context comes from a unique dictionary key and belongs to exactly one
+                // family. The only repeat is the persistent prefix emitted in the first pass.
+                List<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> orderedRoutingContexts =
+                    new(nodesByRoutingChoice.Count);
                 for (int round = 0; round < PersistentRoutingContextRounds; round++)
                 {
                     foreach (IReadOnlyList<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> family in
                         routingFamilies.Where(family => IsPersistentRoutingEffect(family[0].Key.Effect)))
                     {
                         if (round < family.Count)
-                            AddRoutingContext(orderedRoutingContexts, family[round]);
+                            orderedRoutingContexts.Add(family[round]);
                     }
                 }
                 int routingContextRound = 0;
@@ -457,42 +920,61 @@ internal sealed partial class CombatBeamSolver
                 {
                     foreach (IReadOnlyList<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> family in routingFamilies)
                     {
-                        if (routingContextRound < family.Count)
-                            AddRoutingContext(orderedRoutingContexts, family[routingContextRound]);
+                        if (routingContextRound < family.Count
+                            && (routingContextRound >= PersistentRoutingContextRounds
+                                || !IsPersistentRoutingEffect(family[0].Key.Effect)))
+                        {
+                            orderedRoutingContexts.Add(family[routingContextRound]);
+                        }
                     }
                     routingContextRound++;
                 }
-                foreach ((RoutingChoiceSignature signature, List<SearchNode> routingNodes) in orderedRoutingContexts)
+                List<SearchNode>[] paretoByContext = new List<SearchNode>[orderedRoutingContexts.Count];
+                void BuildContextPareto(int contextIndex)
                 {
+                    List<SearchNode> routingNodes = orderedRoutingContexts[contextIndex].Value;
+                    RoutingChoiceNodes group = (RoutingChoiceNodes)routingNodes;
                     SearchNode? bestDeckCuration = FindBestDeckCuration(routingNodes);
                     SearchNode? bestTargetPressure = PreferMostVulnerableTargetVariant(
                         routingNodes,
                         FindBestTargetPressure(routingNodes));
                     List<SearchNode> candidates = [];
+                    if (orderedRoutingContexts[contextIndex].Key.Effect
+                        is PlanChoiceEffect.Discard or PlanChoiceEffect.DiscardAndDraw)
+                    {
+                        AddRoutingCandidate(candidates, FindBestSafeDiscardContinuation(routingNodes));
+                    }
                     if (routingNodes.Min(ActionsSinceRetainedRoutingChoice) <= 1)
                     {
-                        AddRoutingCandidate(candidates, bestSetupByRoutingChoice[signature]);
+                        AddRoutingCandidate(candidates, group.BestSetup);
                         AddRoutingCandidate(candidates, bestTargetPressure);
                     }
                     else
                     {
                         AddRoutingCandidate(candidates, bestTargetPressure);
                         AddRoutingCandidate(candidates, bestDeckCuration);
-                        AddRoutingCandidate(candidates, bestSetupByRoutingChoice[signature]);
+                        AddRoutingCandidate(candidates, group.BestSetup);
                     }
                     foreach (SearchNode node in routingNodes.Take(16))
                         AddRoutingCandidate(candidates, node);
-                    AddRoutingCandidate(candidates, bestScoreByRoutingChoice[signature]);
-                    AddRoutingCandidate(candidates, bestOffenseByRoutingChoice[signature]);
-                    AddRoutingCandidate(candidates, bestDefenseByRoutingChoice[signature]);
-                    AddRoutingCandidate(candidates, bestPileOrderByRoutingChoice[signature]);
-                    List<SearchNode> pareto = candidates
+                    AddRoutingCandidate(candidates, group.BestScore);
+                    AddRoutingCandidate(candidates, group.BestOffense);
+                    AddRoutingCandidate(candidates, group.BestDefense);
+                    AddRoutingCandidate(candidates, group.BestPileOrder);
+                    paretoByContext[contextIndex] = candidates
                         .Where(candidate => !candidates.Any(other =>
                             !ReferenceEquals(candidate, other)
                             && MultiObjectiveDominates(other, candidate)))
                         .ToList();
-                    paretoByRoutingChoice.Add(pareto);
                 }
+                if (orderedRoutingContexts.Count >= 8)
+                    ForEachRetentionIndex(orderedRoutingContexts.Count,
+                        ParallelExpansionWorkProfile.Kind.RoutingPareto, BuildContextPareto);
+                else
+                    for (int contextIndex = 0; contextIndex < orderedRoutingContexts.Count; contextIndex++)
+                        BuildContextPareto(contextIndex);
+                foreach (List<SearchNode> pareto in paretoByContext)
+                    paretoByRoutingChoice.Add(pareto);
                 foreach (IReadOnlyList<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> family in routingFamilies)
                 {
                     IReadOnlyList<SearchNode> familyNodes = family
@@ -502,9 +984,16 @@ internal sealed partial class CombatBeamSolver
                         routingChoices,
                         PreferMostVulnerableTargetVariant(
                             familyNodes,
-                            FindBestTargetPressure(familyNodes)));
-                    AddRoutingCandidate(routingChoices, FindBestDeckCuration(familyNodes));
-                    AddRoutingCandidate(routingChoices, FindBestSetup(familyNodes));
+                            FindBestTargetPressure(familyNodes)),
+                        RoutingChoiceLimit);
+                    AddRoutingCandidate(
+                        routingChoices,
+                        FindBestDeckCuration(familyNodes),
+                        RoutingChoiceLimit);
+                    AddRoutingCandidate(
+                        routingChoices,
+                        FindBestSetup(familyNodes),
+                        RoutingChoiceLimit);
                     foreach (IGrouping<RoutingChoiceOptionSignature,
                                  KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> optionGroup in family
                                  .GroupBy(pair => BuildRoutingChoiceOptionSignature(pair.Key)))
@@ -533,14 +1022,16 @@ internal sealed partial class CombatBeamSolver
                                 optionNodes,
                                 FindBestTargetPressure(optionNodes));
                         }
-                        AddRoutingCandidate(routingChoices, optionLeader);
+                        if (observedOptionLeaders != null && optionLeader != null)
+                            observedOptionLeaders.Add(optionLeader);
+                        AddRoutingCandidate(routingChoices, optionLeader, RoutingChoiceLimit);
                     }
                 }
                 foreach (SearchNode candidate in BuildDirectRoutingChoiceExtremes(ranked))
                 {
                     if (routingChoices.Count >= RoutingChoiceLimit)
                         break;
-                    AddRoutingCandidate(routingChoices, candidate);
+                    AddRoutingCandidate(routingChoices, candidate, RoutingChoiceLimit);
                 }
                 int routingRound = 0;
                 while (routingChoices.Count < RoutingChoiceLimit
@@ -549,30 +1040,31 @@ internal sealed partial class CombatBeamSolver
                     foreach (IReadOnlyList<SearchNode> group in paretoByRoutingChoice)
                     {
                         if (routingRound < group.Count)
-                            AddRoutingCandidate(routingChoices, group[routingRound]);
+                            AddRoutingCandidate(routingChoices, group[routingRound], RoutingChoiceLimit);
                         if (routingChoices.Count >= RoutingChoiceLimit)
                             break;
                     }
                     routingRound++;
                 }
+                ReturnRoutingChoiceScratch(scratch);
             }
             if (ranked.Count <= limit)
             {
+                observe?.Invoke(new GlobalRetentionDecision(
+                    ranked, [], routingChoices, ranked, limit, limit, null, RoutingChoiceLimit,
+                    observedRoutingSignatures, observedOptionLeaders, BeamRankScore));
                 AssignRetentionRanks(ranked, []);
                 return ranked;
             }
 
             int effectiveLimit = limit;
             bool preserveOrderedPile = preserveDefensiveRoute
-                && _profile.Phase == SolverSearchPhase.Deep
                 && ranked.Any(node => node.Snapshot.PocketwatchCardThreshold >= 0);
             int routingChoiceQuota = preserveOrderedPile
-                ? routingChoices.Count
-                : _profile.Phase == SolverSearchPhase.Deep
-                ? _isActEndingBoss
+                ? BoundedRoutingChoiceQuota(routingChoices.Count)
+                : _isActEndingBoss
                     ? Math.Max(10, (limit + 3) / 2)
-                    : Math.Max(8, limit * 2 / 5)
-                : Math.Max(4, limit / 4);
+                    : Math.Max(8, limit * 2 / 5);
             List<OrderedPileCohort> orderedPileCohorts = [];
             if (preserveOrderedPile)
             {
@@ -751,13 +1243,14 @@ internal sealed partial class CombatBeamSolver
                     (SearchNode?)null,
                     (best, node) => IsBetterCompletedVictory(node, best) ? node : best), limit);
             }
-            if (preserveDefensiveRoute && _profile.Phase == SolverSearchPhase.Deep)
+            if (preserveDefensiveRoute)
             {
                 foreach (IGrouping<int, SearchNode> potionGroup in ranked
                              .GroupBy(node => node.PotionCount)
                              .OrderBy(group => group.Key))
                 {
                     IReadOnlyList<SearchNode> group = potionGroup.ToList();
+                    AddRequired(required, FindBestDamagingContinuation(group), limit);
                     AddRequired(required, FindBestFreshResourceStandPat(group), limit);
                     AddRequired(required, FindBestStandPat(group, SearchRouteTraits.Scaling), limit);
                     AddRequired(required, FindBestStandPat(group, SearchRouteTraits.Resource), limit);
@@ -806,12 +1299,12 @@ internal sealed partial class CombatBeamSolver
                     AddRequired(required, FindBestTurnBoundaryHand(potionGroup), effectiveLimit);
                 }
             }
-            int orderedPileQuota = orderedPileCohorts.Count == 0
+            int orderedPileQuota = Math.Min(effectiveLimit, orderedPileCohorts.Count == 0
                 ? 0
                 : endTurnFrontier
                     || ranked.Any(node => node.Traits.HasFlag(SearchRouteTraits.EndTurnDeckCompression))
                     ? Math.Max(8, limit * 2 / 3)
-                    : limit + 1;
+                    : limit + 1);
             int orderedPileRounds = orderedPileCohorts.Count == 0
                 ? 0
                 : orderedPileCohorts.Max(cohort => cohort.PrefixVariants.Count);
@@ -955,7 +1448,9 @@ internal sealed partial class CombatBeamSolver
                 }
             }
             foreach (SearchNode routingChoice in routingChoices.Take(routingChoiceQuota))
+            {
                 AddRequired(required, routingChoice, effectiveLimit);
+            }
             if (preserveDefensiveRoute)
             {
                 foreach (IGrouping<int, SearchNode> potionGroup in ranked
@@ -971,7 +1466,7 @@ internal sealed partial class CombatBeamSolver
                     AddRequired(required, FindBestSetup(artOfWarCandidates), effectiveLimit);
                 }
             }
-            if (preserveDefensiveRoute && _profile.Phase == SolverSearchPhase.Deep)
+            if (preserveDefensiveRoute)
             {
                 int signatureLimitPerPotionGroup = Math.Max(4, limit / 6);
                 foreach (IGrouping<int, SearchNode> potionGroup in ranked
@@ -1086,7 +1581,6 @@ internal sealed partial class CombatBeamSolver
             AddRequired(required, FindBestLane(ranked, SearchRouteTraits.LongTermResource), limit);
             AddRequired(required, FindBestLane(ranked, SearchRouteTraits.HpInvestment), limit);
             if (preserveDefensiveRoute
-                && _profile.Phase == SolverSearchPhase.Deep
                 && limit >= 18)
             {
                 foreach (SearchRouteTraits trait in new[]
@@ -1165,7 +1659,28 @@ internal sealed partial class CombatBeamSolver
                     AddRequired(required, candidate, limit);
             }
 
+            if (preserveDefensiveRoute && !finalQualityFirst && _developmentStrategy != null
+                && required.Count < limit)
+            {
+                SearchNode? scripted = null;
+                double bestPriority = 0;
+                foreach (SearchNode node in ranked)
+                {
+                    double priority = _developmentStrategy.Retain(node);
+                    if (priority <= bestPriority)
+                        continue;
+                    scripted = node;
+                    bestPriority = priority;
+                }
+                AddRequired(required, scripted, limit);
+            }
+
             List<SearchNode> quotaPool = ranked.ToList();
+            // 次段成员（见 SolverSearchProfile.SecondRankBand）：只由全局剪枝入口显式启用，
+            // 把分数序前 effectiveLimit 位挪到队尾再截断，于是普通席位落在第 W+1 至 2W 位；挪走的
+            // 一段只在后面候选不够时回填。quotaPool 仍是纯分数序，必保置换、边界多样化和药水配额照旧。
+            if (_profile.SecondRankBand && useSecondRankBand)
+                BeamWidthPortfolio.MoveLeadingBandToTail(ranked, effectiveLimit);
             if (ranked.Count > effectiveLimit)
                 ranked.RemoveRange(effectiveLimit, ranked.Count - effectiveLimit);
             foreach (SearchNode requiredNode in required)
@@ -1184,1337 +1699,147 @@ internal sealed partial class CombatBeamSolver
                     throw new InvalidOperationException("Beam 容量不足以保留策略必需分支。");
                 ranked[replaceIndex] = requiredNode;
             }
+            AdmitPowerCommitmentRepresentatives(quotaPool, ranked, required, limit);
+            AdmitPlanCommitmentRepresentatives(quotaPool, ranked, required, limit);
+            DiversifyOrdinaryBeamBoundary(
+                quotaPool,
+                ranked,
+                required,
+                node => (
+                    BeamRankScore(node),
+                    node.ActionCount,
+                    node.Snapshot.OffensiveProgressValue,
+                    node.PotionCount,
+                    IsCompleteVictory(node)),
+                finalQualityFirst,
+                node => new OrdinaryBeamTacticalValues(
+                    node.Turn,
+                    node.PotionCount,
+                    node.PotionStrategicCost,
+                    node.FutureSoldHp,
+                    node.Snapshot.CumulativePlayerHpLost,
+                    node.ActionCount,
+                    node.Score,
+                    node.Snapshot.ZeroCostPlayableCount,
+                    node.Snapshot.ReachableHandValue,
+                    node.Snapshot.HandCount,
+                    HasRetainedRoutingChoice: RetainedRoutingChoice(node) != null),
+                // Base-score members intentionally remove the weighted tactical terms.
+                // Resolve their exact boundary ties with the existing same-policy hand
+                // order even when offensive progress is uniform. Other members retain
+                // their original tie behavior and remain independent alternatives.
+                includeSingleProgressGroup: _profile.BaseScoreOnly && _profile.BaseScoreTacticalTies);
             if (_potionPolicy != SolverPotionPolicy.Disabled
                 && quotaPool.Any(UsesPotion)
                 && quotaPool.Any(node => !UsesPotion(node)))
             {
-                int usedPotionQuota = Math.Max(2, limit / 3);
-                int unusedPotionQuota = Math.Max(usedPotionQuota, limit - usedPotionQuota);
-                EnforcePotionUseQuota(ranked, quotaPool, required, usesPotion: true, usedPotionQuota);
-                EnforcePotionUseQuota(ranked, quotaPool, required, usesPotion: false, unusedPotionQuota);
+                (int usedPotionQuota, int unusedPotionQuota) =
+                    FeasiblePotionUseQuotas(limit);
+                HashSet<SearchNode> quotaReservations = new(
+                    required,
+                    ReferenceEqualityComparer.Instance);
+                ReservePotionQuotaLeaders(
+                    quotaReservations,
+                    quotaPool,
+                    usesPotion: true,
+                    usedPotionQuota);
+                ReservePotionQuotaLeaders(
+                    quotaReservations,
+                    quotaPool,
+                    usesPotion: false,
+                    unusedPotionQuota);
+                EnforcePotionUseQuota(
+                    ranked,
+                    quotaPool,
+                    quotaReservations,
+                    usesPotion: true,
+                    usedPotionQuota);
+                EnforcePotionUseQuota(
+                    ranked,
+                    quotaPool,
+                    quotaReservations,
+                    usesPotion: false,
+                    unusedPotionQuota);
             }
-            ranked.Sort(finalQualityFirst
-                ? CompareFinalCandidates
-                : (left, right) =>
-                {
-                    int byScore = BeamRankScore(right).CompareTo(BeamRankScore(left));
-                    return byScore != 0 ? byScore : left.ActionCount.CompareTo(right.ActionCount);
-                });
+            if (finalQualityFirst)
+                ranked.Sort(FinalCandidateComparison);
+            else
+                SortByBeamRank(ranked);
+            observe?.Invoke(new GlobalRetentionDecision(
+                quotaPool, required, routingChoices, ranked, limit, effectiveLimit,
+                routingChoiceQuota, RoutingChoiceLimit,
+                observedRoutingSignatures, observedOptionLeaders, BeamRankScore));
             AssignRetentionRanks(ranked, required);
             return ranked;
         }
 
-        private static StateFingerprint BuildOrderedPileTacticalKey(SearchNode node)
+        private void AdmitPowerCommitmentRepresentatives(
+            IReadOnlyList<SearchNode> pool,
+            List<SearchNode> selected,
+            List<SearchNode> required,
+            int limit)
         {
-            SimulationSnapshot snapshot = node.Snapshot;
-            StateFingerprintBuilder key = new();
-            key.Add(node.Turn);
-            key.Add(node.PotionCount);
-            key.Add(node.PotionStrategicCost);
-            key.Add(node.FutureSoldHp);
-            key.Add(snapshot.PlayerHp);
-            key.Add(snapshot.ProjectedPlayerHp);
-            key.Add(snapshot.PlayerBlock);
-            key.Add(snapshot.EnemyHp);
-            key.Add(snapshot.RawEnemyHp);
-            key.Add(snapshot.MaxCurrentEnemyHp);
-            key.Add(snapshot.EnemyCombatDistributionKey.First);
-            key.Add(snapshot.EnemyCombatDistributionKey.Second);
-            key.Add(snapshot.AliveEnemyMask);
-            key.Add(snapshot.RevivingEnemyCount);
-            key.Add(snapshot.FocusTargetCombatId ?? uint.MaxValue);
-            key.Add(snapshot.PersistentBuffValue);
-            key.Add((int)snapshot.StrategicSetupTraits);
-            key.Add(snapshot.FutureResourceValue);
-            key.Add(snapshot.DelayedDamageValue);
-            key.Add(snapshot.EnemyStrengthSuppression);
-            key.Add(snapshot.EnemyWeakTurns);
-            key.Add(snapshot.EnemyVulnerableTurns);
-            key.Add(snapshot.FocusTargetVulnerableTurns);
-            key.Add(snapshot.EnemyControlDistributionKey.First);
-            key.Add(snapshot.EnemyControlDistributionKey.Second);
-            key.Add(snapshot.SandpitRemaining);
-            key.Add(snapshot.LiveDeckClutter);
-            key.Add(snapshot.OutstandingStolenResource);
-            key.Add(snapshot.Energy);
-            key.Add(snapshot.Stars);
-            key.Add(snapshot.HandCount);
-            key.Add(snapshot.PocketwatchCardsPlayedThisTurn);
-            key.Add(snapshot.PocketwatchCardsPlayedLastTurn);
-            key.Add(snapshot.PocketwatchCardThreshold);
-            key.Add(snapshot.ShufflesCrossed);
-            key.Add((int)snapshot.BoundaryReason);
-            key.Add(snapshot.UnorderedPileKey.First);
-            key.Add(snapshot.UnorderedPileKey.Second);
-            return key.Finish();
-        }
-
-        private RootActionLineageSignature BuildRootActionLineageSignature(SearchNode node)
-        {
-            PlanAction action = RootActionLineageNode(node).Action
-                ?? throw new InvalidOperationException("搜索首步谱系缺少动作。");
-            PlanAction? firstCard = _preserveReplayAllocatorOpening
-                ? node.Actions.FirstOrDefault(candidate => candidate.Kind == PlanActionKind.PlayCard)
-                : null;
-            return new RootActionLineageSignature(
-                action.Kind,
-                action.CardId,
-                action.PotionId,
-                action.TargetCombatId,
-                firstCard?.CardId ?? "",
-                firstCard?.TargetCombatId);
-        }
-
-        private static SearchNode RootActionLineageNode(SearchNode node)
-        {
-            SearchNode cursor = node;
-            while (cursor.Parent?.Action != null)
-                cursor = cursor.Parent;
-            return cursor;
-        }
-
-        private PocketwatchCadenceSignature BuildPocketwatchCadenceSignature(SearchNode node)
-        {
-            SimulationSnapshot snapshot = node.Snapshot;
-            int threshold = snapshot.PocketwatchCardThreshold;
-            return new PocketwatchCadenceSignature(
-                node.PotionCount,
-                snapshot.FocusTargetCombatId,
-                RetainedAttackGrowth(snapshot),
-                snapshot.EnemyControlDistributionKey,
-                threshold >= 0 && snapshot.PocketwatchCardsPlayedLastTurn <= threshold,
-                snapshot.CanStillTriggerPocketwatch);
-        }
-
-        private PocketwatchCadenceFamilySignature BuildPocketwatchCadenceFamilySignature(SearchNode node)
-        {
-            SimulationSnapshot snapshot = node.Snapshot;
-            int threshold = snapshot.PocketwatchCardThreshold;
-            return new PocketwatchCadenceFamilySignature(
-                node.PotionCount,
-                snapshot.FocusTargetCombatId,
-                RetainedAttackGrowth(snapshot),
-                threshold >= 0 && snapshot.PocketwatchCardsPlayedLastTurn <= threshold,
-                snapshot.CanStillTriggerPocketwatch);
-        }
-
-        private static void AddTacticalGroup(
-            List<IGrouping<StateFingerprint, SearchNode>> selected,
-            IGrouping<StateFingerprint, SearchNode> candidate)
-        {
-            if (!selected.Any(group => ReferenceEquals(group, candidate)))
-                selected.Add(candidate);
-        }
-
-        private static void AddRoutingCandidate(List<SearchNode> selected, SearchNode? candidate)
-        {
-            if (candidate != null && !ContainsReference(selected, candidate))
-                selected.Add(candidate);
-        }
-
-        private static void AddRoutingContext(
-            List<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> selected,
-            KeyValuePair<RoutingChoiceSignature, List<SearchNode>> candidate)
-        {
-            if (!selected.Any(pair => pair.Key == candidate.Key))
-                selected.Add(candidate);
-        }
-
-        private static bool IsPersistentRoutingEffect(PlanChoiceEffect effect)
-            => effect is PlanChoiceEffect.SetFreeThisCombat
-                or PlanChoiceEffect.Exhaust
-                or PlanChoiceEffect.Transform
-                or PlanChoiceEffect.Modify
-                or PlanChoiceEffect.ApplyRetain;
-
-        private double RoutingParentScore(IReadOnlyList<SearchNode> nodes)
-            => nodes.Max(node =>
+            if (_run.PowerCommitmentsCreated == 0)
+                return;
+            int quota = PowerCommitmentSeatPolicy.SeatQuota(
+                limit,
+                _profile.AggressivePowerCommitment);
+            _run.PowerValuationCandidates += pool.Count(node => node.PowerCommitment != null);
+            IReadOnlyList<SearchNode> representatives = PowerCommitmentRetention.RankRepresentatives(pool, quota);
+            int retained = 0;
+            foreach (SearchNode candidate in representatives)
             {
-                if (TryGetRetainedRoutingChoice(node, out _, out SearchNode choiceNode)
-                    && choiceNode.Parent is { } choiceParent)
+                if (ContainsReference(selected, candidate))
                 {
-                    return BeamRankScore(choiceParent);
-                }
-                return BeamRankScore(node);
-            });
-
-        private static int RoutingParentRetentionRank(IReadOnlyList<SearchNode> nodes)
-            => nodes.Min(node =>
-            {
-                if (TryGetRetainedRoutingChoice(node, out _, out SearchNode choiceNode)
-                    && choiceNode.Parent is { } choiceParent)
-                {
-                    return choiceParent.RetentionRank;
-                }
-                return node.RetentionRank;
-            });
-
-        private static RoutingChoiceFamilySignature BuildRoutingChoiceFamilySignature(
-            RoutingChoiceSignature signature)
-            => new(
-                signature.Turn,
-                signature.SourceId,
-                signature.Effect,
-                signature.Pile);
-
-        private List<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> OrderRoutingChoiceEventContexts(
-            IEnumerable<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> contexts)
-        {
-            List<IReadOnlyList<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>>> optionGroups = contexts
-                .GroupBy(pair => new RoutingChoiceOptionSignature(
-                    pair.Key.CardId,
-                    pair.Key.Upgrade,
-                    pair.Key.CardStateKey))
-                .OrderBy(group => group.Min(pair => RoutingParentRetentionRank(pair.Value)))
-                .ThenByDescending(group => group.Max(pair => RoutingParentScore(pair.Value)))
-                .ThenByDescending(group => group.Max(pair => pair.Value.Max(BeamRankScore)))
-                .Select(group => (IReadOnlyList<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>>)group
-                    .OrderBy(pair => RoutingParentRetentionRank(pair.Value))
-                    .ThenByDescending(pair => RoutingParentScore(pair.Value))
-                    .ThenByDescending(pair => pair.Value.Max(BeamRankScore))
-                    .ToList())
-                .ToList();
-            List<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> ordered = [];
-            int roundStart = 0;
-            while (optionGroups.Any(group => roundStart < group.Count))
-            {
-                foreach (IReadOnlyList<KeyValuePair<RoutingChoiceSignature, List<SearchNode>>> group in optionGroups)
-                {
-                    for (int index = roundStart;
-                         index < Math.Min(group.Count, roundStart + PersistentRoutingContextRounds);
-                         index++)
-                    {
-                        ordered.Add(group[index]);
-                    }
-                }
-                roundStart += PersistentRoutingContextRounds;
-            }
-            return ordered;
-        }
-
-        private List<SearchNode> BuildDirectRoutingChoiceExtremes(IReadOnlyList<SearchNode> ranked)
-        {
-            List<DirectRoutingChoice> direct = [];
-            foreach (SearchNode node in ranked)
-            {
-                if (!TryGetCurrentTurnRoutingChoice(node, out RoutingChoiceSignature signature, out SearchNode choiceNode)
-                    || !ReferenceEquals(node, choiceNode)
-                    || choiceNode.Parent is not { } parent
-                    || parent.Snapshot.Energy != 0)
-                {
+                    AddRequired(required, candidate, limit);
+                    retained++;
                     continue;
                 }
-                direct.Add(new DirectRoutingChoice(node, choiceNode, parent, signature));
+                int replaceIndex = selected.FindLastIndex(node =>
+                    !ContainsReference(required, node)
+                    && !ContainsReference(representatives, node));
+                if (replaceIndex < 0)
+                    continue;
+                selected[replaceIndex] = candidate;
+                AddRequired(required, candidate, limit);
+                retained++;
+                _run.PowerCommitmentsAdmitted++;
             }
-
-            List<IReadOnlyList<DirectRoutingChoice>> byFamily = direct
-                .GroupBy(item => BuildRoutingChoiceFamilySignature(item.Signature))
-                .OrderBy(family => family.Min(item => item.Parent.RetentionRank))
-                .ThenByDescending(family => family.Max(item => BeamRankScore(item.Parent)))
-                .Select(family => (IReadOnlyList<DirectRoutingChoice>)family
-                    .GroupBy(item => (item.Parent.StateKey, item.Parent.ActionCount))
-                    .Select(parent => parent
-                        .OrderByDescending(item => RoutingChoiceCardinality(item.Signature))
-                        .ThenByDescending(item => AttackDensity(item.Node.Snapshot))
-                        .ThenByDescending(item => BeamRankScore(item.Node))
-                        .First())
-                    .OrderBy(item => item.Parent.RetentionRank)
-                    .ThenByDescending(item => BeamRankScore(item.Parent))
-                    .Take(RoutingChoiceLimit)
-                    .ToList())
-                .ToList();
-            return byFamily
-                .SelectMany(family => family)
-                .OrderBy(item => item.Parent.RetentionRank)
-                .ThenByDescending(item => BeamRankScore(item.Parent))
-                .Take(RoutingChoiceLimit)
-                .Select(item => item.Node)
-                .ToList();
+            _run.PowerCommitmentSeatsPeak = Math.Max(_run.PowerCommitmentSeatsPeak, retained);
         }
 
-        private static int RoutingChoiceCardinality(RoutingChoiceSignature signature)
-            => signature.CardId.EndsWith(" cards", StringComparison.Ordinal)
-                ? signature.Upgrade
-                : 1;
-
-        private static StateFingerprint EndTurnDeckCompressionLineageKey(SearchNode node)
-            => EndTurnDeckCompressionLineageRoot(node).StateKey;
-
-        private static SearchNode EndTurnDeckCompressionLineageRoot(SearchNode node)
-        {
-            SearchNode cursor = node;
-            while (cursor.Parent is { } parent
-                && parent.Traits.HasFlag(SearchRouteTraits.EndTurnDeckCompression))
-            {
-                cursor = parent;
-            }
-            return cursor;
-        }
-
-        private static RoutingChoiceOptionSignature BuildRoutingChoiceOptionSignature(
-            RoutingChoiceSignature signature)
-            => new(signature.CardId, signature.Upgrade, signature.CardStateKey);
-
-        private static void AssignRetentionRanks(
-            IReadOnlyList<SearchNode> ranked,
-            IReadOnlyList<SearchNode> required)
-        {
-            for (int rankedIndex = 0; rankedIndex < ranked.Count; rankedIndex++)
-            {
-                SearchNode node = ranked[rankedIndex];
-                int requiredIndex = -1;
-                for (int index = 0; index < required.Count; index++)
-                {
-                    if (!ReferenceEquals(required[index], node))
-                        continue;
-                    requiredIndex = index;
-                    break;
-                }
-                node.RetentionRank = requiredIndex >= 0
-                    ? requiredIndex
-                    : required.Count + rankedIndex;
-            }
-        }
-
-        private static void EnforcePotionUseQuota(
-            List<SearchNode> selected,
+        private void AdmitPlanCommitmentRepresentatives(
             IReadOnlyList<SearchNode> pool,
-            IReadOnlyList<SearchNode> protectedNodes,
-            bool usesPotion,
-            int quota)
+            List<SearchNode> selected,
+            List<SearchNode> required,
+            int limit)
         {
-            int retained = selected.Count(node => UsesPotion(node) == usesPotion);
-            if (retained >= quota)
+            if (_planCommitment is not { Kind: PlanCommitmentKind.CopyPower } plan)
                 return;
 
-            foreach (SearchNode candidate in pool.Where(node => UsesPotion(node) == usesPotion))
+            SearchNode[] representatives = pool
+                .Select(node => (Node: node, Progress: plan.CountRealizedPayoffs(node)))
+                .Where(item => item.Progress > 0)
+                .GroupBy(item => item.Progress)
+                .OrderByDescending(group => group.Key)
+                .Take(3)
+                .Select(group => group.MaxBy(item => BeamRankScore(item.Node)).Node)
+                .ToArray();
+            foreach (SearchNode candidate in representatives)
             {
-                if (retained >= quota)
-                    return;
                 if (ContainsReference(selected, candidate))
                     continue;
+                int candidateProgress = plan.CountRealizedPayoffs(candidate);
                 int replaceIndex = selected.FindLastIndex(node =>
-                    UsesPotion(node) != usesPotion
-                    && !ContainsReference(protectedNodes, node));
+                    !ContainsReference(required, node)
+                    && plan.CountRealizedPayoffs(node) < candidateProgress);
                 if (replaceIndex < 0)
-                    return;
-                selected[replaceIndex] = candidate;
-                retained++;
-            }
-        }
-
-        internal static RoutingChoiceSignature? CurrentTurnRoutingChoice(SearchNode node)
-            => TryGetCurrentTurnRoutingChoice(node, out RoutingChoiceSignature signature, out _)
-                ? signature
-                : null;
-
-        private static RoutingChoiceSignature? RetainedRoutingChoice(SearchNode node)
-            => TryGetRetainedRoutingChoice(node, out RoutingChoiceSignature signature, out _)
-                ? signature
-                : null;
-
-        private static bool TryGetRetainedRoutingChoice(
-            SearchNode node,
-            out RoutingChoiceSignature signature,
-            out SearchNode choiceNode)
-        {
-            int minimumChoiceTurn = node.Snapshot.CanTriggerArtOfWarNextTurn
-                ? Math.Max(0, node.Turn - PersistentRoutingContextRounds)
-                : node.Turn;
-            return TryGetRoutingChoice(node, minimumChoiceTurn, out signature, out choiceNode);
-        }
-
-        private static bool TryGetCurrentTurnRoutingChoice(
-            SearchNode node,
-            out RoutingChoiceSignature signature,
-            out SearchNode choiceNode)
-            => TryGetRoutingChoice(node, node.Turn, out signature, out choiceNode);
-
-        private static bool TryGetRoutingChoice(
-            SearchNode node,
-            int minimumChoiceTurn,
-            out RoutingChoiceSignature signature,
-            out SearchNode choiceNode)
-        {
-            signature = default;
-            choiceNode = node;
-            for (SearchNode? cursor = node;
-                 cursor?.Action is { } action;
-                 cursor = cursor.Parent)
-            {
-                if (action.TurnStartChoices is { Count: > 0 })
-                {
-                    foreach (PlanCardChoice choice in action.TurnStartChoices.Reverse())
-                    {
-                        if (TryBuildRoutingChoice(
-                                node,
-                                cursor,
-                                choice,
-                                action.Turn + 1,
-                                minimumChoiceTurn,
-                                out RoutingChoiceSignature turnStartSignature))
-                        {
-                            signature = turnStartSignature;
-                            choiceNode = cursor;
-                            return true;
-                        }
-                    }
-                }
-
-                if (action.NestedChoices is { Count: > 0 })
-                {
-                    foreach (PlanCardChoice choice in action.NestedChoices.Reverse())
-                    {
-                        if (TryBuildRoutingChoice(
-                                node,
-                                cursor,
-                                choice,
-                                action.Turn,
-                                minimumChoiceTurn,
-                                out RoutingChoiceSignature nestedSignature))
-                        {
-                            signature = nestedSignature;
-                            choiceNode = cursor;
-                            return true;
-                        }
-                    }
-                }
-
-                if (action.Choice != null
-                    && TryBuildRoutingChoice(
-                        node,
-                        cursor,
-                        action.Choice,
-                        action.Turn,
-                        minimumChoiceTurn,
-                        out RoutingChoiceSignature actionSignature))
-                {
-                    signature = actionSignature;
-                    choiceNode = cursor;
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private static int ActionsSinceRetainedRoutingChoice(SearchNode node)
-        {
-            if (!TryGetRetainedRoutingChoice(node, out _, out SearchNode choiceNode))
-                return int.MaxValue;
-            int count = 0;
-            for (SearchNode? cursor = node; cursor != null && !ReferenceEquals(cursor, choiceNode); cursor = cursor.Parent)
-                count++;
-            return count;
-        }
-
-        private static bool TryBuildRoutingChoice(
-            SearchNode node,
-            SearchNode cursor,
-            PlanCardChoice choice,
-            int choiceTurn,
-            int minimumChoiceTurn,
-            out RoutingChoiceSignature signature)
-        {
-            signature = default;
-            if (choice.Cards.Count == 0
-                || choice.Effect is not (PlanChoiceEffect.MoveToHand
-                    or PlanChoiceEffect.MoveToDrawTop
-                    or PlanChoiceEffect.Discard
-                    or PlanChoiceEffect.DiscardAndDraw
-                    or PlanChoiceEffect.MoveToHandFreeThisTurn
-                    or PlanChoiceEffect.SetFreeThisCombat
-                    or PlanChoiceEffect.GenerateToHand
-                    or PlanChoiceEffect.Exhaust
-                    or PlanChoiceEffect.Transform
-                    or PlanChoiceEffect.Modify
-                    or PlanChoiceEffect.ApplyRetain))
-            {
-                return false;
-            }
-
-            bool generated = choice.Effect == PlanChoiceEffect.GenerateToHand;
-            if (choiceTurn < minimumChoiceTurn)
-                return false;
-
-            bool multiCard = choice.Cards.Count > 1;
-            PlanCardToken card = choice.Cards[0];
-            signature = new RoutingChoiceSignature(
-                choiceTurn,
-                choice.SourceId,
-                choice.Effect,
-                choice.SourcePile,
-                multiCard ? $"{choice.Cards.Count} cards" : card.CardId,
-                multiCard ? choice.Cards.Count : card.UpgradeLevel,
-                multiCard ? string.Empty : card.StateKey,
-                multiCard ? choice.Cards.Count : card.OptionOccurrence,
-                choice.ContextId,
-                generated ? cursor.Snapshot.HandCount : 0,
-                cursor.Snapshot.EnemyCombatDistributionKey,
-                cursor.Snapshot.EnemyControlDistributionKey,
-                cursor.Snapshot.UnorderedPileKey);
-            return true;
-        }
-
-        private static void AddRequired(List<SearchNode> required, SearchNode? candidate, int limit)
-        {
-            if (candidate == null
-                || required.Count >= limit
-                || required.Any(node => ReferenceEquals(node, candidate)))
-            {
-                return;
-            }
-            required.Add(candidate);
-        }
-
-        private static bool ContainsReference(IReadOnlyList<SearchNode> nodes, SearchNode candidate)
-        {
-            foreach (SearchNode node in nodes)
-            {
-                if (ReferenceEquals(node, candidate))
-                    return true;
-            }
-            return false;
-        }
-
-        private static bool IsBetterDefensive(SearchNode candidate, SearchNode? current)
-            => current == null
-                || candidate.Snapshot.ProjectedPlayerHp > current.Snapshot.ProjectedPlayerHp
-                || candidate.Snapshot.ProjectedPlayerHp == current.Snapshot.ProjectedPlayerHp
-                    && (candidate.Snapshot.OstyHp > current.Snapshot.OstyHp
-                        || candidate.Snapshot.OstyHp == current.Snapshot.OstyHp
-                            && (candidate.Snapshot.OstyMaxHp > current.Snapshot.OstyMaxHp
-                                || candidate.Snapshot.OstyMaxHp == current.Snapshot.OstyMaxHp
-                                    && (candidate.Snapshot.PlayerBlock > current.Snapshot.PlayerBlock
-                                        || candidate.Snapshot.PlayerBlock == current.Snapshot.PlayerBlock
-                                            && candidate.Score > current.Score)));
-
-        private bool IsBetterCompletedVictory(SearchNode candidate, SearchNode? current)
-            => current == null || CompareFinalCandidates(candidate, current) < 0;
-
-        private int CompareFinalCandidates(SearchNode left, SearchNode right)
-        {
-            SimulationSnapshot leftSnapshot = left.Snapshot;
-            SimulationSnapshot rightSnapshot = right.Snapshot;
-            bool leftWon = IsCompleteVictory(left);
-            bool rightWon = IsCompleteVictory(right);
-            if (!leftWon && !rightWon)
-            {
-                bool leftSurvives = !leftSnapshot.PlayerDead
-                    && leftSnapshot.ProjectedPlayerHp > 0;
-                bool rightSurvives = !rightSnapshot.PlayerDead
-                    && rightSnapshot.ProjectedPlayerHp > 0;
-                int survivalComparison = rightSurvives.CompareTo(leftSurvives);
-                if (survivalComparison != 0)
-                    return survivalComparison;
-            }
-
-            int comparison = SolverInterimResultOrdering.ComparePrimaryQuality(
-                leftWon,
-                StrategicHpDeficit(leftSnapshot),
-                leftWon ? CompletedCombatTurn(left) : null,
-                rightWon,
-                StrategicHpDeficit(rightSnapshot),
-                rightWon ? CompletedCombatTurn(right) : null);
-            if (comparison != 0)
-                return comparison;
-
-            int leftOutstanding = _theftPolicy == SolverTheftPolicy.PreserveResources
-                ? leftSnapshot.OutstandingStolenResource
-                : 0;
-            int rightOutstanding = _theftPolicy == SolverTheftPolicy.PreserveResources
-                ? rightSnapshot.OutstandingStolenResource
-                : 0;
-            comparison = leftOutstanding.CompareTo(rightOutstanding);
-            if (comparison != 0)
-                return comparison;
-            comparison = HealthResourceCost(leftSnapshot).CompareTo(HealthResourceCost(rightSnapshot));
-            if (comparison != 0)
-                return comparison;
-            comparison = rightSnapshot.LongTermResourceValue.CompareTo(leftSnapshot.LongTermResourceValue);
-            if (comparison != 0)
-                return comparison;
-            comparison = leftSnapshot.AngerCopiesGenerated.CompareTo(rightSnapshot.AngerCopiesGenerated);
-            if (comparison != 0)
-                return comparison;
-            comparison = PolicyBoundaryRank(leftSnapshot.BoundaryReason)
-                .CompareTo(PolicyBoundaryRank(rightSnapshot.BoundaryReason));
-            if (comparison != 0)
-                return comparison;
-            comparison = ExplicitPotionUseCount(left).CompareTo(ExplicitPotionUseCount(right));
-            if (comparison != 0)
-                return comparison;
-            comparison = left.FutureSoldHp.CompareTo(right.FutureSoldHp);
-            if (comparison != 0)
-                return comparison;
-            comparison = leftSnapshot.EnemyHp.CompareTo(rightSnapshot.EnemyHp);
-            if (comparison != 0)
-                return comparison;
-            comparison = right.Score.CompareTo(left.Score);
-            if (comparison != 0)
-                return comparison;
-            comparison = left.ActionCount.CompareTo(right.ActionCount);
-            if (comparison != 0)
-                return comparison;
-            comparison = left.StateKey.First.CompareTo(right.StateKey.First);
-            return comparison != 0
-                ? comparison
-                : left.StateKey.Second.CompareTo(right.StateKey.Second);
-        }
-
-        private bool IsCompleteVictory(SearchNode node)
-            => SolverInterimResultOrdering.IsCompleteVictory(
-                node.ActionCount,
-                node.Snapshot.AllEnemiesDead,
-                node.Snapshot.PlayerDead,
-                node.Snapshot.ProjectedPlayerHp);
-
-        private int StrategicHpDeficit(SimulationSnapshot snapshot)
-            => snapshot.CumulativePlayerHpLost
-                + Math.Max(0, _initialPlayerMaxHp - snapshot.PlayerMaxHp);
-
-        private int HealthResourceCost(SimulationSnapshot snapshot)
-            => _initialPlayerHp - snapshot.PlayerHp
-                + _initialPlayerMaxHp - snapshot.PlayerMaxHp;
-
-        private static int CompletedCombatTurn(SearchNode node)
-            => node.Action?.Turn ?? node.Turn;
-
-        private static bool IsBetterUtilityDefensive(SearchNode candidate, SearchNode? current)
-            => current == null
-                || candidate.Snapshot.ProjectedPlayerHp > current.Snapshot.ProjectedPlayerHp
-                || candidate.Snapshot.ProjectedPlayerHp == current.Snapshot.ProjectedPlayerHp
-                    && candidate.Score > current.Score;
-
-        private static bool IsBetterOffensive(SearchNode candidate, SearchNode? current)
-            => current == null
-                || candidate.Snapshot.AliveEnemyCount < current.Snapshot.AliveEnemyCount
-                || candidate.Snapshot.AliveEnemyCount == current.Snapshot.AliveEnemyCount
-                    && (candidate.Snapshot.RawEnemyHp < current.Snapshot.RawEnemyHp
-                        || candidate.Snapshot.RawEnemyHp == current.Snapshot.RawEnemyHp
-                            && (candidate.Snapshot.EnemyHp < current.Snapshot.EnemyHp
-                        || candidate.Snapshot.EnemyHp == current.Snapshot.EnemyHp
-                            && (candidate.Snapshot.ProjectedPlayerHp > current.Snapshot.ProjectedPlayerHp
-                                || candidate.Snapshot.ProjectedPlayerHp == current.Snapshot.ProjectedPlayerHp
-                                    && candidate.Score > current.Score)));
-
-        private static bool IsBetterResourcePreserving(SearchNode candidate, SearchNode? current)
-            => current == null
-                || candidate.Snapshot.OutstandingStolenResource < current.Snapshot.OutstandingStolenResource
-                || candidate.Snapshot.OutstandingStolenResource == current.Snapshot.OutstandingStolenResource
-                    && (candidate.Snapshot.ProjectedPlayerHp > current.Snapshot.ProjectedPlayerHp
-                        || candidate.Snapshot.ProjectedPlayerHp == current.Snapshot.ProjectedPlayerHp
-                            && candidate.Score > current.Score);
-
-        private static SearchNode? FindBestEnemyStrengthControl(IEnumerable<SearchNode> nodes)
-            => nodes.Aggregate(
-                (SearchNode?)null,
-                (best, node) => best == null
-                    || node.Snapshot.EnemyStrengthSuppression > best.Snapshot.EnemyStrengthSuppression
-                    || node.Snapshot.EnemyStrengthSuppression == best.Snapshot.EnemyStrengthSuppression
-                        && (node.Snapshot.EnemyWeakTurns > best.Snapshot.EnemyWeakTurns
-                            || node.Snapshot.EnemyWeakTurns == best.Snapshot.EnemyWeakTurns
-                                && IsBetterDefensive(node, best))
-                        ? node
-                        : best);
-
-        private static SearchNode? FindBestEnemyWeakControl(IEnumerable<SearchNode> nodes)
-            => nodes.Aggregate(
-                (SearchNode?)null,
-                (best, node) => best == null
-                    || node.Snapshot.EnemyWeakTurns > best.Snapshot.EnemyWeakTurns
-                    || node.Snapshot.EnemyWeakTurns == best.Snapshot.EnemyWeakTurns
-                        && (node.Snapshot.EnemyStrengthSuppression > best.Snapshot.EnemyStrengthSuppression
-                            || node.Snapshot.EnemyStrengthSuppression == best.Snapshot.EnemyStrengthSuppression
-                                && IsBetterDefensive(node, best))
-                        ? node
-                        : best);
-
-        private static bool IsBetterSetup(SearchNode candidate, SearchNode? current)
-        {
-            if (current == null)
-                return true;
-            int candidateValue = SetupLaneValue(candidate.Snapshot);
-            int currentValue = SetupLaneValue(current.Snapshot);
-            return candidateValue > currentValue
-                || candidateValue == currentValue
-                    && (candidate.Snapshot.RetainedAttackValue > current.Snapshot.RetainedAttackValue
-                        || candidate.Snapshot.RetainedAttackValue == current.Snapshot.RetainedAttackValue
-                            && (candidate.Snapshot.ProjectedPlayerHp > current.Snapshot.ProjectedPlayerHp
-                                || candidate.Snapshot.ProjectedPlayerHp == current.Snapshot.ProjectedPlayerHp
-                                    && candidate.Score > current.Score));
-        }
-
-        private static SearchNode? FindBestTargetPressure(IReadOnlyList<SearchNode> nodes)
-        {
-            SearchNode? best = null;
-            foreach (SearchNode node in nodes)
-            {
-                if (best == null
-                    || node.Snapshot.FocusTargetPressure > best.Snapshot.FocusTargetPressure
-                    || node.Snapshot.FocusTargetPressure == best.Snapshot.FocusTargetPressure
-                        && (node.Snapshot.FocusTargetRemainingHp < best.Snapshot.FocusTargetRemainingHp
-                            || node.Snapshot.FocusTargetRemainingHp == best.Snapshot.FocusTargetRemainingHp
-                                && (node.Snapshot.FocusTargetCurrentThreat > best.Snapshot.FocusTargetCurrentThreat
-                                    || node.Snapshot.FocusTargetCurrentThreat == best.Snapshot.FocusTargetCurrentThreat
-                                        && (node.Snapshot.ProjectedPlayerHp > best.Snapshot.ProjectedPlayerHp
-                                            || node.Snapshot.ProjectedPlayerHp == best.Snapshot.ProjectedPlayerHp
-                                                && node.Score > best.Score))))
-                {
-                    best = node;
-                }
-            }
-            return best;
-        }
-
-        private static SearchNode? FindBestDeckCuration(IReadOnlyList<SearchNode> nodes)
-        {
-            SearchNode? best = null;
-            foreach (SearchNode node in nodes)
-            {
-                if (best == null
-                    || AttackDensity(node.Snapshot) > AttackDensity(best.Snapshot)
-                    || AttackDensity(node.Snapshot) == AttackDensity(best.Snapshot)
-                        && (node.Snapshot.LiveDeckClutter < best.Snapshot.LiveDeckClutter
-                            || node.Snapshot.LiveDeckClutter == best.Snapshot.LiveDeckClutter
-                                && IsBetterSetup(node, best)))
-                {
-                    best = node;
-                }
-            }
-            return best;
-        }
-
-        private static SearchNode? FindMostCompressedDeck(IReadOnlyList<SearchNode> nodes)
-        {
-            SearchNode? best = null;
-            foreach (SearchNode node in nodes)
-            {
-                if (best == null
-                    || node.Snapshot.LiveDeckSize < best.Snapshot.LiveDeckSize
-                    || node.Snapshot.LiveDeckSize == best.Snapshot.LiveDeckSize
-                        && (AttackDensity(node.Snapshot) > AttackDensity(best.Snapshot)
-                            || AttackDensity(node.Snapshot) == AttackDensity(best.Snapshot)
-                                && IsBetterSetup(node, best)))
-                {
-                    best = node;
-                }
-            }
-            return best;
-        }
-
-        private static string PotionUseLineageKey(SearchNode node)
-            => string.Join(',', node.Actions
-                .Where(action => action.Kind == PlanActionKind.UsePotion)
-                .Select(action => action.PotionId
-                    ?? throw new InvalidOperationException("用药动作缺少药水 ID。"))
-                .OrderBy(static id => id, StringComparer.Ordinal));
-
-        private static SearchNode? FindBestPotionLineage(IEnumerable<SearchNode> nodes)
-            => nodes.Aggregate(
-                (SearchNode?)null,
-                (best, node) => best == null
-                    || node.Snapshot.AllEnemiesDead && !best.Snapshot.AllEnemiesDead
-                    || node.Snapshot.AllEnemiesDead == best.Snapshot.AllEnemiesDead
-                        && (node.Snapshot.ProjectedPlayerHp > best.Snapshot.ProjectedPlayerHp
-                            || node.Snapshot.ProjectedPlayerHp == best.Snapshot.ProjectedPlayerHp
-                                && (node.Snapshot.EnemyHp < best.Snapshot.EnemyHp
-                                    || node.Snapshot.EnemyHp == best.Snapshot.EnemyHp
-                                        && node.Score > best.Score))
-                        ? node
-                        : best);
-
-        private static SearchNode? FindBestTacticalEnabler(IReadOnlyList<SearchNode> nodes)
-        {
-            SearchNode? best = null;
-            foreach (SearchNode node in nodes)
-            {
-                if (best == null
-                    || node.Snapshot.ZeroCostPlayableCount > best.Snapshot.ZeroCostPlayableCount
-                    || node.Snapshot.ZeroCostPlayableCount == best.Snapshot.ZeroCostPlayableCount
-                        && (node.Snapshot.ReachableHandValue > best.Snapshot.ReachableHandValue
-                            || node.Snapshot.ReachableHandValue == best.Snapshot.ReachableHandValue
-                                && (node.Snapshot.HandCount > best.Snapshot.HandCount
-                                    || node.Snapshot.HandCount == best.Snapshot.HandCount
-                                        && IsBetterSearchNode(node, best))))
-                {
-                    best = node;
-                }
-            }
-            return best;
-        }
-
-        private static SearchNode? FindBestTurnBoundaryHand(IEnumerable<SearchNode> nodes)
-            => nodes.Aggregate(
-                (SearchNode?)null,
-                (best, node) => best == null
-                    || node.Snapshot.ProjectedPlayerHp > best.Snapshot.ProjectedPlayerHp
-                    || node.Snapshot.ProjectedPlayerHp == best.Snapshot.ProjectedPlayerHp
-                        && (node.Snapshot.OstyHp > best.Snapshot.OstyHp
-                            || node.Snapshot.OstyHp == best.Snapshot.OstyHp
-                                && (node.Snapshot.HandCount > best.Snapshot.HandCount
-                                    || node.Snapshot.HandCount == best.Snapshot.HandCount
-                                        && (node.Snapshot.ReachableHandValue > best.Snapshot.ReachableHandValue
-                                            || node.Snapshot.ReachableHandValue == best.Snapshot.ReachableHandValue
-                                                && (node.Snapshot.EnemyHp < best.Snapshot.EnemyHp
-                                                    || node.Snapshot.EnemyHp == best.Snapshot.EnemyHp
-                                                        && node.Score > best.Score))))
-                    ? node
-                    : best);
-
-        private static SearchNode? FindBestCuratedTurnBoundaryHand(IEnumerable<SearchNode> nodes)
-            => nodes.Aggregate(
-                (SearchNode?)null,
-                (best, node) => best == null
-                    || node.Snapshot.ProjectedPlayerHp > best.Snapshot.ProjectedPlayerHp
-                    || node.Snapshot.ProjectedPlayerHp == best.Snapshot.ProjectedPlayerHp
-                        && (node.Snapshot.OstyHp > best.Snapshot.OstyHp
-                            || node.Snapshot.OstyHp == best.Snapshot.OstyHp
-                                && (node.Snapshot.ProjectedShuffleOrderValue
-                                        > best.Snapshot.ProjectedShuffleOrderValue
-                                    || node.Snapshot.ProjectedShuffleOrderValue
-                                        == best.Snapshot.ProjectedShuffleOrderValue
-                                        && (node.Snapshot.ReachableHandValue > best.Snapshot.ReachableHandValue
-                                            || node.Snapshot.ReachableHandValue == best.Snapshot.ReachableHandValue
-                                                && (node.Snapshot.HandCount < best.Snapshot.HandCount
-                                                    || node.Snapshot.HandCount == best.Snapshot.HandCount
-                                                        && (node.Snapshot.EnemyHp < best.Snapshot.EnemyHp
-                                                            || node.Snapshot.EnemyHp == best.Snapshot.EnemyHp
-                                                                && node.Score > best.Score)))))
-                    ? node
-                    : best);
-
-        private SearchNode? FindBestCompressionAttackGrowth(IReadOnlyList<SearchNode> nodes)
-        {
-            SearchNode? best = null;
-            foreach (SearchNode node in nodes)
-            {
-                if (best == null
-                    || RetainedAttackGrowth(node.Snapshot) > RetainedAttackGrowth(best.Snapshot)
-                    || RetainedAttackGrowth(node.Snapshot) == RetainedAttackGrowth(best.Snapshot)
-                        && (node.Snapshot.Energy > best.Snapshot.Energy
-                            || node.Snapshot.Energy == best.Snapshot.Energy
-                                && (node.Snapshot.FutureResourceValue > best.Snapshot.FutureResourceValue
-                                    || node.Snapshot.FutureResourceValue == best.Snapshot.FutureResourceValue
-                                        && (node.Snapshot.FocusTargetPressure > best.Snapshot.FocusTargetPressure
-                                            || node.Snapshot.FocusTargetPressure ==
-                                                best.Snapshot.FocusTargetPressure
-                                                && node.Score > best.Score))))
-                {
-                    best = node;
-                }
-            }
-            return best;
-        }
-
-        private SearchNode? PreferMostVulnerableTargetVariant(
-            IReadOnlyList<SearchNode> nodes,
-            SearchNode? candidate)
-        {
-            if (candidate?.Action is not { TargetCombatId: not null } candidateAction)
-                return candidate;
-            SearchNode? preferred = nodes
-                .Where(node => node.Action is { } action
-                    && action.Kind == candidateAction.Kind
-                    && action.CardId == candidateAction.CardId
-                    && action.PotionId == candidateAction.PotionId
-                    && action.TargetCombatId == node.Snapshot.MostVulnerableTargetCombatId)
-                .MaxBy(BeamRankScore);
-            return preferred ?? candidate;
-        }
-
-        private static long AttackDensity(SimulationSnapshot snapshot)
-            => (long)snapshot.RetainedAttackValue * 1024 / Math.Max(1, snapshot.LiveDeckSize);
-
-        private static SearchNode? FindBestTargetSetup(IReadOnlyList<SearchNode> nodes)
-        {
-            SearchNode? best = null;
-            int bestSetup = int.MinValue;
-            foreach (SearchNode node in nodes)
-            {
-                int setup = SetupLaneValue(node.Snapshot);
-                if (best == null
-                    || setup > bestSetup
-                    || setup == bestSetup
-                        && (node.Snapshot.RetainedAttackValue > best.Snapshot.RetainedAttackValue
-                            || node.Snapshot.RetainedAttackValue == best.Snapshot.RetainedAttackValue
-                                && (node.Snapshot.FocusTargetPressure > best.Snapshot.FocusTargetPressure
-                                    || node.Snapshot.FocusTargetPressure == best.Snapshot.FocusTargetPressure
-                                        && (node.Snapshot.ProjectedPlayerHp > best.Snapshot.ProjectedPlayerHp
-                                            || node.Snapshot.ProjectedPlayerHp == best.Snapshot.ProjectedPlayerHp
-                                                && node.Score > best.Score))))
-                {
-                    best = node;
-                    bestSetup = setup;
-                }
-            }
-            return best;
-        }
-
-        private static int SetupLaneValue(SimulationSnapshot snapshot)
-            => snapshot.StrategicEffects.RetentionValue * 16
-                + snapshot.LatentSetupValue * 8
-                + snapshot.ReplayPotentialValue * 16
-                + snapshot.FutureResourceValue;
-
-        private static SearchNode? FindBestLane(IReadOnlyList<SearchNode> nodes, SearchRouteTraits trait)
-        {
-            SearchNode? best = null;
-            foreach (SearchNode node in nodes)
-            {
-                if (!node.Traits.HasFlag(trait))
                     continue;
-                int value = LaneValue(node.Snapshot, trait);
-                int bestValue = best == null ? int.MinValue : LaneValue(best.Snapshot, trait);
-                if (best == null
-                    || value > bestValue
-                    || value == bestValue && node.Snapshot.ProjectedPlayerHp > best.Snapshot.ProjectedPlayerHp
-                    || value == bestValue && node.Snapshot.ProjectedPlayerHp == best.Snapshot.ProjectedPlayerHp
-                        && (node.Snapshot.AliveEnemyCount < best.Snapshot.AliveEnemyCount
-                            || node.Snapshot.AliveEnemyCount == best.Snapshot.AliveEnemyCount
-                                && (node.Snapshot.EnemyHp < best.Snapshot.EnemyHp
-                                    || node.Snapshot.EnemyHp == best.Snapshot.EnemyHp && node.Score > best.Score)))
-                {
-                    best = node;
-                }
+                selected[replaceIndex] = candidate;
+                AddRequired(required, candidate, limit);
             }
-            return best;
         }
-
-        private static SearchNode? FindBestSetup(IEnumerable<SearchNode> nodes)
-        {
-            SearchNode? best = null;
-            int bestValue = int.MinValue;
-            foreach (SearchNode node in nodes)
-            {
-                int value = LaneValue(node.Snapshot, SearchRouteTraits.Scaling)
-                    + LaneValue(node.Snapshot, SearchRouteTraits.Resource)
-                    + LaneValue(node.Snapshot, SearchRouteTraits.Control);
-                if (best == null
-                    || value > bestValue
-                    || value == bestValue && node.Snapshot.ProjectedPlayerHp > best.Snapshot.ProjectedPlayerHp
-                    || value == bestValue && node.Snapshot.ProjectedPlayerHp == best.Snapshot.ProjectedPlayerHp
-                        && node.Score > best.Score)
-                {
-                    best = node;
-                    bestValue = value;
-                }
-            }
-            return best;
-        }
-
-        private static int LaneValue(SimulationSnapshot snapshot, SearchRouteTraits trait)
-            => trait switch
-            {
-                SearchRouteTraits.Scaling => SetupLaneValue(snapshot) + snapshot.DelayedDamageValue,
-                SearchRouteTraits.Resource => snapshot.Energy * 16
-                    + snapshot.Stars * 8
-                    + snapshot.HandCount
-                    + snapshot.ReachableHandValue
-                    + snapshot.FutureResourceValue
-                    + snapshot.OstyHp * 16
-                    + snapshot.OstyMaxHp * 4,
-                SearchRouteTraits.LongTermResource => snapshot.LongTermResourceValue,
-                SearchRouteTraits.Control => snapshot.SandpitRemaining * 32
-                    + snapshot.EnemyStrengthSuppression * 32
-                    + snapshot.EnemyWeakTurns * 8
-                    + snapshot.FocusTargetVulnerableTurns * 4
-                        * Math.Min(SolverWeights.VulnerableAttackWindowCap, snapshot.RetainedAttackValue)
-                    + Math.Max(0, snapshot.EnemyVulnerableTurns - snapshot.FocusTargetVulnerableTurns)
-                        * Math.Min(SolverWeights.VulnerableAttackWindowCap, snapshot.RetainedAttackValue)
-                    + snapshot.DelayedDamageValue
-                    - snapshot.LiveDeckClutter * 8,
-                SearchRouteTraits.RevivalWindow => snapshot.RevivingEnemyCount * 1024
-                    - snapshot.RawEnemyHp * 4
-                    - snapshot.MaxCurrentEnemyHp * 8,
-                SearchRouteTraits.DeclinedExtraTurn => 0,
-                SearchRouteTraits.ReactiveDamage => snapshot.ReactiveDamageValue,
-                SearchRouteTraits.EndTurnDeckCompression => snapshot.Energy * 64
-                    + snapshot.FutureResourceValue * 16
-                    + (int)Math.Min(int.MaxValue, AttackDensity(snapshot))
-                    + snapshot.FocusTargetPressure
-                    - snapshot.LiveDeckSize * 16,
-                SearchRouteTraits.HpInvestment => snapshot.StrategicEffects.RetentionValue * 16
-                    + snapshot.FutureResourceValue * 8
-                    + snapshot.DelayedDamageValue * 8
-                    + snapshot.FocusTargetPressure,
-                _ => throw new ArgumentOutOfRangeException(nameof(trait), trait, null),
-            };
-
-        private SearchNode? FindBestStandPat(
-            IReadOnlyList<SearchNode> nodes,
-            SearchRouteTraits trait)
-        {
-            const int limit = 8;
-            List<SearchNode> probes = nodes
-                .Where(node => node.Traits.HasFlag(trait))
-                .OrderByDescending(node => node.Snapshot.ProjectedPlayerHp)
-                .ThenByDescending(node => LaneValue(node.Snapshot, trait))
-                .ThenByDescending(node => node.Score)
-                .Take(limit)
-                .ToList();
-
-            SearchNode? best = null;
-            StandPatEvaluation bestEvaluation = default;
-            foreach (SearchNode node in probes)
-            {
-                StandPatEvaluation evaluation = _evaluateStandPat(node);
-                int evaluationValue = trait == SearchRouteTraits.Resource
-                    ? evaluation.ResourceValue
-                    : evaluation.DelayedDamage;
-                int bestEvaluationValue = trait == SearchRouteTraits.Resource
-                    ? bestEvaluation.ResourceValue
-                    : bestEvaluation.DelayedDamage;
-                if (best == null
-                    || evaluation.AllEnemiesDead && !bestEvaluation.AllEnemiesDead
-                    || evaluation.AllEnemiesDead == bestEvaluation.AllEnemiesDead
-                        && (evaluation.ProjectedPlayerHp > bestEvaluation.ProjectedPlayerHp
-                            || evaluation.ProjectedPlayerHp == bestEvaluation.ProjectedPlayerHp
-                                && (evaluationValue > bestEvaluationValue
-                                    || evaluationValue == bestEvaluationValue
-                                        && node.Score > best.Score)))
-                {
-                    best = node;
-                    bestEvaluation = evaluation;
-                }
-            }
-            return best;
-        }
-
-        private SearchNode? FindBestFreshResourceStandPat(IReadOnlyList<SearchNode> nodes)
-        {
-            SearchNode? best = null;
-            StandPatEvaluation bestEvaluation = default;
-            foreach (SearchNode node in nodes.Where(node => node.Parent is { } parent
-                         && (node.Snapshot.FutureResourceValue > parent.Snapshot.FutureResourceValue
-                             || node.Snapshot.StrategicEffects.ResourcePotential
-                                > parent.Snapshot.StrategicEffects.ResourcePotential)))
-            {
-                StandPatEvaluation evaluation = _evaluateStandPat(node);
-                if (best == null
-                    || evaluation.AllEnemiesDead && !bestEvaluation.AllEnemiesDead
-                    || evaluation.AllEnemiesDead == bestEvaluation.AllEnemiesDead
-                        && (evaluation.ProjectedPlayerHp > bestEvaluation.ProjectedPlayerHp
-                            || evaluation.ProjectedPlayerHp == bestEvaluation.ProjectedPlayerHp
-                                && (evaluation.ResourceValue > bestEvaluation.ResourceValue
-                                    || evaluation.ResourceValue == bestEvaluation.ResourceValue
-                                        && node.Snapshot.CumulativePlayerHpLost
-                                            < best.Snapshot.CumulativePlayerHpLost
-                                    || evaluation.ResourceValue == bestEvaluation.ResourceValue
-                                        && node.Snapshot.CumulativePlayerHpLost
-                                            == best.Snapshot.CumulativePlayerHpLost
-                                        && node.Score > best.Score)))
-                {
-                    best = node;
-                    bestEvaluation = evaluation;
-                }
-            }
-            return best;
-        }
-
-        private bool MultiObjectiveDominates(SearchNode left, SearchNode right)
-        {
-            if (ReferenceEquals(left, right))
-                return false;
-            if (left.Snapshot.EnemyCombatDistributionKey != right.Snapshot.EnemyCombatDistributionKey
-                || left.Snapshot.EnemyControlDistributionKey != right.Snapshot.EnemyControlDistributionKey
-                || left.Snapshot.UnorderedPileKey != right.Snapshot.UnorderedPileKey)
-            {
-                return false;
-            }
-            bool noWorse = left.Snapshot.ProjectedPlayerHp >= right.Snapshot.ProjectedPlayerHp
-                && left.Snapshot.PlayerMaxHp >= right.Snapshot.PlayerMaxHp
-                && left.Snapshot.CumulativePlayerHpLost <= right.Snapshot.CumulativePlayerHpLost
-                && left.Snapshot.LongTermResourceValue >= right.Snapshot.LongTermResourceValue
-                && left.Snapshot.AngerCopiesGenerated <= right.Snapshot.AngerCopiesGenerated
-                && (_theftPolicy != SolverTheftPolicy.PreserveResources
-                    || left.Snapshot.OutstandingStolenResource <= right.Snapshot.OutstandingStolenResource)
-                && left.Snapshot.AliveEnemyCount <= right.Snapshot.AliveEnemyCount
-                && left.Snapshot.EnemyHp <= right.Snapshot.EnemyHp
-                && left.Snapshot.RawEnemyHp <= right.Snapshot.RawEnemyHp
-                && left.Snapshot.MaxCurrentEnemyHp <= right.Snapshot.MaxCurrentEnemyHp
-                && left.Snapshot.PersistentBuffValue >= right.Snapshot.PersistentBuffValue
-                && left.Snapshot.LatentSetupValue >= right.Snapshot.LatentSetupValue
-                && left.Snapshot.DelayedDamageValue >= right.Snapshot.DelayedDamageValue
-                && left.Snapshot.ReactiveDamageValue >= right.Snapshot.ReactiveDamageValue
-                && left.Snapshot.EnemyStrengthSuppression >= right.Snapshot.EnemyStrengthSuppression
-                && left.Snapshot.EnemyWeakTurns >= right.Snapshot.EnemyWeakTurns
-                && left.Snapshot.EnemyVulnerableTurns >= right.Snapshot.EnemyVulnerableTurns
-                && left.Snapshot.FocusTargetVulnerableTurns >= right.Snapshot.FocusTargetVulnerableTurns
-                && left.Snapshot.Energy >= right.Snapshot.Energy
-                && left.Snapshot.Stars >= right.Snapshot.Stars
-                && left.Snapshot.FutureResourceValue >= right.Snapshot.FutureResourceValue
-                && left.Snapshot.OstyHp >= right.Snapshot.OstyHp
-                && left.Snapshot.OstyMaxHp >= right.Snapshot.OstyMaxHp
-                && RetainedAttackGrowth(left.Snapshot) >= RetainedAttackGrowth(right.Snapshot)
-                && left.Snapshot.ReplayPotentialValue >= right.Snapshot.ReplayPotentialValue
-                && left.Snapshot.FocusTargetPressure >= right.Snapshot.FocusTargetPressure
-                && left.Snapshot.SandpitRemaining >= right.Snapshot.SandpitRemaining
-                && left.Snapshot.LiveDeckClutter <= right.Snapshot.LiveDeckClutter
-                && left.Snapshot.LiveDeckSize <= right.Snapshot.LiveDeckSize
-                && left.PotionCount <= right.PotionCount
-                && left.PotionStrategicCost <= right.PotionStrategicCost
-                && left.FutureSoldHp <= right.FutureSoldHp
-                && left.ActionCount <= right.ActionCount;
-            bool strictlyBetter = left.Snapshot.ProjectedPlayerHp > right.Snapshot.ProjectedPlayerHp
-                || left.Snapshot.PlayerMaxHp > right.Snapshot.PlayerMaxHp
-                || left.Snapshot.CumulativePlayerHpLost < right.Snapshot.CumulativePlayerHpLost
-                || left.Snapshot.LongTermResourceValue > right.Snapshot.LongTermResourceValue
-                || left.Snapshot.AngerCopiesGenerated < right.Snapshot.AngerCopiesGenerated
-                || _theftPolicy == SolverTheftPolicy.PreserveResources
-                    && left.Snapshot.OutstandingStolenResource < right.Snapshot.OutstandingStolenResource
-                || left.Snapshot.AliveEnemyCount < right.Snapshot.AliveEnemyCount
-                || left.Snapshot.EnemyHp < right.Snapshot.EnemyHp
-                || left.Snapshot.RawEnemyHp < right.Snapshot.RawEnemyHp
-                || left.Snapshot.MaxCurrentEnemyHp < right.Snapshot.MaxCurrentEnemyHp
-                || left.Snapshot.PersistentBuffValue > right.Snapshot.PersistentBuffValue
-                || left.Snapshot.LatentSetupValue > right.Snapshot.LatentSetupValue
-                || left.Snapshot.DelayedDamageValue > right.Snapshot.DelayedDamageValue
-                || left.Snapshot.ReactiveDamageValue > right.Snapshot.ReactiveDamageValue
-                || left.Snapshot.EnemyStrengthSuppression > right.Snapshot.EnemyStrengthSuppression
-                || left.Snapshot.EnemyWeakTurns > right.Snapshot.EnemyWeakTurns
-                || left.Snapshot.EnemyVulnerableTurns > right.Snapshot.EnemyVulnerableTurns
-                || left.Snapshot.FocusTargetVulnerableTurns > right.Snapshot.FocusTargetVulnerableTurns
-                || left.Snapshot.Energy > right.Snapshot.Energy
-                || left.Snapshot.Stars > right.Snapshot.Stars
-                || left.Snapshot.FutureResourceValue > right.Snapshot.FutureResourceValue
-                || left.Snapshot.OstyHp > right.Snapshot.OstyHp
-                || left.Snapshot.OstyMaxHp > right.Snapshot.OstyMaxHp
-                || RetainedAttackGrowth(left.Snapshot) > RetainedAttackGrowth(right.Snapshot)
-                || left.Snapshot.ReplayPotentialValue > right.Snapshot.ReplayPotentialValue
-                || left.Snapshot.FocusTargetPressure > right.Snapshot.FocusTargetPressure
-                || left.Snapshot.SandpitRemaining > right.Snapshot.SandpitRemaining
-                || left.Snapshot.LiveDeckClutter < right.Snapshot.LiveDeckClutter
-                || left.Snapshot.LiveDeckSize < right.Snapshot.LiveDeckSize
-                || left.PotionCount < right.PotionCount
-                || left.PotionStrategicCost < right.PotionStrategicCost
-                || left.FutureSoldHp < right.FutureSoldHp
-                || left.ActionCount < right.ActionCount;
-            return noWorse && strictlyBetter;
-        }
-
-        private static bool IsBetterSearchNode(SearchNode candidate, SearchNode current)
-            => candidate.Score > current.Score
-                || candidate.Score.Equals(current.Score) && candidate.ActionCount < current.ActionCount;
-
-        private static bool UsesPotion(SearchNode node)
-            => node.PotionCount > 0;
-
-        private double BeamRankScore(SearchNode node)
-        {
-            int persistentBuffCap = _isActEndingBoss
-                ? SolverWeights.PersistentBuffDeltaBeamCap
-                : SolverWeights.StandardPersistentBuffDeltaBeamCap;
-            double persistentBuffValue = _isActEndingBoss
-                ? SolverWeights.PersistentBuffDeltaBeamValue
-                : SolverWeights.StandardPersistentBuffDeltaBeamValue;
-            bool useLatentSetup = _isActEndingBoss || _initialEnemyCount > 1;
-            int strengthSuppressionHorizon = _isActEndingBoss
-                ? SolverWeights.BossEnemyStrengthSuppressionHorizon
-                : SolverWeights.StandardEnemyStrengthSuppressionHorizon;
-            int weakExpectedHpSaved = _isActEndingBoss
-                ? SolverWeights.BossEnemyWeakExpectedHpSaved
-                : SolverWeights.StandardEnemyWeakExpectedHpSaved;
-            return node.Score
-                + Math.Min(SolverWeights.CurrentEnergyBeamCap, node.Snapshot.Energy)
-                    * SolverWeights.CurrentEnergyBeamValue
-                + Math.Min(
-                        persistentBuffCap,
-                        Math.Max(0, node.Snapshot.PersistentBuffValue - _run.InitialPersistentBuffValue))
-                    * persistentBuffValue
-                + (useLatentSetup
-                    ? Math.Min(SolverWeights.LatentSetupBeamCap, node.Snapshot.LatentSetupValue)
-                        * SolverWeights.LatentSetupBeamValue
-                    : 0d)
-                + (_isActEndingBoss
-                    ? node.Snapshot.FutureResourceValue * SolverWeights.FutureResourceBeamValue
-                    : 0d)
-                + Math.Min(
-                        SolverWeights.ReplayPotentialBeamCap,
-                        node.Snapshot.ReplayPotentialValue)
-                    * SolverWeights.ReplayPotentialBeamValue
-                + RetainedAttackGrowth(node.Snapshot) * SolverWeights.RetainedAttackGrowthBeamValue
-                + node.Snapshot.DelayedDamageValue * SolverWeights.DelayedDamageBeamValue
-                + node.Snapshot.SandpitRemaining * SolverWeights.SandpitTurnBeamValue
-                + Math.Min(
-                        SolverWeights.EnemyStrengthSuppressionBeamCap,
-                        Math.Max(
-                            0,
-                            node.Snapshot.EnemyStrengthSuppression
-                            - _run.InitialEnemyStrengthSuppression))
-                    * strengthSuppressionHorizon
-                    * SolverWeights.Hp
-                + Math.Min(
-                        SolverWeights.EnemyWeakTurnsBeamCap,
-                        Math.Max(0, node.Snapshot.EnemyWeakTurns - _run.InitialEnemyWeakTurns))
-                    * weakExpectedHpSaved
-                    * SolverWeights.Hp;
-        }
-
-        private int RetainedAttackGrowth(SimulationSnapshot snapshot)
-            => Math.Min(
-                SolverWeights.RetainedAttackGrowthBeamCap,
-                Math.Max(0, snapshot.RetainedAttackValue - _run.InitialRetainedAttackValue));
 
     }
 
-    internal void VerifyFinalPolicyQualificationRetentionForTesting(string potionId, int forcedSlot)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(potionId);
-        const int cohortHp = 37;
-        if (BeamRetentionPolicy.FinalPolicyOptionalAmbergrisPlayerHpCohort(
-                optionalAmbergrisCount: 1,
-                playerHp: cohortHp) != cohortHp
-            || BeamRetentionPolicy.FinalPolicyOptionalAmbergrisPlayerHpCohort(
-                optionalAmbergrisCount: 0,
-                playerHp: cohortHp) != int.MinValue
-            || !BeamRetentionPolicy.FinalPolicyTheftEscapeEligible(
-                SolverTheftPolicy.PreserveResources,
-                potionCount: 1,
-                outstandingStolenResource: 2,
-                potionFreeOutstandingResource: 3)
-            || BeamRetentionPolicy.FinalPolicyTheftEscapeEligible(
-                SolverTheftPolicy.PreserveResources,
-                potionCount: 1,
-                outstandingStolenResource: 3,
-                potionFreeOutstandingResource: 3)
-            || BeamRetentionPolicy.FinalPolicyTheftEscapeEligible(
-                theftPolicy: null,
-                potionCount: 1,
-                outstandingStolenResource: 2,
-                potionFreeOutstandingResource: 3))
-        {
-            throw new InvalidOperationException(
-                "最终策略资格的 Ambergris 或偷窃分组不符合终局政策。 ");
-        }
-        using IDisposable notificationIsolation = SimulationNotificationIsolation.Enter();
-        SimulationSnapshot snapshot = Replay([]);
-        try
-        {
-            int limit = checked(_profile.BeamWidth * 4);
-            int potionCount = checked(snapshot.PotionUseCount + 1);
-            CombatProgressState combatProgress = CombatProgressState.Capture(snapshot);
-            bool terminal = snapshot.PlayerDead
-                || snapshot.AllEnemiesDead
-                || snapshot.BoundaryReason != SearchBoundaryReason.None;
-            SearchNode rootNode = new(
-                null,
-                0,
-                snapshot.PotionUseCount,
-                snapshot.PotionStrategicCost,
-                _startTurnNumber,
-                SearchRouteTraits.None,
-                0,
-                snapshot.Score,
-                snapshot.StateKey,
-                snapshot.HasRisk,
-                snapshot.BoundaryReason,
-                terminal,
-                null,
-                snapshot,
-                combatProgress);
-
-            SearchNode MakeNode(
-                SearchNode parent,
-                PlanAction action,
-                int actionCount,
-                int candidatePotionCount)
-                => new(
-                    action,
-                    actionCount,
-                    candidatePotionCount,
-                    snapshot.PotionStrategicCost,
-                    _startTurnNumber,
-                    SearchRouteTraits.None,
-                    0,
-                    snapshot.Score,
-                    snapshot.StateKey,
-                    snapshot.HasRisk,
-                    snapshot.BoundaryReason,
-                    terminal,
-                    parent,
-                    snapshot,
-                    combatProgress);
-
-            SearchNode sharedPrefix = MakeNode(
-                rootNode,
-                new PlanAction(
-                    PlanActionKind.PlayCard,
-                    _startTurnNumber,
-                    CardId: "TEST.FINAL_POLICY_PREFIX"),
-                1,
-                snapshot.PotionUseCount);
-            int ordinarySlot = forcedSlot == 0 ? 1 : 0;
-            List<SearchNode> candidates = new(limit + 2);
-            for (int index = 0; index <= limit; index++)
-            {
-                candidates.Add(MakeNode(
-                    sharedPrefix,
-                    new PlanAction(
-                        PlanActionKind.UsePotion,
-                        _startTurnNumber,
-                        PotionSlot: ordinarySlot,
-                        PotionId: potionId),
-                    2,
-                    potionCount));
-            }
-            SearchNode forcedPrefix = MakeNode(
-                sharedPrefix,
-                new PlanAction(
-                    PlanActionKind.PlayCard,
-                    _startTurnNumber,
-                    CardId: "TEST.FINAL_POLICY_DELAY"),
-                2,
-                snapshot.PotionUseCount);
-            SearchNode forcedCandidate = MakeNode(
-                forcedPrefix,
-                new PlanAction(
-                    PlanActionKind.UsePotion,
-                    _startTurnNumber,
-                    PotionSlot: forcedSlot,
-                    PotionId: potionId),
-                3,
-                potionCount);
-            candidates.Add(forcedCandidate);
-
-            List<SearchNode> ordinaryTop = Retention.RankBest(
-                candidates,
-                limit,
-                finalQualityFirst: true);
-            if (ordinaryTop.Any(node => ReferenceEquals(node, forcedCandidate)))
-            {
-                throw new InvalidOperationException(
-                    "最终策略历史保留回归的普通 Top-N 截断前置条件没有成立。");
-            }
-
-            List<SearchNode> retained = Retention.RankFinal(candidates);
-            if (!retained.Any(node => ReferenceEquals(node, forcedCandidate)))
-            {
-                throw new InvalidOperationException(
-                    "最终候选截断丢失了同药水不同槽位的策略历史代表。");
-            }
-            if (retained.Count > limit + 2)
-            {
-                throw new InvalidOperationException(
-                    "未满足的强制用药历史没有折叠为有界资格分组。");
-            }
-
-            PotionStrategySnapshot forcedStrategy = new(
-                SolverPotionPolicy.Smart,
-                [new PotionSlotDirective(forcedSlot, potionId, SolverPotionDirective.Force)]);
-            if (!forcedStrategy.EvaluateForcedUses(
-                    forcedCandidate.Actions,
-                    renewablePotionShapedRock: false).AllForcedUsesSatisfied
-                || forcedStrategy.EvaluateForcedUses(
-                    candidates[0].Actions,
-                    renewablePotionShapedRock: false).AllForcedUsesSatisfied)
-            {
-                throw new InvalidOperationException(
-                    "最终策略历史保留回归没有维持精确槽位的强制用药资格。");
-            }
-        }
-        finally
-        {
-            snapshot.ReleaseSimulator();
-        }
-    }
 }

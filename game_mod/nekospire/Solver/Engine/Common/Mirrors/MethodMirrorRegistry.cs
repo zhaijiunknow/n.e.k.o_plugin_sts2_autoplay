@@ -59,6 +59,9 @@ internal sealed class MethodMirrorRegistry<TBase, TContext>(MirrorMethodSpec met
     private readonly Dictionary<Type, LookupResult> _registrations = [];
     private readonly ConcurrentDictionary<Type, Lazy<LookupResult>> _lookupCache = new();
     private readonly object _lookupResolutionGate = new();
+    // 热路径上每个 listener × 每个 hook 都要 Lookup 一次。已解析结果放进一张写时复制的普通字典，
+    // 读取无锁且只查一次哈希；ConcurrentDictionary + Lazy 只留给首次解析。
+    private Dictionary<Type, LookupResult> _resolvedSnapshot = [];
 
     private MethodMirrorInferrer<TBase, TContext>? _inferrer;
     private MethodMirrorInferrer<TBase, TContext>? _strictInferrer;
@@ -80,6 +83,8 @@ internal sealed class MethodMirrorRegistry<TBase, TContext>(MirrorMethodSpec met
             {
                 _allowInference = value;
                 _lookupCache.Clear();
+                lock (_lookupResolutionGate)
+                    Volatile.Write(ref _resolvedSnapshot, []);
             }
         }
     }
@@ -101,6 +106,30 @@ internal sealed class MethodMirrorRegistry<TBase, TContext>(MirrorMethodSpec met
         var type = typeof(TModel);
         ValidateOverride(type);
         _registrations.Add(type, new LookupResult(MirrorDispatchKind.Ignored, null));
+    }
+
+    /// <summary>
+    /// Registers an override that a reviewer confirmed has no prediction-relevant behavior, addressed by runtime type.
+    /// </summary>
+    /// <remarks>
+    /// External assemblies cannot supply a generic type argument, so a third-party adapter has to address its models by
+    /// runtime <see cref="Type"/>. Registrations must still finish before the first query because resolved type lookups
+    /// are cached.
+    /// </remarks>
+    public void RegisterIgnored(Type type)
+    {
+        ValidateIgnoredRegistration(type);
+        _registrations.Add(type, new LookupResult(MirrorDispatchKind.Ignored, null));
+    }
+
+    internal void ValidateIgnoredRegistration(Type type)
+    {
+        ArgumentNullException.ThrowIfNull(type);
+        if (type.IsAbstract || type.ContainsGenericParameters || !typeof(TBase).IsAssignableFrom(type))
+            throw new ArgumentException("Ignored mirrors require a concrete receiver of the registry base type.", nameof(type));
+        ValidateOverride(type);
+        if (_registrations.ContainsKey(type))
+            throw new ArgumentException($"A mirror is already registered for {type.FullName}.", nameof(type));
     }
 
     /// <summary>
@@ -157,6 +186,26 @@ internal sealed class MethodMirrorRegistry<TBase, TContext>(MirrorMethodSpec met
         return _registrations.TryGetValue(receiver.GetType(), out var registration) &&
             registration.Kind is MirrorDispatchKind.Handled;
     }
+
+    /// <summary>
+    /// Resolves what <see cref="Invoke"/> would do for this receiver without invoking anything.
+    /// </summary>
+    /// <remarks>
+    /// Resolution is a deterministic, cached function of the runtime type, so asking is side-effect free apart from
+    /// populating the same lookup cache a later dispatch would populate. Listener-mask verification uses this to
+    /// prove that a listener the fast lane skipped would have been a no-op on the unfiltered path.
+    /// </remarks>
+    public MirrorDispatchKind ResolveDispatchKind(TBase receiver) => Lookup(receiver.GetType()).Kind;
+
+    /// <summary>
+    /// Returns whether the exact runtime type overrides the mirrored method.
+    /// </summary>
+    /// <remarks>
+    /// Facades that own several registries for one native hook family (the turn-phase tables) use this to put an
+    /// ignored registration in exactly the registry whose method the type overrides; registering in the others would
+    /// fail validation for a non-override.
+    /// </remarks>
+    public bool OverridesMethod(Type type) => method.TryGetOverride(type, out _);
 
     /// <summary>
     /// Invokes only an explicit exact-type registration, without resolving inference or unsupported fallbacks.
@@ -224,15 +273,31 @@ internal sealed class MethodMirrorRegistry<TBase, TContext>(MirrorMethodSpec met
 
     private LookupResult Lookup(Type type)
     {
-        if (_registrations.TryGetValue(type, out var result))
-            return result;
+        if (Volatile.Read(ref _resolvedSnapshot).TryGetValue(type, out var cached))
+            return cached;
+        if (!_registrations.TryGetValue(type, out var result))
+        {
+            result = _lookupCache.GetOrAdd(
+                type,
+                static (runtimeType, registry) => new Lazy<LookupResult>(
+                    () => registry.ResolveLookup(runtimeType),
+                    LazyThreadSafetyMode.ExecutionAndPublication),
+                this).Value;
+        }
+        PublishResolvedLookup(type, result);
+        return result;
+    }
 
-        return _lookupCache.GetOrAdd(
-            type,
-            static (runtimeType, registry) => new Lazy<LookupResult>(
-                () => registry.ResolveLookup(runtimeType),
-                LazyThreadSafetyMode.ExecutionAndPublication),
-            this).Value;
+    private void PublishResolvedLookup(Type type, LookupResult result)
+    {
+        lock (_lookupResolutionGate)
+        {
+            Dictionary<Type, LookupResult> current = _resolvedSnapshot;
+            if (current.ContainsKey(type))
+                return;
+            Dictionary<Type, LookupResult> next = new(current) { [type] = result };
+            Volatile.Write(ref _resolvedSnapshot, next);
+        }
     }
 
     private LookupResult ResolveLookup(Type type)
@@ -319,6 +384,9 @@ internal sealed class MethodMirrorRegistry<TBase, TContext, TResult>(MirrorMetho
     private readonly Dictionary<Type, LookupResult> _registrations = [];
     private readonly ConcurrentDictionary<Type, Lazy<LookupResult>> _lookupCache = new();
     private readonly object _lookupResolutionGate = new();
+    // 热路径上每个 listener × 每个 hook 都要 Lookup 一次。已解析结果放进一张写时复制的普通字典，
+    // 读取无锁且只查一次哈希；ConcurrentDictionary + Lazy 只留给首次解析。
+    private Dictionary<Type, LookupResult> _resolvedSnapshot = [];
 
     public void Register<TModel>(Func<TModel, TContext, TResult> handler)
         where TModel : TBase
@@ -404,15 +472,31 @@ internal sealed class MethodMirrorRegistry<TBase, TContext, TResult>(MirrorMetho
 
     private LookupResult Lookup(Type type)
     {
-        if (_registrations.TryGetValue(type, out var result))
-            return result;
+        if (Volatile.Read(ref _resolvedSnapshot).TryGetValue(type, out var cached))
+            return cached;
+        if (!_registrations.TryGetValue(type, out var result))
+        {
+            result = _lookupCache.GetOrAdd(
+                type,
+                static (runtimeType, registry) => new Lazy<LookupResult>(
+                    () => registry.ResolveLookup(runtimeType),
+                    LazyThreadSafetyMode.ExecutionAndPublication),
+                this).Value;
+        }
+        PublishResolvedLookup(type, result);
+        return result;
+    }
 
-        return _lookupCache.GetOrAdd(
-            type,
-            static (runtimeType, registry) => new Lazy<LookupResult>(
-                () => registry.ResolveLookup(runtimeType),
-                LazyThreadSafetyMode.ExecutionAndPublication),
-            this).Value;
+    private void PublishResolvedLookup(Type type, LookupResult result)
+    {
+        lock (_lookupResolutionGate)
+        {
+            Dictionary<Type, LookupResult> current = _resolvedSnapshot;
+            if (current.ContainsKey(type))
+                return;
+            Dictionary<Type, LookupResult> next = new(current) { [type] = result };
+            Volatile.Write(ref _resolvedSnapshot, next);
+        }
     }
 
     private LookupResult ResolveLookup(Type type)

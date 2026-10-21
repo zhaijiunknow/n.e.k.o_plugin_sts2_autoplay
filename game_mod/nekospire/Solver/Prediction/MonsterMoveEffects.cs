@@ -222,7 +222,7 @@ internal static partial class MonsterMoveEffects
         simulator.RemoveFromCombat(stolen);
         combat.RecordStolenCard(simulator);
         SwipePower swipe = combat.AddPowerInstance<SwipePower>(move.Owner, 1, move.Owner);
-        GameRef.Set(swipe, "_target", player);
+        T44PrivateAccess.SetPowerModel_Target(swipe,  player);
         swipe.StolenCard = stolen.Preview;
     }
 
@@ -389,7 +389,13 @@ internal static partial class MonsterMoveEffects
                 Debuff<FrailPower>(combat, player, 2, move.Owner);
                 return true;
             case ("GasBomb", "EXPLODE_MOVE"):
-                simulator.Kill(move.Owner, force: true);
+                using (simulator.PushDamageSource(
+                    CombatDamageSource.For(CombatDamageSourceKind.MonsterMove, move.Owner.Monster?.Id.Entry)))
+                {
+                    simulator.Kill(move.Owner, force: true);
+                }
+                if (simulator.HasPendingChoice)
+                    return true;
                 killedOwner = true;
                 return true;
             case ("GlobeHead", "SHOCKING_SLAP"):
@@ -805,8 +811,8 @@ internal static partial class MonsterMoveEffects
                     player.Player ?? throw new InvalidOperationException("永世沙漏的目标不是玩家。"));
                 foreach (PredictedCard card in playerState.AllCards)
                 {
-                    if (card.MutablePreview is Wither wither)
-                        wither.FakeUpgrade();
+                    if (card.Preview is Wither)
+                        ((Wither)card.MutablePreview).FakeUpgrade();
                 }
                 combat.AdvanceAeonglassWitherUpgrade(move.Owner);
                 simulator.CreateAndAddGeneratedCardsToCombat<Wither>(
@@ -888,7 +894,13 @@ internal static partial class MonsterMoveEffects
                 combat.PrepareSteamEruption(move.Owner);
                 return true;
             case ("WaterfallGiant", "EXPLODE_MOVE"):
-                simulator.Kill(move.Owner, force: true);
+                using (simulator.PushDamageSource(
+                    CombatDamageSource.For(CombatDamageSourceKind.MonsterMove, move.Owner.Monster?.Id.Entry)))
+                {
+                    simulator.Kill(move.Owner, force: true);
+                }
+                if (simulator.HasPendingChoice)
+                    return true;
                 killedOwner = true;
                 return true;
             case ("DecimillipedeSegmentBack", "BULK_MOVE"):

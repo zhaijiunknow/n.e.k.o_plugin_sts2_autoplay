@@ -83,8 +83,7 @@ internal static class CombatSolverFacade
             {
                 var bounded = await RunSolveAsync(
                     () => new CombatBeamSolver(root, names, damage, smartPolicy, cancellationToken, null,
-                        searchProfile: options.ShortBudgetMilliseconds is int s ? SolverSearchProfile.Short with { SoftTimeBudgetMilliseconds = s } : SolverSearchProfile.Short,
-                        shortCheckpointMilliseconds: null,
+                        searchProfile: options.ShortBudgetMilliseconds is int s ? SolverProfilePresets.Short with { SoftTimeBudgetMilliseconds = s } : SolverProfilePresets.Short,
                         potionPolicyOverride: SolverPotionPolicy.Smart,
                         potionFreePolicyBaseline: null, maximumPotionUses: n).Solve());
 
@@ -121,11 +120,11 @@ internal static class CombatSolverFacade
     private static SearchPolicySnapshot BuildPolicy(SolverFacadeOptions options, SolverPotionPolicy potionPolicy, bool includeTurnSetup)
     {
         var shortProfile = options.ShortBudgetMilliseconds is int s
-            ? SolverSearchProfile.Short with { SoftTimeBudgetMilliseconds = s }
-            : SolverSearchProfile.Short;
+            ? SolverProfilePresets.Short with { SoftTimeBudgetMilliseconds = s }
+            : SolverProfilePresets.Short;
         var deepProfile = options.DeepBudgetMilliseconds is int d
-            ? SolverSearchProfile.Deep with { SoftTimeBudgetMilliseconds = d }
-            : SolverSearchProfile.Deep;
+            ? SolverProfilePresets.Deep with { SoftTimeBudgetMilliseconds = d }
+            : SolverProfilePresets.Deep;
 
         var diagnostics = new SearchDiagnosticsSink(
             msg => Entry.Logger?.Info(msg),
@@ -135,20 +134,19 @@ internal static class CombatSolverFacade
         memory.Disable();
 
         return new SearchPolicySnapshot(
-            ShortProfile: shortProfile,
-            DeepProfile: deepProfile,
+            Profile: options.ForceShortOnly ? shortProfile : deepProfile,
             PotionPolicy: potionPolicy,
             PotionStrategy: new PotionStrategySnapshot(potionPolicy, System.Array.Empty<PotionSlotDirective>()),
             DetailedDiagnostics: false,
             VerifyIncrementalSearch: false,
-            ForceShortOnly: options.ForceShortOnly,
             MeasurePhasePerformance: false,
             MaxDegreeOfParallelism: options.MaxDegreeOfParallelism,
             // No budget override: the Short/Deep profile budgets (Medium preset) are authoritative, as in
             // the engine's own auto-turn-search. Passing an override on top of the profile is redundant and,
             // when set to 3s, hid the winning line.
-            ShortBudgetOverrideMilliseconds: null,
-            DeepBudgetOverrideMilliseconds: null,
+            FixedBudget: false,
+            BudgetOverrideMilliseconds: null,
+            AcceptableBattleHpLoss: 0,
             // The facade captures a live Play-phase root, so IncludeTurnSetup must be false — CombatBeamSolver
             // would throw "回合准备选牌搜索只能在玩家回合准备阶段计算" if true on a Play-phase root. The 0.28 engine
             // grounds the current turn to the real hand from a Play-phase root, so turn-setup seeding is not needed.
@@ -189,9 +187,9 @@ internal static class CombatSolverFacade
             score = result.BestNode.Score,
             state_fingerprint = StateFingerprint(root),
             line = line,
-            beam_width = SolverSearchProfile.Short.BeamWidth,
+            beam_width = SolverProfilePresets.Short.BeamWidth,
             horizon = result.SearchedTurns,
-            max_turn_actions = SolverSearchProfile.Deep.MaxCardBranchesPerNode,
+            max_turn_actions = SolverProfilePresets.Deep.MaxCardBranchesPerNode,
             draw_model = "combatsolver",
             warnings = warnings,
             coverage = new CoverageSummaryPayload

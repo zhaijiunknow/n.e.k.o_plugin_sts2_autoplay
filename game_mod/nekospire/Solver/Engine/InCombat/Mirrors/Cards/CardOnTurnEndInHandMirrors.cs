@@ -68,8 +68,10 @@ internal static class CardOnTurnEndInHandMirrors
     private static void HandleRegret(Regret card, CardOnTurnEndInHandMirrorContext context)
     {
         var previewCard = (Regret)context.MutablePreviewCard;
-        DamageOwner(context, GameRef.Get<int>(previewCard, "CardsInHand"), DamageProps.cardHpLoss);
-        GameRef.Set(previewCard, "CardsInHand", 0);
+        DamageOwner(context, T44PrivateAccess.Regret_CardsInHand(previewCard), DamageProps.cardHpLoss);
+        if (context.Simulator.HasPendingChoice)
+            return;
+        T44PrivateAccess.SetRegret_CardsInHand(previewCard,  0);
     }
 
     private static void HandleDebt(Debt card, CardOnTurnEndInHandMirrorContext context)

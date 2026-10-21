@@ -90,7 +90,7 @@ internal static class ModifyCardPlayCountMirrors
         }
 
         int count = context.CombatState is SimulatedCombatState combat
-            ? combat.GetCardPlaysStartedThisTurn(power.Owner)
+            ? combat.GetCardPlaySeriesStartedThisTurn(power.Owner)
             : CombatManager.Instance.History.CardPlaysStarted.Count(entry =>
                 entry.Actor == power.Owner &&
                 entry.CardPlay.IsFirstInSeries &&
@@ -142,7 +142,7 @@ internal sealed class AfterModifyingCardPlayCountMirrorContext : CombatMirrorCon
 
 internal sealed class ThrowingAxePredictionState(ThrowingAxe relic) : IPredictionStateForkable
 {
-    public bool UsedThisCombat { get; set; } = GameRef.Get<bool>(relic, "_usedThisCombat");
+    public bool UsedThisCombat { get; set; } = T44PrivateAccess.ThrowingAxe_UsedThisCombat(relic);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

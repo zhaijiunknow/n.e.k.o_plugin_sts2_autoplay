@@ -18,8 +18,13 @@ internal static class FairyInABottleMirrors
             throw new InvalidOperationException("瓶中仙女结算缺少可写的预测状态。");
         effects.ConsumePotion(potion);
         effects.BeforePotionUsed(context.Simulator, potion, context.Creature);
-        int maxHp = context.State.GetCreature(context.Creature).MaxHp;
+        SimCreatureState creature = context.State.GetCreature(context.Creature);
+        int hpBeforeRevive = creature.CurrentHp;
+        int maxHp = creature.MaxHp;
         context.Simulator.Heal(context.Creature, HealAmount(maxHp));
+        int restored = creature.CurrentHp - hpBeforeRevive;
+        if (restored > 0 && context.CombatState is SimulatedCombatState combat)
+            combat.RecordDeathSavePotionHpRestored(restored);
         if (context.State.GetCreature(context.Creature).IsAlive)
             effects.AfterPotionUsed(context.Simulator, potion, context.Creature);
     }
@@ -45,8 +50,14 @@ internal static class LizardTailMirrors
         if (context.Simulator.IsRecordingActionRelicTriggers)
             context.Simulator.RecordRelicTrigger(relic, "：复活");
 
-        int maxHp = context.State.GetCreature(context.Creature).MaxHp;
-        context.Simulator.Heal(context.Creature, HealAmount(relic, maxHp));
+        SimCreatureState creature = context.State.GetCreature(context.Creature);
+        int hpBeforeRevive = creature.CurrentHp;
+        context.Simulator.Heal(context.Creature, HealAmount(relic, creature.MaxHp));
+        int restored = creature.CurrentHp - hpBeforeRevive;
+        // The revive spends a cross-combat resource, it is not HP the route earned. Without this the route
+        // that walks into lethal damage scores as if it had healed half its max HP for free.
+        if (restored > 0 && context.CombatState is SimulatedCombatState combat)
+            combat.RecordDeathSaveRelicHpRestored(restored);
     }
 
     internal static decimal HealAmount(LizardTail relic, int maxHp)

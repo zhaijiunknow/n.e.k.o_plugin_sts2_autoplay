@@ -5,7 +5,6 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.CardPools;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Runs;
-using MegaCrit.Sts2.Core.Saves;
 
 namespace CombatSolver.Engine.Common;
 
@@ -18,25 +17,37 @@ internal readonly record struct PredictionRngState(
 
 internal static class PredictionExtensions
 {
-    // Vendored build must NOT touch the game's private RNG fields directly (no runtime publicization in
-    // nekospire). The game exposes a public serialization round-trip (ToSerializable / Rng(SerializableRng))
-    // that captures the counter + all four Xoshiro state words — faithful and zero private access.
     public static Rng Clone(this Rng rng)
-        => new(rng.ToSerializable());
+    {
+        Rng clone = new(0UL);
+        T44PrivateAccess.SetRng_Counter(clone,  T44PrivateAccess.Rng_Counter(rng));
+        T44PrivateAccess.SetMegaRandom_S0(T44PrivateAccess.Rng_Random(clone),  T44PrivateAccess.MegaRandom_S0(T44PrivateAccess.Rng_Random(rng)));
+        T44PrivateAccess.SetMegaRandom_S1(T44PrivateAccess.Rng_Random(clone),  T44PrivateAccess.MegaRandom_S1(T44PrivateAccess.Rng_Random(rng)));
+        T44PrivateAccess.SetMegaRandom_S2(T44PrivateAccess.Rng_Random(clone),  T44PrivateAccess.MegaRandom_S2(T44PrivateAccess.Rng_Random(rng)));
+        T44PrivateAccess.SetMegaRandom_S3(T44PrivateAccess.Rng_Random(clone),  T44PrivateAccess.MegaRandom_S3(T44PrivateAccess.Rng_Random(rng)));
+        return clone;
+    }
 
-    public static int Counter(this Rng rng)
-        => rng.ToSerializable().counter;
+    public static Rng ToRng(this PredictionRngState state)
+    {
+        Rng rng = new(0UL);
+        T44PrivateAccess.SetRng_Counter(rng,  state.Counter);
+        T44PrivateAccess.SetMegaRandom_S0(T44PrivateAccess.Rng_Random(rng),  state.State0);
+        T44PrivateAccess.SetMegaRandom_S1(T44PrivateAccess.Rng_Random(rng),  state.State1);
+        T44PrivateAccess.SetMegaRandom_S2(T44PrivateAccess.Rng_Random(rng),  state.State2);
+        T44PrivateAccess.SetMegaRandom_S3(T44PrivateAccess.Rng_Random(rng),  state.State3);
+        return rng;
+    }
+
+    public static int Counter(this Rng rng) => T44PrivateAccess.Rng_Counter(rng);
 
     public static PredictionRngState CaptureState(this Rng rng)
-    {
-        SerializableRng serializable = rng.ToSerializable();
-        return new PredictionRngState(
-            serializable.counter,
-            serializable.state0,
-            serializable.state1,
-            serializable.state2,
-            serializable.state3);
-    }
+        => new(
+            T44PrivateAccess.Rng_Counter(rng),
+            T44PrivateAccess.MegaRandom_S0(T44PrivateAccess.Rng_Random(rng)),
+            T44PrivateAccess.MegaRandom_S1(T44PrivateAccess.Rng_Random(rng)),
+            T44PrivateAccess.MegaRandom_S2(T44PrivateAccess.Rng_Random(rng)),
+            T44PrivateAccess.MegaRandom_S3(T44PrivateAccess.Rng_Random(rng)));
 
     public static void Advance(this Rng rng, int count)
     {

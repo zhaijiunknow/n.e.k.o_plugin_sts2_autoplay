@@ -109,13 +109,8 @@ internal static class ModifyCardPlayResultLocationMirrors
             return context.Location;
         }
 
-        var count = CombatManager.Instance.History.CardPlaysStarted.Count(entry =>
-            entry.HappenedThisTurn(power.CombatState) &&
-            entry.CardPlay.Card.Type is CardType.Attack or CardType.Skill &&
-            entry.CardPlay.Player == power.Owner.Player);
-        count += context.History.OfType<CombatPredictionCardPlayStartedEntry>().Count(entry =>
-            entry.CardPlay.Card.Type is CardType.Attack or CardType.Skill &&
-            entry.CardPlay.Player == power.Owner.Player);
+        var count = ((SimulatedCombatState)context.State.CombatState)
+            .GetAttackSkillStartsThisTurn(power.Owner);
         if (count >= power.Amount)
         {
             return context.Location;
@@ -173,7 +168,7 @@ internal sealed class AfterModifyingCardPlayResultLocationMirrorContext : Combat
 internal sealed class FeralPredictionState(FeralPower power) : IPredictionStateForkable
 {
     public int ZeroCostAttacksPlayed { get; set; } =
-        (int)((int)(GameRef.Get(GameRef.InvokeGeneric(power, "GetInternalData", "Data"), "zeroCostAttacksPlayed")));
+        T44PrivateAccess.Read<int>(T44PrivateAccess.InternalData(power), "zeroCostAttacksPlayed");
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

@@ -1,6 +1,4 @@
-using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Models;
-using MegaCrit.Sts2.Core.Models.Potions;
 
 namespace CombatSolver;
 
@@ -17,21 +15,15 @@ internal static class PotionUsePolicy
     public static int AdditionalRequiredUseStrategicHpCost(int strategicHpCost)
         => Math.Max(0, strategicHpCost - SolverWeights.PotionMinimumHpSaved);
 
+    /// <summary>
+    /// The HP a route must save to justify spending this potion. Token potions are free to spend; everything else
+    /// costs at least the baseline. Higher tiers require more HP saved to qualify for use.
+    /// </summary>
     public static int StrategicHpCost(PotionModel potion, bool renewablePotionShapedRock = false)
-        => potion.Rarity == PotionRarity.Token
-            || renewablePotionShapedRock && potion is PotionShapedRock
-                ? 0
-                : SolverWeights.PotionMinimumHpSaved;
+        => PotionValuationRegistry.Default.StrategicHpCost(potion, renewablePotionShapedRock);
 
     public static bool RequiresOpeningUse(PotionModel potion)
-        => potion is DexterityPotion
-            or FocusPotion
-            or FyshOil
-            or LiquidBronze
-            or MazalethsGift
-            or PotionOfCapacity
-            or SoldiersStew
-            or StrengthPotion;
+        => PotionValuationRegistry.Default.RequiresOpeningUse(potion);
 
     public static bool RequiresOpeningUse(string potionId)
         => RequiresOpeningUse(ModelDb.AllPotions.Single(candidate =>
@@ -43,6 +35,24 @@ internal static class PotionUsePolicy
             candidate.Id.Entry.Equals(potionId, StringComparison.Ordinal));
         return StrategicHpCost(potion, renewablePotionShapedRock);
     }
+
+    /// <summary>
+    /// The strategic cost a route's optional potion uses must justify once the expected post-combat reward is
+    /// counted. See <see cref="PotionRewardOutlook"/>: the credit stands for the one reward a freed slot can
+    /// receive, so it is taken off the route total once, never per potion.
+    /// </summary>
+    /// <remarks>
+    /// The floor is one HP, not zero. A zero requirement would let <see cref="IsEligible"/> admit a potion route
+    /// that saves nothing or even loses more than the potion-free baseline (<see cref="HpSaved"/> clamps at
+    /// zero), and a free replacement only makes spending costless, never worth doing for no gain.
+    /// </remarks>
+    public static int ApplyReplacementCredit(
+        int optionalPotionStrategicCost,
+        int optionalPotionCount,
+        int replacementHpCredit)
+        => optionalPotionStrategicCost > 0 && optionalPotionCount > 0 && replacementHpCredit > 0
+            ? Math.Max(1, optionalPotionStrategicCost - replacementHpCredit)
+            : optionalPotionStrategicCost;
 
     public static int HpSaved(int potionFreeHpDeficit, int potionRouteHpDeficit)
         => Math.Max(0, potionFreeHpDeficit - potionRouteHpDeficit);
@@ -110,6 +120,34 @@ internal readonly record struct PotionFreePolicyBaseline(
     bool Won,
     int HpDeficit,
     int PlayerHp,
-    int? CombatEndedTurn);
+    int? CombatEndedTurn)
+{
+    public int DeathSaveUseCount { get; init; }
+}
 
 internal sealed class PotionPolicyUnsatisfiedException(string message) : InvalidOperationException(message);
+
+// One solver owns this small table of canonical, immutable policy values. Misses use
+// the original catalog lookup, including its missing/duplicate-ID failure behavior.
+// It holds no branch objects and is never shared by concurrently executing solvers.
+internal sealed class PotionStrategicCostLookup
+{
+    private readonly Dictionary<(string Id, bool RenewableRock), int> _costs = [];
+    public long Hits { get; private set; }
+    public long Misses { get; private set; }
+    public int Count => _costs.Count;
+
+    public int Get(string potionId, bool renewablePotionShapedRock)
+    {
+        var key = (potionId, renewablePotionShapedRock);
+        if (_costs.TryGetValue(key, out int cost))
+        {
+            Hits++;
+            return cost;
+        }
+        Misses++;
+        cost = PotionUsePolicy.StrategicHpCost(potionId, renewablePotionShapedRock);
+        _costs.Add(key, cost);
+        return cost;
+    }
+}

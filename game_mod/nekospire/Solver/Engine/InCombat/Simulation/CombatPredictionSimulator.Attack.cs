@@ -35,13 +35,37 @@ internal sealed partial class CombatPredictionSimulator
         attackContext.AddResultsInternal(results);
     }
 
-    public void EndAttackContext(AttackCommand attackContext)
+    /// <summary>把多次命中的结果展平成一个列表；热路径上避免 SelectMany/ToArray 的迭代器与两次拷贝。</summary>
+    private static DamageResult[] FlattenAttackResults(AttackCommand attackCommand)
     {
+        int total = 0;
+        foreach (List<DamageResult> hit in attackCommand.Results)
+            total += hit.Count;
+        if (total == 0)
+            return [];
+        DamageResult[] flattened = new DamageResult[total];
+        int index = 0;
+        foreach (List<DamageResult> hit in attackCommand.Results)
+        {
+            hit.CopyTo(flattened, index);
+            index += hit.Count;
+        }
+        return flattened;
+    }
+
+    public void EndAttackContext(AttackCommand attackContext, bool completed = true)
+    {
+        if (!completed)
+        {
+            HookMirrors.AbortAttack(this, attackContext);
+            return;
+        }
+
         Creature attacker = attackContext.Attacker
             ?? throw new InvalidOperationException("Attack context must have an attacker.");
         History.CreatureAttacked(
             attacker,
-            attackContext.Results.SelectMany(results => results).ToArray());
+            FlattenAttackResults(attackContext));
         if (State.CombatState is ICombatPredictionCardEventSink eventSink)
             eventSink.RecordCreatureAttacked(attacker);
         HookMirrors.AfterAttack(this, attackContext);
@@ -86,50 +110,58 @@ internal sealed partial class CombatPredictionSimulator
             return;
         }
 
-        HookMirrors.BeforeAttack(this, attackCommand);
-
-        var hitCount = HookMirrors.ModifyAttackHitCount(this, attackCommand, GameRef.Get<int>(attackCommand, "_hitCount"));
-
-        var cardSource = State.FindCard(card) ?? new PredictedCard(card);
-
-        for (var i = 0; i < hitCount; i++)
+        BeginAttackContext(attackCommand);
+        bool completed = false;
+        try
         {
-            if (attackerState.IsDead)
+            if (HasPendingChoice)
+                return;
+
+            var hitCount = HookMirrors.ModifyAttackHitCount(this, attackCommand, T44PrivateAccess.AttackCommand_HitCount(attackCommand));
+            if (HasPendingChoice)
+                return;
+
+            var cardSource = State.FindCard(card) ?? new PredictedCard(card);
+
+            for (var i = 0; i < hitCount; i++)
             {
-                break;
+                if (attackerState.IsDead)
+                {
+                    break;
+                }
+
+                var validTargets = GetPossibleAttackTargets(attackCommand)
+                    .Where(creature => State.GetCreature(creature).IsAlive)
+                    .ToList();
+                if (validTargets.Count == 0)
+                {
+                    break;
+                }
+
+                var singleTarget = SelectSingleAttackTarget(attackCommand, validTargets);
+                if (attackCommand.IsRandomlyTargeted && singleTarget == null)
+                {
+                    break;
+                }
+
+                var results = Damage(
+                    singleTarget != null ? [singleTarget] : validTargets,
+                    GetAttackDamageAmount(attackCommand, cardSource, singleTarget),
+                    attackCommand.DamageProps,
+                    attacker,
+                    cardSource,
+                    attackCommand.CardPlay);
+                if (HasPendingChoice)
+                    return;
+                attackCommand.AddResultsInternal(results);
             }
 
-            var validTargets = GetPossibleAttackTargets(attackCommand)
-                .Where(creature => State.GetCreature(creature).IsAlive)
-                .ToList();
-            if (validTargets.Count == 0)
-            {
-                break;
-            }
-
-            var singleTarget = SelectSingleAttackTarget(attackCommand, validTargets);
-            if (attackCommand.IsRandomlyTargeted && singleTarget == null)
-            {
-                break;
-            }
-
-            var results = Damage(
-                singleTarget != null ? [singleTarget] : validTargets,
-                GetAttackDamageAmount(attackCommand, cardSource, singleTarget),
-                attackCommand.DamageProps,
-                attacker,
-                cardSource,
-                attackCommand.CardPlay);
-            attackCommand.AddResultsInternal(results);
+            completed = true;
         }
-
-        History.CreatureAttacked(
-            attacker,
-            attackCommand.Results.SelectMany(results => results).ToArray());
-        if (State.CombatState is ICombatPredictionCardEventSink eventSink)
-            eventSink.RecordCreatureAttacked(attacker);
-
-        HookMirrors.AfterAttack(this, attackCommand);
+        finally
+        {
+            EndAttackContext(attackCommand, completed);
+        }
     }
 
     // Mirrors AttackCommand.GetPossibleTargets but uses the simulator's state instead of the real CombatState.
@@ -143,16 +175,17 @@ internal sealed partial class CombatPredictionSimulator
 
         if (attackCommand.IsSingleTargeted)
         {
-            return [GameRef.Get<MegaCrit.Sts2.Core.Entities.Creatures.Creature>(attackCommand, "_singleTarget")!];
+            return [T44PrivateAccess.AttackCommand_SingleTarget(attackCommand)!];
         }
 
         if (attackCommand.IsMultiTargeted)
         {
-            return GameRef.Get<int>(attackCommand, "_sourceType") switch
-            {
-                0 => State.PlayerCreatures,
-                _ => State.GetOpponentsOf(attacker)
-            };
+            // AttackCommand.SourceType is an internal nested enum, so its members cannot be named in
+            // our source; compare the boxed value by name through the reflection layer instead.
+            return T44PrivateAccess.EnumMemberIs(
+                    T44PrivateAccess.AttackCommand_SourceType(attackCommand), "Monster")
+                ? State.PlayerCreatures
+                : State.GetOpponentsOf(attacker);
         }
 
         throw new InvalidOperationException("AttackCommand must be either single-targeted or multi-targeted.");
@@ -165,7 +198,7 @@ internal sealed partial class CombatPredictionSimulator
             return validTargets.Count == 1 ? validTargets[0] : null;
         }
 
-        if (!GameRef.Get<bool>(attackCommand, "_doesRandomTargetingAllowDuplicates"))
+        if (!T44PrivateAccess.AttackCommand_DoesRandomTargetingAllowDuplicates(attackCommand))
         {
             var previousReceivers = attackCommand.Results
                 .SelectMany(results => results)
@@ -191,11 +224,11 @@ internal sealed partial class CombatPredictionSimulator
         PredictedCard cardSource,
         Creature? singleTarget)
     {
-        if (GameRef.Get<MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar>(attackCommand, "_calculatedDamageVar") is {} calculatedDamageVar)
+        if (T44PrivateAccess.AttackCommand_CalculatedDamageVar(attackCommand) is {} calculatedDamageVar)
         {
             return calculatedDamageVar.InvokeCalculate(this, cardSource, singleTarget);
         }
 
-        return GameRef.Get<decimal>(attackCommand, "_damagePerHit");
+        return T44PrivateAccess.AttackCommand_DamagePerHit(attackCommand);
     }
 }

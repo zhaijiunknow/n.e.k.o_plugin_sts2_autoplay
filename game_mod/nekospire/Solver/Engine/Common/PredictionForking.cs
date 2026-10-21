@@ -14,6 +14,21 @@ internal interface ICombatPredictionHookListenerSource
     IReadOnlyList<MegaCrit.Sts2.Core.Models.AbstractModel> HookListeners { get; }
 
     IReadOnlyList<MegaCrit.Sts2.Core.Models.AbstractModel> RunHookListeners { get; }
+
+    IReadOnlyList<MegaCrit.Sts2.Core.Models.AbstractModel> MirroredHookListeners => HookListeners;
+
+    IReadOnlyList<MegaCrit.Sts2.Core.Models.AbstractModel> MirroredRunHookListeners => RunHookListeners;
+}
+
+/// <summary>
+/// 由两段只读列表逐条同序拼接而成的监听表。hook 分发按段迭代，避免在最热循环里为每个元素
+/// 多付一次接口调用和一次分支（视图自己的索引器每次都要判断落在前缀还是后缀）。
+/// </summary>
+internal interface ISegmentedModelList
+{
+    IReadOnlyList<MegaCrit.Sts2.Core.Models.AbstractModel> Prefix { get; }
+
+    IReadOnlyList<MegaCrit.Sts2.Core.Models.AbstractModel> Suffix { get; }
 }
 
 internal interface ICombatPredictionRunSnapshot
@@ -21,6 +36,13 @@ internal interface ICombatPredictionRunSnapshot
     MegaCrit.Sts2.Core.Entities.Cards.CardMultiplayerConstraint CardMultiplayerConstraint { get; }
 
     CombatSolver.Engine.InCombat.Simulation.CombatPredictionRngSet CreatePredictionRngSet();
+}
+
+internal enum CharacterCombatGenerationPool
+{
+    NonBasicAndAncient,
+    Powers,
+    Common,
 }
 
 internal interface ICombatPredictionCardGenerationPoolSnapshot
@@ -32,6 +54,25 @@ internal interface ICombatPredictionCardGenerationPoolSnapshot
         out IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel> cards);
 
     bool TryGetRootEligibleCharacterAttackCards(
+        MegaCrit.Sts2.Core.Entities.Players.Player player,
+        MegaCrit.Sts2.Core.Models.CardPoolModel cardPool,
+        MegaCrit.Sts2.Core.Entities.Cards.CardMultiplayerConstraint multiplayerConstraint,
+        out IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel> cards);
+
+    bool TryGetRootEligibleAllCharacterCards(
+        MegaCrit.Sts2.Core.Entities.Players.Player player,
+        MegaCrit.Sts2.Core.Models.CardPoolModel cardPool,
+        MegaCrit.Sts2.Core.Entities.Cards.CardMultiplayerConstraint multiplayerConstraint,
+        out IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel> cards);
+
+    bool TryGetRootEligibleCharacterCards(
+        MegaCrit.Sts2.Core.Entities.Players.Player player,
+        MegaCrit.Sts2.Core.Models.CardPoolModel cardPool,
+        MegaCrit.Sts2.Core.Entities.Cards.CardMultiplayerConstraint multiplayerConstraint,
+        CharacterCombatGenerationPool selection,
+        out IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel> cards);
+
+    bool TryGetRootUnlockedTransformationCards(
         MegaCrit.Sts2.Core.Entities.Players.Player player,
         MegaCrit.Sts2.Core.Models.CardPoolModel cardPool,
         MegaCrit.Sts2.Core.Entities.Cards.CardMultiplayerConstraint multiplayerConstraint,
@@ -76,12 +117,21 @@ internal interface ICombatPredictionRootMaterializable
 
 internal interface ICombatPredictionCardEventSink
 {
+    void RecordPoweredCardBlockGained(MegaCrit.Sts2.Core.Entities.Creatures.Creature cardOwner);
+
     void RecordCardExhausted(MegaCrit.Sts2.Core.Entities.Creatures.Creature actor);
 
     void RecordDamageReceived(
         MegaCrit.Sts2.Core.Entities.Creatures.Creature receiver,
         MegaCrit.Sts2.Core.Entities.Creatures.Creature? dealer,
         MegaCrit.Sts2.Core.Entities.Creatures.DamageResult result);
+
+    /// <summary>
+    /// HP that a heal actually restored, already clamped by max HP so overheal reports nothing.
+    /// </summary>
+    void RecordHpRecovered(
+        MegaCrit.Sts2.Core.Entities.Creatures.Creature receiver,
+        int amount);
 
     void RecordCardDiscarded(MegaCrit.Sts2.Core.Entities.Creatures.Creature actor);
 
@@ -122,9 +172,6 @@ internal interface ICombatPredictionCardExecutionSink
 {
     IDisposable BeginCardExecutionScope();
 
-    IDisposable BeginHistorySensitiveCardModifierScope(
-        CombatSolver.Engine.Common.PredictedCard card);
-
     IDisposable BeginCardPowerApplication(CombatSolver.Engine.Common.PredictedCard card);
 
     void RecordCardPlayStarted(
@@ -159,6 +206,12 @@ internal interface ICombatPredictionEnemyDeathSink
 
 internal interface ICombatPredictionEffectSink
 {
+    void RecordTenderCardPlayed(MegaCrit.Sts2.Core.Entities.Creatures.Creature owner);
+
+    void SpawnStockReplacement(
+        CombatSolver.Engine.InCombat.Simulation.CombatPredictionSimulator simulator,
+        MegaCrit.Sts2.Core.Models.Powers.StockPower power);
+
     void SummonOsty(
         CombatSolver.Engine.InCombat.Simulation.CombatPredictionSimulator simulator,
         MegaCrit.Sts2.Core.Entities.Players.Player player,
@@ -171,6 +224,13 @@ internal interface ICombatPredictionEffectSink
         MegaCrit.Sts2.Core.Entities.Creatures.Creature? applier = null);
 
     void SetPowerAmount(MegaCrit.Sts2.Core.Models.PowerModel power, int amount);
+
+    void ApplyPowerFromSource(
+        Type powerType,
+        MegaCrit.Sts2.Core.Entities.Creatures.Creature target,
+        int amount,
+        MegaCrit.Sts2.Core.Entities.Creatures.Creature? applier,
+        MegaCrit.Sts2.Core.Models.CardModel? cardSource);
 
     void SetPowerDynamicVar(
         CombatSolver.Engine.InCombat.Simulation.CombatPredictionSimulator simulator,
@@ -206,7 +266,8 @@ internal interface ICombatPredictionEffectSink
         Type powerType,
         MegaCrit.Sts2.Core.Entities.Creatures.Creature target,
         int amount,
-        MegaCrit.Sts2.Core.Entities.Creatures.Creature? applier = null);
+        MegaCrit.Sts2.Core.Entities.Creatures.Creature? applier,
+        MegaCrit.Sts2.Core.Models.CardModel? cardSource);
 
     void ApplyTemporaryDexterity(
         Type powerType,
@@ -243,6 +304,25 @@ internal interface ICombatPredictionChoiceSink
         MegaCrit.Sts2.Core.Entities.Players.Player player,
         MegaCrit.Sts2.Core.Entities.Cards.PileType sourcePile,
         int count);
+
+    /// <summary>
+    /// 在给定的候选里让玩家挑任意张丢进弃牌堆，可以一张都不挑。
+    /// </summary>
+    /// <remarks>
+    /// 预视这类效果只让玩家看牌堆顶的几张，所以候选由调用方给出，不能从整个牌堆推。
+    /// 一张都不挑永远合法，因此下界是 0，这条选择不会让路线变得不可执行。
+    ///
+    /// <paramref name="maxBranches" /> 给 1 表示按固定策略作答、不在 beam 上展开分支。会在每次
+    /// 洗牌处反复触发的来源应当这样用，否则在能循环整个牌库的牌组里，这条选择会把搜索宽度
+    /// 乘上很多遍，压过真正要决定的出牌顺序。
+    /// </remarks>
+    bool ResolvePileDiscardChoice(
+        CombatSolver.Engine.InCombat.Simulation.CombatPredictionSimulator simulator,
+        string sourceId,
+        MegaCrit.Sts2.Core.Entities.Players.Player player,
+        MegaCrit.Sts2.Core.Entities.Cards.PileType sourcePile,
+        IReadOnlyList<CombatSolver.Engine.Common.PredictedCard> options,
+        int? maxBranches = null);
 }
 
 internal interface ICombatPredictionPendingChoiceState
@@ -255,7 +335,8 @@ internal interface ICombatPredictionNestedChoiceSink
     bool ResolveNestedCardChoice(
         CombatSolver.Engine.InCombat.Simulation.CombatPredictionSimulator simulator,
         CombatSolver.Engine.Common.PredictedCard card,
-        string sourceId);
+        string sourceId,
+        string? contextId);
 }
 
 internal interface ICombatPredictionManualCardChoiceSink
@@ -272,6 +353,19 @@ internal interface ICombatPredictionCreatureSemantics
     bool IsHittable(MegaCrit.Sts2.Core.Entities.Creatures.Creature creature);
 
     bool ShouldRemoveAfterDeath(MegaCrit.Sts2.Core.Entities.Creatures.Creature creature);
+
+    /// <summary>
+    /// 场上是否还有「已经死掉、但还欠一个会生成新的主要敌人的死亡效果」的个体。
+    /// </summary>
+    /// <remarks>
+    /// 死亡效果被推迟到 <c>ApplyEnemyDeathPowers</c> 的清扫才结算，而个体在死亡当时就被移出了
+    /// <c>State.Enemies</c>，所以中间有一个「场上没有活着的主要敌人、但马上会有」的窗口。在那个
+    /// 窗口里宣布胜利会把胜利戳永久锁死（<c>CheckWinCondition</c> 第一行就是
+    /// <c>if (TerminalStamp.HasValue) return true;</c>），之后补货生成出来也不会再复查。
+    ///
+    /// 问的是整场而不是逐个，正因为那些个体已经不在 <c>State.Enemies</c> 里了，调用方拿不到它们。
+    /// </remarks>
+    bool HasUnresolvedSpawningDeath();
 }
 
 internal interface ICombatPredictionMonsterStateSink
@@ -306,11 +400,32 @@ internal sealed class PredictionForkContext : IDisposable
     private const int IndexedLookupThreshold = 64;
     private const int HashLoadNumerator = 3;
     private const int HashLoadDenominator = 4;
-    private object[] _sources = ArrayPool<object>.Shared.Rent(40);
-    private object[] _forks = ArrayPool<object>.Shared.Rent(40);
+    private const int MinimumEntryCapacity = 40;
+
+    // 同一条搜索线程上相邻两次 Fork 登记的条目数几乎相同。用上一次的实际条目数预估容量，
+    // 让第一次 Register 就落在最终大小的条目数组与身份哈希索引上：既省掉线性扫描阶段的
+    // O(n²) 比较，也省掉跨过阈值后按 3/4 装载率反复重建索引的开销。命中与否只影响容量，
+    // 查找结果只由引用身份决定，因此映射结果与原实现逐条相同。
+    [ThreadStatic]
+    private static int _entryCountHint;
+
+    private object[] _sources;
+    private object[] _forks;
     private int[]? _buckets;
     private int _bucketResizeThreshold;
     private int _count;
+
+    public PredictionForkContext()
+    {
+        int capacity = Math.Max(MinimumEntryCapacity, _entryCountHint);
+        _sources = ArrayPool<object>.Shared.Rent(capacity);
+        _forks = ArrayPool<object>.Shared.Rent(capacity);
+        if (capacity >= IndexedLookupThreshold)
+            BuildHashIndex(BucketCountFor(capacity));
+    }
+
+    private static int BucketCountFor(int entryCapacity)
+        => checked((int)((long)entryCapacity * HashLoadDenominator / HashLoadNumerator) + 1);
 
     public void Register<T>(T source, T fork)
         where T : class
@@ -444,6 +559,7 @@ internal sealed class PredictionForkContext : IDisposable
 
     public void Dispose()
     {
+        _entryCountHint = _count;
         object[] sources = _sources;
         object[] forks = _forks;
         int[]? buckets = _buckets;

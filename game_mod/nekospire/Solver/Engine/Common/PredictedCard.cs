@@ -1,15 +1,29 @@
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
+using System.Runtime.CompilerServices;
 
 namespace CombatSolver.Engine.Common;
 
 internal sealed class PredictedCard : IComparable<PredictedCard>
 {
+    // A COW preview keeps the combat card's identity across hook snapshots. Gameplay
+    // clones acquire their own identity when they enter a new prediction wrapper.
+    private static readonly ConditionalWeakTable<CardModel, object> CardIdentities = new();
+
     private sealed class PreviewStorage(CardModel original, CardModel? preview)
     {
         public CardModel Original { get; } = original;
         public CardModel? Preview { get; } = preview;
+        public object Identity { get; } = RegisterIdentity(original, preview);
         public volatile bool Shared;
+
+        private static object RegisterIdentity(CardModel original, CardModel? preview)
+        {
+            object identity = CardIdentities.GetValue(original, static _ => new object());
+            if (preview != null && !ReferenceEquals(CardIdentities.GetValue(preview, _ => identity), identity))
+                throw new InvalidOperationException("A card preview belongs to a different combat-card identity.");
+            return identity;
+        }
 
         private bool _hasCachedFingerprint;
         private ulong _cachedFingerprintFirst;
@@ -58,6 +72,19 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
     private Action? _mutationObserver;
     private bool _observeEveryPreviewMutation;
     private bool _isolateAttachedModelsOnFork;
+
+    // Entry inspection belongs to this wrapper, including root cards that need no
+    // entry effect. Fork preserves it; Clone starts unchecked. Root membership is
+    // frozen for the search, so a checked card never needs another root-set lookup.
+    internal bool HasCheckedPowerAfflictionEntry { get; private set; }
+
+    internal bool TryMarkPowerAfflictionEntryChecked()
+    {
+        if (HasCheckedPowerAfflictionEntry)
+            return false;
+        HasCheckedPowerAfflictionEntry = true;
+        return true;
+    }
 
     public PredictedCard(CardModel original, CardModel? preview = null)
     {
@@ -132,7 +159,9 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
     public bool References(object? card)
     {
         return ReferenceEquals(_previewStorage.Original, card)
-            || ReferenceEquals(_previewStorage.Preview, card);
+            || ReferenceEquals(_previewStorage.Preview, card)
+            || card is CardModel model && CardIdentities.TryGetValue(model, out object? identity)
+                && ReferenceEquals(_previewStorage.Identity, identity);
     }
 
     // Clones the prediction wrapper state only. Combat effects that generate a gameplay
@@ -165,6 +194,7 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
         PredictedCard fork = new(forkStorage)
         {
             _isolateAttachedModelsOnFork = _isolateAttachedModelsOnFork,
+            HasCheckedPowerAfflictionEntry = HasCheckedPowerAfflictionEntry,
         };
         context.Register(this, fork);
         return fork;
@@ -204,11 +234,18 @@ internal sealed class PredictedCard : IComparable<PredictedCard>
             _previewStorage.SetCachedChoiceKey(key);
     }
 
+    internal void InvalidateCaches()
+    {
+        _ownerPile?.InvalidateFingerprint();
+        _previewStorage.InvalidateCaches();
+    }
+
     internal void SetOwnerPile(SimCardPile? pile)
     {
         _ownerPile = pile;
         if (_isolateAttachedModelsOnFork)
             pile?.DisableFingerprintCache();
+        NotifyHookListenerStructureChanged();
     }
 
     internal void SetMutationObserver(Action? observer, bool observeEveryPreviewMutation = false)

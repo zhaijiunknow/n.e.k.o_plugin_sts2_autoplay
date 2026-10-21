@@ -1,4 +1,3 @@
-using CombatSolver.Engine.Common;
 using System.Reflection;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
@@ -68,7 +67,7 @@ internal static class OrbMirrors
     }
 
     public static decimal ModifyValue(CombatPredictionSimulator simulator, OrbModel orb, decimal baseValue)
-        => Hook.ModifyOrbValue(simulator.State.CombatState, orb, baseValue);
+        => HookMirrors.ModifyOrbValue(simulator, orb, baseValue);
 
     public static decimal GetPassiveValue(CombatPredictionSimulator simulator, OrbModel orb)
         => orb switch
@@ -76,7 +75,7 @@ internal static class OrbMirrors
             LightningOrb => ModifyValue(simulator, orb, 3m),
             FrostOrb => ModifyValue(simulator, orb, 2m),
             DarkOrb => ModifyValue(simulator, orb, 6m),
-            GlassOrb glass => ModifyValue(simulator, orb, GameRef.Get<int>(glass, "_passiveVal")),
+            GlassOrb glass => ModifyValue(simulator, orb, T44PrivateAccess.GlassOrb_PassiveVal(glass)),
             _ => orb.PassiveVal,
         };
 
@@ -85,7 +84,7 @@ internal static class OrbMirrors
         {
             LightningOrb => ModifyValue(simulator, orb, 8m),
             FrostOrb => ModifyValue(simulator, orb, 5m),
-            GlassOrb glass => ModifyValue(simulator, orb, GameRef.Get<int>(glass, "_passiveVal")) * 2m,
+            GlassOrb glass => ModifyValue(simulator, orb, T44PrivateAccess.GlassOrb_PassiveVal(glass)) * 2m,
             _ => orb.EvokeVal,
         };
 

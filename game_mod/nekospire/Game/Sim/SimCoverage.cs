@@ -28,9 +28,27 @@
 //                  Enemy-intent forecast items (Forecast.ApproximationDetails / UnsupportedDetails) are
 //                  a different population: they are carried separately (EnemyApproximated /
 //                  EnemyUnsupported) and NEVER enter the card-side buckets.
-//   Precedence   = ignored > unsupported > inferred > exact, matching SimSolverPlan's original order
-//                  (an X-cost card is excluded from the search entirely, so calling it "ignored" is
-//                  the honest label regardless of anything else known about it).
+//   Precedence   = ignored > unsupported > inferred > exact, matching SimSolverPlan's original order.
+//
+//   ★★ 更正（2026-10-21，t42）：本文件原来在这里写着
+//        "an X-cost card is excluded from the search entirely, so calling it 'ignored' is
+//         the honest label regardless of anything else known about it"
+//      —— 这句话是**事实错误**，已删除。实测两条引擎路径都**照常搜索并打出 X 费卡**，
+//      只是能量成本按「当前全部能量」估算：
+//        · 生产路径 `Solver/Search/CombatBeamSolver.StateEvaluation.cs`
+//          （`CalculateReachableHandPotential`）：`combat.CanPlayCard` 不排除 X 费卡，
+//          其 energyCost 取 `Math.Max(0, playerState.Energy)`；
+//        · `Solver/Engine/InCombat/Simulation/CombatPredictionSimulator.Card.cs`：
+//          `card.MutablePreview.EnergyCost.CapturedXValue = energyValue` —— 真的捕获 X 值去模拟；
+//        · Sim 路径 `Game/Sim/SimResolver.cs`：`cost = card.CostsX ? state.ActiveEnergy : card.Cost`
+//          且 `x = card.CostsX ? cost : -1` —— 同样按当前能量算、同样捕获 x。
+//      ⇒ 因此 `ignored` 只是**覆盖度报告里的一个分类**（"这张牌的费用形态让本引擎不下钻到
+//        精确效果"），**不等于该卡不参与搜索**。剩余风险仅是**效果保真度**
+//        （例如 HEAVENLY_DRILL 的 X≥4 翻倍是否被建模），而不是"整块决策空间丢失"。
+//
+//      ★ 为什么这条更正值得留痕：队长的跨 mod 对照一度据此把 X 费卡判为"不参与搜索"，
+//        并因此错误地建议关掉上游自动计算。注释与实现不一致会直接导致错误结论，
+//        与 DEFECT-D5 同族 —— 所以下面 `SimTests` 里加了一条**文档回归门**钉住这句话不得回潮。
 //
 // Pure data types only (strings + bools) so game_mod/SimTests can compile and assert on this file.
 using System;

@@ -33,7 +33,9 @@ internal static class CalculatedVarSpecRegistry
     ];
 
     public static IReadOnlyDictionary<Type, string> EvidenceByType { get; }
-        = SupportedTypes.ToDictionary(type => type, _ => "CALCULATED-CARD-BATCH-136");
+        = SupportedTypes.ToDictionary(type => type, type => type == typeof(Murder)
+            ? "MURDER-ROOT-HISTORY"
+            : "CALCULATED-CARD-BATCH-136");
 
     public static bool TryCalculate(
         CalculatedVar calculatedVar,
@@ -102,12 +104,12 @@ internal static class CalculatedVarSpecRegistry
             MementoMori => combat.GetCardsDiscardedThisTurn(owner),
             SoulStorm => playerState.ExhaustPile.Cards.Count(candidate => candidate.Preview is Soul),
             Voltaic => CountLightningChannels(simulator, model.Owner),
-            TearAsunder => CountUnblockedDamageEvents(simulator, owner),
+            TearAsunder => 1 + CountUnblockedDamageEvents(simulator, owner),
             ExpectAFight => Math.Max(0, combat.GetAmount<StrengthPower>(owner)),
             HelixDrill => Math.Max(0, combat.GetEnergySpentThisTurn(model.Owner)
                 - card.GetEnergyCostWithModifiers(simulator, playerState)),
             PullFromBelow => CountEtherealPlays(simulator, model.Owner),
-            Normality => Math.Min(3, combat.GetCardsPlayedThisTurn(owner)),
+            Normality => Math.Min(3, combat.GetCardPlayStartsThisTurn(owner)),
             Synchronize or CompileDriver => playerState.OrbQueue.Orbs.Select(orb => orb.Id).Distinct().Count(),
             Protector => simulator.State.GetOsty(model.Owner) is { } protectorOsty
                 && simulator.State.GetCreature(protectorOsty).IsAlive
@@ -149,34 +151,30 @@ internal static class CalculatedVarSpecRegistry
     }
 
     private static int CountGeneratedCards(CombatPredictionSimulator simulator, Player player)
-        => CombatManager.Instance.History.Entries.OfType<CardGeneratedEntry>().Count(entry => entry.Creator == player)
+        => ((SimulatedCombatState)simulator.State.CombatState).GetCardsGeneratedBeforePrediction(player)
            + simulator.History.OfType<CombatPredictionCardGeneratedEntry>().Count(entry => entry.Creator == player);
 
-    private static int CountLightningChannels(CombatPredictionSimulator simulator, Player player)
-        => CombatManager.Instance.History.Entries.OfType<OrbChanneledEntry>()
-               .Count(entry => entry.Actor.Player == player && entry.Orb is LightningOrb)
+    internal static int CountLightningChannels(CombatPredictionSimulator simulator, Player player)
+        => ((SimulatedCombatState)simulator.State.CombatState).GetLightningChannelsBeforePrediction(player)
            + simulator.History.OfType<CombatPredictionOrbChanneledEntry>()
                .Count(entry => entry.Orb is LightningOrb && entry.Orb.Owner == player);
 
     private static int CountUnblockedDamageEvents(CombatPredictionSimulator simulator, Creature owner)
-        => CombatManager.Instance.History.Entries.OfType<DamageReceivedEntry>()
-               .Count(entry => entry.Receiver == owner && entry.Result.UnblockedDamage > 0)
+        => ((SimulatedCombatState)simulator.State.CombatState).GetUnblockedHitsBeforePrediction(owner)
            + simulator.History.OfType<CombatPredictionDamageReceivedEntry>()
                .Count(entry => entry.Receiver == owner && entry.Result.UnblockedDamage > 0);
 
     private static int CountEtherealPlays(CombatPredictionSimulator simulator, Player player)
-        => CombatManager.Instance.History.CardPlaysFinished.Count(entry =>
-               entry.CardPlay.Player == player && entry.WasEthereal)
+        => ((SimulatedCombatState)simulator.State.CombatState).GetEtherealPlaysBeforePrediction(player)
            + simulator.History.OfType<CombatPredictionCardPlayFinishedEntry>()
                .Count(entry => entry.CardPlay.Player == player && entry.WasEthereal);
 
     private static int CountFinishedCardPlays(CombatPredictionSimulator simulator)
-        => CombatManager.Instance.History.CardPlaysFinished.Count()
+        => ((SimulatedCombatState)simulator.State.CombatState).GetFinishedPlaysBeforePrediction()
            + simulator.History.OfType<CombatPredictionCardPlayFinishedEntry>().Count();
 
     private static int CountDrawnCards(CombatPredictionSimulator simulator, Player player)
-        => CombatManager.Instance.History.Entries.OfType<CardDrawnEntry>()
-               .Count(entry => entry.Actor.Player == player)
+        => ((SimulatedCombatState)simulator.State.CombatState).GetCardsDrawnBeforePrediction(player)
            + simulator.History.OfType<CombatPredictionCardDrawnEntry>()
                .Count(entry => entry.Card.Owner == player);
 }

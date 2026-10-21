@@ -1,17 +1,22 @@
-// RitsuLib-free version of CombatSolver.PowerDynamicVarMaterializationGuardPatch. All Powers must have their
-// display DynamicVars materialized during the main-thread root capture before worker-thread simulation; if a
-// simulation lazily hits a null _dynamicVars under isolation, throw rather than materialize on a worker thread.
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models;
+using STS2RitsuLib.Patching.Models;
 
 namespace CombatSolver;
 
-[HarmonyPatch(typeof(PowerModel), "get_DynamicVars")]
-internal static class PowerDynamicVarMaterializationGuardPatch
+internal sealed class PowerDynamicVarMaterializationGuardPatch : IPatchMethod
 {
     private static readonly AccessTools.FieldRef<PowerModel, DynamicVarSet?> DynamicVarsField =
         AccessTools.FieldRefAccess<PowerModel, DynamicVarSet?>("_dynamicVars");
+
+    public static string PatchId => "combat_solver_power_dynamic_var_materialization_guard";
+    public static string Description => "禁止后台模拟惰性创建 Power 显示变量";
+
+    public static ModPatchTarget[] GetTargets() =>
+    [
+        new(typeof(PowerModel), "get_DynamicVars", Type.EmptyTypes),
+    ];
 
     [HarmonyPriority(Priority.First)]
     public static void Prefix(PowerModel __instance)

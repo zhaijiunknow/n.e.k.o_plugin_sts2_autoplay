@@ -13,7 +13,11 @@ namespace CombatSolver.Engine.InCombat.Simulation;
 
 internal sealed partial class CombatPredictionSimulator
 {
-    private const int MaxSimulatedDraws = 100;
+    // Only bound synchronous recursion (draw hook -> automatic play -> draw), never the
+    // accumulated battle history. Reaching this safety boundary invalidates the action;
+    // returning a partially drawn hand would silently invent a different combat state.
+    private const int MaximumNestedDrawDepth = 100;
+    private int _activeDrawDepth;
 
     /// <summary>
     /// See <see cref="Draw(Player, int, bool)"/> for the main overload.
@@ -30,56 +34,68 @@ internal sealed partial class CombatPredictionSimulator
     /// </summary>
     public IReadOnlyList<PredictedCard> Draw(Player player, int drawCount, bool fromHandDraw = false)
     {
+        if (_activeDrawDepth >= MaximumNestedDrawDepth)
+        {
+            throw new InvalidOperationException(
+                $"模拟抽牌同步递归达到 {MaximumNestedDrawDepth} 层，无法安全完成当前动作。");
+        }
+        _activeDrawDepth++;
+        try
+        {
+            return DrawCore(player, drawCount, fromHandDraw);
+        }
+        finally
+        {
+            _activeDrawDepth--;
+        }
+    }
+
+    private IReadOnlyList<PredictedCard> DrawCore(Player player, int drawCount, bool fromHandDraw)
+    {
         if (IsOverOrEnding || !HookMirrors.ShouldDraw(this, player, fromHandDraw, out _))
         {
             // Vanilla calls Hook.AfterPreventingDraw here, but all current listeners are cosmetic.
             return [];
         }
 
-        var state = State.GetPlayerCombatState(player);
-        int maxHandSize = GetMaxHandSize(player);
         List<PredictedCard> drawnCards = [];
+        ContinueDrawExecution(player, drawCount, fromHandDraw, GetMaxHandSize(player), drawnCards, 0, null, null);
+        return drawnCards;
+    }
 
-        for (var i = 0; i < drawCount; i++)
+    private bool ContinueDrawExecution(Player player, int drawCount, bool fromHandDraw, int maxHandSize,
+        List<PredictedCard> drawnCards, int next, CombatPredictionCardDrawnEntry? pendingEntry,
+        PredictedCard? pendingCard)
+    {
+        var state = State.GetPlayerCombatState(player);
+        if (pendingEntry != null) History.CardDrawResolved(pendingEntry, pendingCard!);
+        for (int index = next; index < drawCount; index++)
         {
-            if (IsOverOrEnding)
-            {
-                break;
-            }
-
-            if (state.Hand.Cards.Count >= maxHandSize)
-            {
-                break;
-            }
-
-            if (History.Count<CombatPredictionCardDrawnEntry>() >= MaxSimulatedDraws)
-            {
-                History.RecordRisk(PredictionRiskReason.CardDrawLimitExceeded);
-                break;
-            }
-
+            if (IsOverOrEnding || state.Hand.Cards.Count >= maxHandSize) break;
             ShuffleIfNecessary(player);
-
             if (HasPendingChoice)
-                break;
-
-            if (state.DrawPile.IsEmpty || state.Hand.Cards.Count >= maxHandSize)
             {
-                break;
+                AppendExecutionContinuation(new DrawExecutionFrame(player, drawCount, fromHandDraw,
+                    maxHandSize, drawnCards, index, null, null));
+                return false;
             }
-
-            var card = state.DrawPile.Cards[0];
+            if (state.DrawPile.IsEmpty || state.Hand.Cards.Count >= maxHandSize) break;
+            PredictedCard card = state.DrawPile.Cards[0];
             drawnCards.Add(card);
             AddToPile(card, state.Hand);
             var entry = History.CardDrawn(card, fromHandDraw);
             if (State.CombatState is ICombatPredictionCardEventSink eventSink)
                 eventSink.RecordCardDrawn(card, fromHandDraw);
-
             HookMirrors.AfterCardDrawn(this, card, fromHandDraw);
+            if (HasPendingChoice)
+            {
+                AppendExecutionContinuation(new DrawExecutionFrame(player, drawCount, fromHandDraw,
+                    maxHandSize, drawnCards, index + 1, entry, card));
+                return false;
+            }
             History.CardDrawResolved(entry, card);
         }
-
-        return drawnCards;
+        return true;
     }
 
     public int GetMaxHandSize(Player player)
@@ -164,10 +180,10 @@ internal sealed partial class CombatPredictionSimulator
         CardPilePosition position = CardPilePosition.Bottom)
         where TCard : CardModel
     {
-        List<PredictedCard> cards = [];
+        List<PredictedCard> cards = new(count);
         for (var i = 0; i < count; i++)
         {
-            cards.Add(PredictedCard.Create(ModelDb.Card<TCard>(), player));
+            cards.Add(PredictedCard.Create(CanonicalModels.Card<TCard>(), player));
         }
 
         return AddGeneratedCardsToCombat(cards, pileType, creator, position, CardGenerationResultKind.Fixed);
@@ -215,12 +231,13 @@ internal sealed partial class CombatPredictionSimulator
             throw new InvalidOperationException("Generated combat cards can only be added to combat piles.");
         }
 
-        if (cards.Any(card => card.GetPile(State) is not null))
+        for (int index = 0; index < cards.Count; index++)
         {
-            throw new InvalidOperationException("Generated combat cards cannot already be in a pile.");
+            if (cards[index].GetPile(State) is not null)
+                throw new InvalidOperationException("Generated combat cards cannot already be in a pile.");
         }
 
-        List<SimCardPileAddResult> results = [];
+        List<SimCardPileAddResult> results = new(cards.Count);
 
         foreach (var card in cards)
         {
@@ -228,6 +245,8 @@ internal sealed partial class CombatPredictionSimulator
             results.Add(AddToPile(card, newPileType, position));
 
             HookMirrors.AfterCardGeneratedForCombat(this, card, creator);
+            if (HasPendingChoice)
+                return results;
             History.CardGenerationResolved(entry, card);
         }
 
@@ -330,7 +349,7 @@ internal sealed partial class CombatPredictionSimulator
             ?? throw new InvalidOperationException("Cannot add cards with no owner to a pile.");
         var playerCombatState = State.GetPlayerCombatState(owner);
 
-        List<SimCardPileAddResult> results = [];
+        List<SimCardPileAddResult> results = new(cards.Count);
 
         foreach (var card in cards)
         {

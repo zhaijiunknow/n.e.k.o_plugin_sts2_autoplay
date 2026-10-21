@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Models.Powers;
+using MegaCrit.Sts2.Core.Models.Orbs;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Simulation;
@@ -15,6 +16,32 @@ namespace CombatSolver;
 
 internal sealed partial class SimulatedCombatState
 {
+    // Each native replay has its own started entry. Capture scalar costs before the worker runs.
+    private static int CaptureBrightestFlameMaxHpSpent(IEnumerable<CardPlayStartedEntry> entries)
+        => entries.Where(entry => entry.CardPlay.Card is BrightestFlame)
+            .Sum(entry => entry.CardPlay.Card.DynamicVars.MaxHp.IntValue);
+
+    public int GetCardsDrawnBeforePrediction(Player player)
+        => _rootHistory.CardsDrawn.Count(entry => entry.Actor.Player == player);
+
+    internal int GetCardsGeneratedBeforePrediction(Player player)
+        => _rootHistory.CardsGenerated.Count(entry => entry.Creator == player);
+
+    internal int GetLightningChannelsBeforePrediction(Player player)
+        => _rootHistory.OrbsChanneled.Count(entry => entry.Actor.Player == player && entry.Orb is LightningOrb);
+
+    internal int GetUnblockedHitsBeforePrediction(Creature owner)
+        => _rootHistory.DamageReceived.Count(entry => entry.Receiver == owner && entry.Result.UnblockedDamage > 0);
+
+    internal int GetEtherealPlaysBeforePrediction(Player player)
+        => _rootHistory.CardPlaysFinished.Count(entry => entry.CardPlay.Player == player && entry.WasEthereal);
+
+    internal int GetFinishedPlaysBeforePrediction()
+        => _rootHistory.CardPlaysFinished.Length;
+
+    internal bool WasCardPlayFinishedBeforePrediction(CardPlay play)
+        => _rootHistory.CardPlaysFinished.Any(entry => ReferenceEquals(entry.CardPlay, play));
+
     public void RecordCardExhausted(Creature actor)
         => (_cardsExhaustedThisTurn ??= [])[actor] = GetCardsExhaustedThisTurn(actor) + 1;
 
@@ -88,28 +115,57 @@ internal sealed partial class SimulatedCombatState
             && entry.CardPlay.Player == player
             && entry.CardPlay.Card.Type == CardType.Attack
             && entry.CardPlay.Resources.EnergyValue == 0);
-        AppendTurnCardHistory(text, statusCardsDrawn, zeroCostAttackStarts);
+        int cardPlayStarts = CombatManager.Instance.History.CardPlaysStarted.Count(entry =>
+            entry.HappenedThisTurn(combatState) && entry.CardPlay.Player == player);
+        int attackSkillStarts = CombatManager.Instance.History.CardPlaysStarted.Count(entry =>
+            entry.HappenedThisTurn(combatState) && entry.CardPlay.Player == player
+            && entry.CardPlay.Card.Type is CardType.Attack or CardType.Skill);
+        AppendTurnCardHistory(text, statusCardsDrawn, zeroCostAttackStarts, cardPlayStarts, attackSkillStarts);
+        text.Append(";FlameHp=").Append(CaptureBrightestFlameMaxHpSpent(CombatManager.Instance.History.CardPlaysStarted));
+        text.Append(";AttackStarts=").Append(CombatManager.Instance.History.CardPlaysStarted.Count(entry =>
+            entry.HappenedThisTurn(combatState) && entry.CardPlay.Player == player
+            && entry.CardPlay.Card.Type == CardType.Attack));
     }
 
     public void AppendPredictedTurnCardHistory(StringBuilder text, Player player)
-        => AppendTurnCardHistory(
+    {
+        AppendTurnCardHistory(
             text,
             GetStatusCardsDrawnThisTurn(player),
-            GetZeroCostAttackStartsThisTurn(player.Creature));
+            GetZeroCostAttackStartsThisTurn(player.Creature),
+            GetCardPlayStartsThisTurn(player.Creature),
+            GetAttackSkillStartsThisTurn(player.Creature));
+        text.Append(";FlameHp=").Append(_brightestFlameMaxHpSpent);
+        text.Append(";AttackStarts=").Append(GetAttackPlayStartsThisTurn(player.Creature));
+    }
 
     private static void AppendTurnCardHistory(
         StringBuilder text,
         int statusCardsDrawn,
-        int zeroCostAttackStarts)
+        int zeroCostAttackStarts,
+        int cardPlayStarts,
+        int attackSkillStarts)
         => text.Append(";Y=")
             .Append(statusCardsDrawn)
             .Append('/')
-            .Append(zeroCostAttackStarts);
+            .Append(zeroCostAttackStarts)
+            .Append('/')
+            .Append(cardPlayStarts)
+            .Append('/')
+            .Append(attackSkillStarts);
 
     public void AfterCardEnteredCombat(CombatPredictionSimulator simulator, PredictedCard card)
     {
         RegisterGeneratedCombatCard(card);
+        foreach (PhantomBladesPower power in EffectivePowers().OfType<PhantomBladesPower>())
+            CombatSolver.Engine.InCombat.Mirrors.Hooks.Card.PhantomBladesPowerMirrors.AfterCardEnteredCombat(power, card);
+        foreach (var relic in RelicsOf(card.Preview.Owner).OfType<MegaCrit.Sts2.Core.Models.Relics.GhostSeed>())
+            if (!relic.IsMelted)
+                CombatSolver.Engine.InCombat.Mirrors.Hooks.Card.GhostSeedMirrors.AfterCardEnteredCombat(relic, card);
         CardModel preview = card.MutablePreview;
+        if (preview is Flatten flatten && simulator.State.GetOsty(preview.Owner) is { } osty
+            && GetCreatureAttacksThisTurn(osty) > 0)
+            flatten.EnergyCost.SetThisTurn(0);
         if (preview.IsClone)
             return;
         Creature owner = preview.Owner.Creature;
@@ -128,10 +184,6 @@ internal sealed partial class SimulatedCombatState
                 break;
             case Stomp stomp:
                 stomp.EnergyCost.AddThisTurn(-GetAttacksPlayedThisTurn(owner));
-                break;
-            case Flatten flatten when simulator.State.GetOsty(preview.Owner) is { } osty
-                                      && GetCreatureAttacksThisTurn(osty) > 0:
-                flatten.EnergyCost.SetThisTurn(0);
                 break;
         }
         NormalizeCardAfflictions(simulator);
@@ -157,8 +209,27 @@ internal sealed partial class SimulatedCombatState
         (_poweredAttackHitsThisTurn ??= [])[key] = GetPoweredAttackHitsThisTurn(dealer, receiver) + 1;
     }
 
+    /// <summary>
+    /// Records HP a heal actually put back. <paramref name="amount"/> is already clamped by max HP, so an
+    /// overheal never reaches here and a route cannot be credited for HP it did not restore.
+    /// </summary>
+    /// <remarks>
+    /// This is the counterpart of <see cref="GetCumulativeHpLost"/> on the same axis: cumulative loss is the
+    /// gross damage a route took, recovery is how much of it the route bought back. Both only ever grow, so a
+    /// route's strategic HP result stays monotonic in the search.
+    /// </remarks>
+    public void RecordHpRecovered(Creature receiver, int amount)
+    {
+        if (amount <= 0)
+            throw new ArgumentOutOfRangeException(nameof(amount), amount, "生命回复量必须为正数。");
+        (_recoveredHp ??= [])[receiver] = GetRecoveredHp(receiver) + amount;
+    }
+
     public int GetCumulativeHpLost(Creature receiver)
         => _cumulativeHpLost?.GetValueOrDefault(receiver) ?? 0;
+
+    public int GetRecoveredHp(Creature receiver)
+        => _recoveredHp?.GetValueOrDefault(receiver) ?? 0;
 
     public bool HasLostHpThisTurn(Creature receiver)
     {

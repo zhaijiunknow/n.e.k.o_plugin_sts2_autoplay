@@ -38,19 +38,30 @@ internal static class AfterCardPlayedMirrors
 
     public static void Invoke(AbstractModel listener, AfterCardPlayedMirrorContext context)
     {
+        using var dispatch = context.Simulator.BeginExecutionDispatch();
         Registry.Invoke(listener, context);
     }
 
     public static void InvokeLate(AbstractModel listener, AfterCardPlayedMirrorContext context)
     {
+        using var dispatch = context.Simulator.BeginExecutionDispatch();
         LateRegistry.Invoke(listener, context);
     }
+
+    // Listener-mask verification only: what the unfiltered path would have resolved for this listener.
+    internal static MirrorDispatchKind ResolveDispatchKind(AbstractModel listener)
+        => Registry.ResolveDispatchKind(listener);
+
+    internal static MirrorDispatchKind ResolveLateDispatchKind(AbstractModel listener)
+        => LateRegistry.ResolveDispatchKind(listener);
 
     public static void CompleteOrAbort(
         CombatPredictionSimulator simulator,
         CardPlay cardPlay,
         bool completed)
     {
+        if (!simulator.StateStore.HasEntries<PaelsLegionPredictionState>())
+            return;
         foreach ((AbstractModel model, PaelsLegionPredictionState state) in
                  simulator.StateStore.ReadEntries<PaelsLegionPredictionState>())
         {
@@ -159,6 +170,8 @@ internal static class AfterCardPlayedMirrors
         if (context.PreviewCard.Owner == relic.Owner && context.PreviewCard.Type == CardType.Attack)
         {
             context.Simulator.GainBlock(relic.Owner.Creature, relic.DynamicVars.Block);
+            if (context.Simulator.HasPendingChoice)
+                return;
             if (context.Simulator.IsRecordingActionRelicTriggers)
                 context.Simulator.RecordRelicTrigger(relic, $"：格挡+{relic.DynamicVars.Block.IntValue}");
         }
@@ -168,7 +181,14 @@ internal static class AfterCardPlayedMirrors
     {
         if (!context.CardPlay.IsAutoPlay && context.PreviewCard.Owner == relic.Owner)
         {
-            var state = context.StateStore.Get(relic, () => new CounterPredictionState(GameRef.Get<int>(relic, "_cardsPlayedThisTurn")));
+            var state = context.StateStore.Get(relic, () => new CounterPredictionState(T44PrivateAccess.BrilliantScarf_CardsPlayedThisTurn(relic)));
+            if (state.Value == relic.DynamicVars.Cards.IntValue - 1
+                && context.CardPlay.PlayIndex == 0
+                && context.CardPlay.Resources.EnergySpent == 0
+                && context.CardPlay.Resources.StarsSpent == 0
+                && !context.PreviewCard.EnergyCost.CostsX && !context.PreviewCard.HasStarCostX
+                && context.Simulator.IsRecordingActionRelicTriggers)
+                context.Simulator.RecordRelicTrigger(relic, "：本张免费");
             state.Value++;
         }
     }
@@ -178,6 +198,8 @@ internal static class AfterCardPlayedMirrors
         if (context.PreviewCard.Owner == relic.Owner && context.PreviewCard.Type == CardType.Power)
         {
             context.Simulator.Draw(relic.Owner, relic.DynamicVars.Cards.BaseValue);
+            if (context.Simulator.HasPendingChoice)
+                return;
             if (context.Simulator.IsRecordingActionRelicTriggers)
                 context.Simulator.RecordRelicTrigger(relic, $"：抽{relic.DynamicVars.Cards.IntValue}");
         }
@@ -210,6 +232,8 @@ internal static class AfterCardPlayedMirrors
         if (++state.Value % relic.DynamicVars.Cards.IntValue == 0)
         {
             context.Simulator.Draw(relic.Owner, 1);
+            if (context.Simulator.HasPendingChoice)
+                return;
             context.Simulator.RecordRelicTrigger(relic, "：抽1");
         }
     }
@@ -217,7 +241,7 @@ internal static class AfterCardPlayedMirrors
     private static void HandleIvoryTile(IvoryTile relic, AfterCardPlayedMirrorContext context)
     {
         if (context.PreviewCard.Owner == relic.Owner &&
-            context.CardPlay.Resources.EnergyValue >= relic.DynamicVars[GameRef.GetStatic<string>(typeof(IvoryTile), "_energyThresholdKey")].IntValue)
+            context.CardPlay.Resources.EnergyValue >= relic.DynamicVars[T44PrivateAccess.IvoryTile_EnergyThresholdKey()].IntValue)
         {
             context.Simulator.GainEnergy(relic.Owner, relic.DynamicVars.Energy.BaseValue);
             if (context.Simulator.IsRecordingActionRelicTriggers)
@@ -227,7 +251,7 @@ internal static class AfterCardPlayedMirrors
 
     private static void HandleKusarigama(Kusarigama relic, AfterCardPlayedMirrorContext context)
     {
-        if (!IncrementCounter(relic, GameRef.Get<int>(relic, "_attacksPlayedThisTurn"), CardType.Attack, context))
+        if (!IncrementCounter(relic, T44PrivateAccess.Kusarigama_AttacksPlayedThisTurn(relic), CardType.Attack, context))
         {
             return;
         }
@@ -236,6 +260,8 @@ internal static class AfterCardPlayedMirrors
         if (target is not null)
         {
             context.Simulator.Damage(target, relic.DynamicVars.Damage, relic.Owner.Creature);
+            if (context.Simulator.HasPendingChoice)
+                return;
             if (context.Simulator.IsRecordingActionRelicTriggers)
                 context.Simulator.RecordRelicTrigger(relic, $"：伤害{relic.DynamicVars.Damage.IntValue}");
         }
@@ -243,9 +269,11 @@ internal static class AfterCardPlayedMirrors
 
     private static void HandleLetterOpener(LetterOpener relic, AfterCardPlayedMirrorContext context)
     {
-        if (IncrementCounter(relic, GameRef.Get<int>(relic, "_skillsPlayedThisTurn"), CardType.Skill, context))
+        if (IncrementCounter(relic, T44PrivateAccess.LetterOpener_SkillsPlayedThisTurn(relic), CardType.Skill, context))
         {
             context.Simulator.Damage(context.State.HittableEnemies, relic.DynamicVars.Damage, relic.Owner.Creature);
+            if (context.Simulator.HasPendingChoice)
+                return;
             if (context.Simulator.IsRecordingActionRelicTriggers)
                 context.Simulator.RecordRelicTrigger(relic, $"：全体伤害{relic.DynamicVars.Damage.IntValue}");
         }
@@ -253,9 +281,12 @@ internal static class AfterCardPlayedMirrors
 
     private static void HandleKunai(Kunai relic, AfterCardPlayedMirrorContext context)
     {
-        if (IncrementCounter(relic, GameRef.Get<int>(relic, "_attacksPlayedThisTurn"), CardType.Attack, context))
+        if (context.Simulator.IsInProgress
+            && IncrementCounter(relic, T44PrivateAccess.Kunai_AttacksPlayedThisTurn(relic), CardType.Attack, context)
+            && ApplyRelicStatPower(relic, typeof(DexterityPower), relic.DynamicVars.Dexterity.IntValue, context))
         {
-            // RecordCardLifecycle applies the gained Dexterity from this shared counter.
+            if (context.Simulator.IsRecordingActionRelicTriggers)
+                context.Simulator.RecordRelicTrigger(relic, $"：敏捷+{relic.DynamicVars.Dexterity.IntValue}");
         }
     }
 
@@ -264,6 +295,8 @@ internal static class AfterCardPlayedMirrors
         if (context.PreviewCard.Owner == relic.Owner && context.PreviewCard.Type == CardType.Power)
         {
             context.Simulator.Damage(context.State.HittableEnemies, relic.DynamicVars.Damage, relic.Owner.Creature);
+            if (context.Simulator.HasPendingChoice)
+                return;
             if (context.Simulator.IsRecordingActionRelicTriggers)
                 context.Simulator.RecordRelicTrigger(relic, $"：全体伤害{relic.DynamicVars.Damage.IntValue}");
         }
@@ -308,12 +341,14 @@ internal static class AfterCardPlayedMirrors
         }
 
         var clone = context.Card.CreateClone();
-        GameRef.Get<System.Collections.Generic.HashSet<MegaCrit.Sts2.Core.Entities.Cards.CardKeyword>>(clone.MutablePreview, "LocalKeywords").Add(MegaCrit.Sts2.Core.Entities.Cards.CardKeyword.Ethereal);
+        T44PrivateAccess.CardModel_LocalKeywords(clone.MutablePreview).Add(CardKeyword.Ethereal);
         context.Simulator.AddGeneratedCardToCombat(
             clone,
             PileType.Hand,
             relic.Owner,
             resultKind: CardGenerationResultKind.Contextual);
+        if (context.Simulator.HasPendingChoice)
+            return;
         state.WasUsedThisTurn = true;
         state.CardBeingPlayed = null;
         context.Simulator.RecordRelicTrigger(relic, "：复制到手牌");
@@ -331,9 +366,11 @@ internal static class AfterCardPlayedMirrors
 
     private static void HandleOrnamentalFan(OrnamentalFan relic, AfterCardPlayedMirrorContext context)
     {
-        if (IncrementCounter(relic, GameRef.Get<int>(relic, "_attacksPlayedThisTurn"), CardType.Attack, context))
+        if (IncrementCounter(relic, T44PrivateAccess.OrnamentalFan_AttacksPlayedThisTurn(relic), CardType.Attack, context))
         {
             context.Simulator.GainBlock(relic.Owner.Creature, relic.DynamicVars.Block);
+            if (context.Simulator.HasPendingChoice)
+                return;
             if (context.Simulator.IsRecordingActionRelicTriggers)
                 context.Simulator.RecordRelicTrigger(relic, $"：格挡+{relic.DynamicVars.Block.IntValue}");
         }
@@ -346,10 +383,12 @@ internal static class AfterCardPlayedMirrors
             return;
         }
 
-        var state = context.StateStore.Get(relic, () => new FlagPredictionState(GameRef.Get<bool>(relic, "_activatedThisCombat")));
+        var state = context.StateStore.Get(relic, () => new FlagPredictionState(T44PrivateAccess.Permafrost_ActivatedThisCombat(relic)));
         if (!state.Value)
         {
             context.Simulator.GainBlock(relic.Owner.Creature, relic.DynamicVars.Block);
+            if (context.Simulator.HasPendingChoice)
+                return;
             state.Value = true;
             if (context.Simulator.IsRecordingActionRelicTriggers)
                 context.Simulator.RecordRelicTrigger(relic, $"：格挡+{relic.DynamicVars.Block.IntValue}");
@@ -389,7 +428,7 @@ internal static class AfterCardPlayedMirrors
 
     private static void HandleRainbowRing(RainbowRing relic, AfterCardPlayedMirrorContext context)
     {
-        if (context.PreviewCard.Owner != relic.Owner)
+        if (context.PreviewCard.Owner != relic.Owner || !context.Simulator.IsInProgress)
         {
             return;
         }
@@ -405,8 +444,14 @@ internal static class AfterCardPlayedMirrors
         state.PowersPlayedThisTurn += context.PreviewCard.Type == CardType.Power ? 1 : 0;
         if (state.AttacksPlayedThisTurn > 0 && state.SkillsPlayedThisTurn > 0 && state.PowersPlayedThisTurn > 0)
         {
+            bool strengthApplied = ApplyRelicStatPower(
+                relic, typeof(StrengthPower), relic.DynamicVars.Strength.IntValue, context);
+            bool dexterityApplied = ApplyRelicStatPower(
+                relic, typeof(DexterityPower), relic.DynamicVars.Dexterity.IntValue, context);
             state.ActivationCountThisTurn++;
-            // RecordCardLifecycle applies the Strength and Dexterity after this hook completes.
+            if ((strengthApplied || dexterityApplied) && context.Simulator.IsRecordingActionRelicTriggers)
+                context.Simulator.RecordRelicTrigger(relic,
+                    $"：力量+{relic.DynamicVars.Strength.IntValue} 敏捷+{relic.DynamicVars.Dexterity.IntValue}");
         }
     }
 
@@ -421,6 +466,8 @@ internal static class AfterCardPlayedMirrors
         if (++state.Value >= relic.DynamicVars.Cards.IntValue)
         {
             context.Simulator.GainBlock(relic.Owner.Creature, relic.DynamicVars.Block);
+            if (context.Simulator.HasPendingChoice)
+                return;
             state.Value -= relic.DynamicVars.Cards.IntValue;
             if (context.Simulator.IsRecordingActionRelicTriggers)
                 context.Simulator.RecordRelicTrigger(relic, $"：格挡+{relic.DynamicVars.Block.IntValue}");
@@ -448,17 +495,35 @@ internal static class AfterCardPlayedMirrors
     {
         if (context.PreviewCard.Owner == relic.Owner)
         {
-            var state = context.StateStore.Get(relic, () => new CounterPredictionState(GameRef.Get<int>(relic, "_cardsPlayedThisTurn")));
+            var state = context.StateStore.Get(relic, () => new CounterPredictionState(T44PrivateAccess.VelvetChoker_CardsPlayedThisTurn(relic)));
             state.Value++;
         }
     }
 
     private static void HandleShuriken(Shuriken relic, AfterCardPlayedMirrorContext context)
     {
-        if (IncrementCounter(relic, GameRef.Get<int>(relic, "_attacksPlayedThisTurn"), CardType.Attack, context))
+        if (context.Simulator.IsInProgress
+            && IncrementCounter(relic, T44PrivateAccess.Shuriken_AttacksPlayedThisTurn(relic), CardType.Attack, context)
+            && ApplyRelicStatPower(relic, typeof(StrengthPower), relic.DynamicVars.Strength.IntValue, context))
         {
-            // RecordCardLifecycle applies the gained Strength from this shared counter.
+            if (context.Simulator.IsRecordingActionRelicTriggers)
+                context.Simulator.RecordRelicTrigger(relic, $"：力量+{relic.DynamicVars.Strength.IntValue}");
         }
+    }
+
+    private static bool ApplyRelicStatPower(RelicModel relic, Type powerType, int amount,
+        AfterCardPlayedMirrorContext context)
+    {
+        // Vanilla runs the listener/counter while the final attack is still in progress,
+        // but PowerCmd.Apply rejects applications as soon as combat IsEnding. Evaluate at
+        // this listener, not in the deferred card-lifecycle tail after other listeners.
+        if (context.Simulator.IsEnding)
+            return false;
+        if (context.CombatState is not ICombatPredictionEffectSink effects)
+            throw new InvalidOperationException("遗物属性效果缺少可写的预测状态。");
+        // 原版手里剑走遗物来源，cardSource 是 null。
+        effects.ApplyPowerFromSource(powerType, relic.Owner.Creature, amount, relic.Owner.Creature, cardSource: null);
+        return true;
     }
 
     private static void HandleAfterimagePower(AfterimagePower power, AfterCardPlayedMirrorContext context)
@@ -486,13 +551,12 @@ internal static class AfterCardPlayedMirrors
             return;
         }
 
-        var cards = player.GetUnlockedCharacterCards(context.CardMultiplayerConstraint)
-            .Where(card => card.Type == CardType.Attack)
-            .GetForCombat(
+        var cards = context.Simulator.GetUnlockedCharacterCardsForCombat(
                 player,
                 power.Amount,
                 context.Rng.CombatCardGeneration,
-                context.CardMultiplayerConstraint)
+                context.CardMultiplayerConstraint,
+                static card => card.Type == CardType.Attack)
             .ToList();
         context.Simulator.AddGeneratedCardsToCombat(cards, PileType.Hand, player);
     }
@@ -507,6 +571,8 @@ internal static class AfterCardPlayedMirrors
 
         state.PlayedCard = null;
         context.Simulator.GainBlock(power.Owner, power.Amount, ValueProp.Unpowered);
+        if (context.Simulator.HasPendingChoice)
+            return;
         state.Consumed = true;
         context.StateStore.GetPowerAmount(power).Consume();
     }
@@ -527,7 +593,8 @@ internal static class AfterCardPlayedMirrors
             return;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("激怒效果缺少可写的预测状态。");
-        effects.ApplyPower(typeof(StrengthPower), power.Owner, power.Amount, power.Owner);
+        // 原版激怒（EnragePower.AfterCardPlayed）传 cardSource: null。
+        effects.ApplyPowerFromSource(typeof(StrengthPower), power.Owner, power.Amount, power.Owner, cardSource: null);
     }
 
     private static void HandleGalvanicPower(GalvanicPower power, AfterCardPlayedMirrorContext context)
@@ -566,7 +633,7 @@ internal static class AfterCardPlayedMirrors
     {
         if (context.PreviewCard.Owner == power.Owner.Player && context.PreviewCard.Type == CardType.Skill)
         {
-            GameRef.Get<System.Collections.Generic.HashSet<MegaCrit.Sts2.Core.Entities.Cards.CardKeyword>>(context.MutablePreviewCard, "LocalKeywords").Add(MegaCrit.Sts2.Core.Entities.Cards.CardKeyword.Sly);
+            T44PrivateAccess.CardModel_LocalKeywords(context.MutablePreviewCard).Add(CardKeyword.Sly);
         }
     }
 
@@ -590,7 +657,9 @@ internal static class AfterCardPlayedMirrors
         state.CardAndClones.RemoveAt(index);
 
         state.Amount--;
-        context.Simulator.AutoPlay(clone);
+        context.Simulator.AutoPlay(
+            clone,
+            nestedChoiceSourceId: power.Id.Entry);
     }
 
     private static void HandleMonologuePower(MonologuePower power, AfterCardPlayedMirrorContext context)
@@ -604,7 +673,8 @@ internal static class AfterCardPlayedMirrors
             return;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("湮灭效果缺少可写的预测状态。");
-        effects.ApplyPower(typeof(DoomPower), power.Owner, amount, power.Applier);
+        // 原版湮灭（OblivionPower.AfterCardPlayed）传 cardSource: null。
+        effects.ApplyPowerFromSource(typeof(DoomPower), power.Owner, amount, power.Applier, cardSource: null);
     }
 
     private static void HandlePanachePower(PanachePower power, AfterCardPlayedMirrorContext context)
@@ -618,7 +688,9 @@ internal static class AfterCardPlayedMirrors
         if (state.AlreadyApplied && --state.CardsLeft <= 0)
         {
             context.Simulator.Damage(context.State.HittableEnemies, power.Amount, ValueProp.Unpowered, power.Owner);
-            state.CardsLeft = GameRef.GetStatic<int>(typeof(PanachePower), "_baseCardsLeft");
+            if (context.Simulator.HasPendingChoice)
+                return;
+            state.CardsLeft = T44PrivateAccess.PanachePower_BaseCardsLeft();
         }
         state.AlreadyApplied = true;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
@@ -655,7 +727,8 @@ internal static class AfterCardPlayedMirrors
             return;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("撕裂效果缺少可写的预测状态。");
-        effects.ApplyPower(typeof(StrengthPower), power.Owner, amount, power.Owner);
+        // 原版撕裂（RupturePower.AfterCardPlayed）传 cardSource: null。
+        effects.ApplyPowerFromSource(typeof(StrengthPower), power.Owner, amount, power.Owner, cardSource: null);
     }
 
     private static void HandleSmoggyPower(SmoggyPower power, AfterCardPlayedMirrorContext context)
@@ -678,7 +751,7 @@ internal static class AfterCardPlayedMirrors
     {
         var state = context.StateStore.Get(
             power,
-            () => new CounterPredictionState(power.DynamicVars[GameRef.GetStatic<string>(typeof(SlowPower), "_slowAmountKey")].IntValue));
+            () => new CounterPredictionState(power.DynamicVars[T44PrivateAccess.SlowPower_SlowAmountKey()].IntValue));
         state.Value++;
     }
 
@@ -725,7 +798,16 @@ internal static class AfterCardPlayedMirrors
 
     private static void HandleTenderPower(TenderPower power, AfterCardPlayedMirrorContext context)
     {
-        // The card-play completion sink applies the paired Strength/Dexterity loss from this history entry.
+        if (context.PreviewCard.Owner.Creature != power.Owner)
+            return;
+        if (context.CombatState is not ICombatPredictionEffectSink effects)
+            throw new InvalidOperationException("温柔效果缺少可写的预测状态。");
+        effects.RecordTenderCardPlayed(power.Owner);
+        if (!context.Simulator.IsEnding)
+            // 原版温柔（TenderPower）始终传 cardSource: null。
+            effects.ApplyPowerFromSource(typeof(StrengthPower), power.Owner, -1, power.Applier, cardSource: null);
+        if (!context.Simulator.IsEnding)
+            effects.ApplyPowerFromSource(typeof(DexterityPower), power.Owner, -1, power.Applier, cardSource: null);
     }
 
     private static void HandleVitalSparkPower(VitalSparkPower power, AfterCardPlayedMirrorContext context)
@@ -734,11 +816,13 @@ internal static class AfterCardPlayedMirrors
             return;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("生命火花效果缺少可写的预测状态。");
-        effects.ApplyPower(
+        // 原版生命火花（VitalSparkPower）传 cardSource: null。
+        effects.ApplyPowerFromSource(
             typeof(TaintedPower),
             context.PreviewCard.Owner.Creature,
             power.Amount,
-            applier: null);
+            applier: null,
+            cardSource: null);
     }
 
     private static void HandleWitheringPresencePower(WitheringPresencePower power, AfterCardPlayedMirrorContext context)
@@ -749,7 +833,7 @@ internal static class AfterCardPlayedMirrors
         }
 
         var state = context.StateStore.Get(power,
-            () => new CounterPredictionState(power.DynamicVars[GameRef.GetStatic<string>(typeof(WitheringPresencePower), "_cardsLeftKey")].IntValue));
+            () => new CounterPredictionState(power.DynamicVars[T44PrivateAccess.WitheringPresencePower_CardsLeftKey()].IntValue));
         if (--state.Value <= 0)
         {
             context.Simulator.CreateAndAddGeneratedCardsToCombat<Wither>(
@@ -757,14 +841,16 @@ internal static class AfterCardPlayedMirrors
                 PileType.Hand,
                 1,
                 creator: null);
-            state.Value = GameRef.GetStatic<int>(typeof(WitheringPresencePower), "_baseCardsLeft");
+            if (context.Simulator.HasPendingChoice)
+                return;
+            state.Value = T44PrivateAccess.WitheringPresencePower_BaseCardsLeft();
         }
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("凋零气场效果缺少可写的预测状态。");
         effects.SetPowerDynamicVar(
             context.Simulator,
             power,
-            GameRef.GetStatic<string>(typeof(WitheringPresencePower), "_cardsLeftKey"),
+            T44PrivateAccess.WitheringPresencePower_CardsLeftKey(),
             state.Value);
     }
 
@@ -792,11 +878,12 @@ internal static class AfterCardPlayedMirrors
     {
         if (context.Card.References(enchantment.Card) && context.MutablePreviewCard.Enchantment is Goopy preview)
         {
-            GameRef.Set(preview, "_amount", GameRef.Get<int>(preview, "_amount") + 1);
+            T44PrivateAccess.SetEnchantmentModel_Amount(preview, T44PrivateAccess.EnchantmentModel_Amount(preview) + 1);
             if (context.MutablePreviewCard.DeckVersion != null
                 && context.State.CombatState is SimulatedCombatState combat)
             {
                 combat.RecordLongTermResource(1);
+                combat.RecordGrowthReward(GrowthSource.Goopy);
             }
         }
     }
@@ -805,8 +892,8 @@ internal static class AfterCardPlayedMirrors
     {
         if (context.Card.References(enchantment.Card) && context.MutablePreviewCard.Enchantment is Glam preview)
         {
-            GameRef.Set(preview, "_usedThisCombat", true);
-            GameRef.Set(preview, "_status", EnchantmentStatus.Disabled);
+            T44PrivateAccess.SetGlam_UsedThisCombat(preview,  true);
+            T44PrivateAccess.SetEnchantmentModel_Status(preview,  EnchantmentStatus.Disabled);
         }
     }
 
@@ -814,7 +901,7 @@ internal static class AfterCardPlayedMirrors
     {
         if (context.Card.References(enchantment.Card) && context.MutablePreviewCard.Enchantment is Vigorous preview)
         {
-            GameRef.Set(preview, "_status", EnchantmentStatus.Disabled);
+            T44PrivateAccess.SetEnchantmentModel_Status(preview,  EnchantmentStatus.Disabled);
         }
     }
 
@@ -892,7 +979,7 @@ internal sealed class FlagPredictionState(bool value) : IPredictionStateForkable
 
 internal sealed class PanachePredictionState(PanachePower power) : IPredictionStateForkable
 {
-    public bool AlreadyApplied { get; set; } = (bool)((bool)(GameRef.Get(GameRef.InvokeGeneric(power, "GetInternalData", "Data"), "alreadyApplied")));
+    public bool AlreadyApplied { get; set; } = T44PrivateAccess.Read<bool>(T44PrivateAccess.InternalData(power), "alreadyApplied");
 
     public int CardsLeft { get; set; } = power.DynamicVars["CardsLeft"].IntValue;
 
@@ -901,13 +988,13 @@ internal sealed class PanachePredictionState(PanachePower power) : IPredictionSt
 
 internal sealed class RainbowRingPredictionState(RainbowRing relic) : IPredictionStateForkable
 {
-    public int AttacksPlayedThisTurn { get; set; } = GameRef.Get<int>(relic, "_attacksPlayedThisTurn");
+    public int AttacksPlayedThisTurn { get; set; } = T44PrivateAccess.RainbowRing_AttacksPlayedThisTurn(relic);
 
-    public int SkillsPlayedThisTurn { get; set; } = GameRef.Get<int>(relic, "_skillsPlayedThisTurn");
+    public int SkillsPlayedThisTurn { get; set; } = T44PrivateAccess.RainbowRing_SkillsPlayedThisTurn(relic);
 
-    public int PowersPlayedThisTurn { get; set; } = GameRef.Get<int>(relic, "_powersPlayedThisTurn");
+    public int PowersPlayedThisTurn { get; set; } = T44PrivateAccess.RainbowRing_PowersPlayedThisTurn(relic);
 
-    public int ActivationCountThisTurn { get; set; } = GameRef.Get<int>(relic, "_activationCountThisTurn");
+    public int ActivationCountThisTurn { get; set; } = T44PrivateAccess.RainbowRing_ActivationCountThisTurn(relic);
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

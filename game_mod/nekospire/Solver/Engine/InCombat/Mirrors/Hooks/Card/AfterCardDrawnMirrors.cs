@@ -43,11 +43,13 @@ internal static class AfterCardDrawnMirrors
 
     public static void InvokeEarly(AbstractModel listener, AfterCardDrawnMirrorContext context)
     {
+        using var dispatch = context.Simulator.BeginExecutionDispatch();
         EarlyRegistry.Invoke(listener, context);
     }
 
     public static void Invoke(AbstractModel listener, AfterCardDrawnMirrorContext context)
     {
+        using var dispatch = context.Simulator.BeginExecutionDispatch();
         Registry.Invoke(listener, context);
     }
 
@@ -93,7 +95,7 @@ internal static class AfterCardDrawnMirrors
 
         if (context.State.HittableEnemies.All(c => context.State.GetCreature(c).HpDisplay.IsInfinite()))
         {
-            if (state.InfiniteAutoPlaysThisTurn >= GameRef.GetStatic<int>(typeof(HellraiserPower), "_infiniteAutoPlayCap"))
+            if (state.InfiniteAutoPlaysThisTurn >= T44PrivateAccess.HellraiserPower_InfiniteAutoPlayCap())
             {
                 shouldAutoPlay = false;
             }
@@ -109,6 +111,7 @@ internal static class AfterCardDrawnMirrors
         {
             context.Simulator.AutoPlay(context.Card, nestedChoiceSourceId: power.Id.Entry);
         }
+        context.Simulator.AcknowledgeExecutionDispatch();
     }
 
     private static void HandleConfusedPower(ConfusedPower power, AfterCardDrawnMirrorContext context)
@@ -122,8 +125,10 @@ internal static class AfterCardDrawnMirrors
 
     private static void HandleSlither(Slither slither, AfterCardDrawnMirrorContext context)
     {
-        if (context.Card.References(slither.Card) &&
-            context.State.GetPlayerCombatState(context.PreviewCard.Owner).Hand.Cards.Contains(context.Card))
+        bool cardMatches = ReferenceEquals(context.InitialCard, slither.Card)
+            || context.Card.References(slither.Card);
+        bool cardInHand = context.State.GetPlayerCombatState(context.PreviewCard.Owner).Hand.Cards.Contains(context.Card);
+        if (cardMatches && cardInHand)
         {
             SetRandomEnergyCost(context);
         }
@@ -138,6 +143,7 @@ internal static class AfterCardDrawnMirrors
         {
             context.Simulator.Draw(player, power.Amount);
         }
+        context.Simulator.AcknowledgeExecutionDispatch();
     }
 
     private static void HandlePagestormPower(PagestormPower power, AfterCardDrawnMirrorContext context)
@@ -148,6 +154,7 @@ internal static class AfterCardDrawnMirrors
         {
             context.Simulator.Draw(player, power.Amount);
         }
+        context.Simulator.AcknowledgeExecutionDispatch();
     }
 
     private static void HandleChainsOfBindingPower(ChainsOfBindingPower power, AfterCardDrawnMirrorContext context)
@@ -157,15 +164,18 @@ internal static class AfterCardDrawnMirrors
             context.CombatState.CurrentSide == power.Owner.Side &&
             // CanAfflict only checks card type, existing affliction, and Unplayable.
             // Vanilla currently has no global hook that adds Unplayable, so preview keywords are sufficient here.
-            ModelDb.Affliction<Bound>().CanAfflict(context.PreviewCard))
+            CanonicalModels.Affliction<Bound>().CanAfflict(context.PreviewCard))
         {
             ChainsOfBindingPredictionState state = context.StateStore.Get(
                 power,
-                () => new ChainsOfBindingPredictionState(power));
-            if (state.BoundCardsAfflictedThisTurn < power.Amount
+                static () => new ChainsOfBindingPredictionState());
+            SimulatedCombatState combat = context.CombatState as SimulatedCombatState
+                ?? throw new InvalidOperationException("束缚抽牌计数缺少分支回合状态。");
+            int turn = combat.GetPlayerTurnNumber(player);
+            if (state.GetBoundCardsAfflictedThisTurn(turn) < power.Amount
                 && context.Simulator.Afflict<Bound>(context.Card, power.Amount) is not null)
             {
-                state.BoundCardsAfflictedThisTurn++;
+                state.RecordBoundCardAfflicted(turn);
             }
         }
     }
@@ -192,7 +202,7 @@ internal static class AfterCardDrawnMirrors
             // StS2 v0.111.0 resets the counter before dealing damage so nested draws caused by damage hooks
             // count toward the next trigger instead of retriggering Cacophony immediately.
             // Use the canonical value to avoid hard-coding the number threshold in case it changes in the future.
-            state.CardsDrawn = GameRef.Get<MegaCrit.Sts2.Core.Models.PowerModel>(power, "CanonicalInstance").DynamicVars.Cards.IntValue;
+            state.CardsDrawn = T44PrivateAccess.PowerModel_CanonicalInstance(power).DynamicVars.Cards.IntValue;
 
             if (target is not null)
             {
@@ -216,9 +226,9 @@ internal static class AfterCardDrawnMirrors
         {
             context.IntrinsicCardHandled = true;
             var previewCard = (KinglyPunch)context.MutablePreviewCard;
-            var damageIncrease = previewCard.DynamicVars[GameRef.GetStatic<string>(typeof(KinglyPunch), "_increaseKey")].BaseValue;
+            var damageIncrease = previewCard.DynamicVars[T44PrivateAccess.KinglyPunch_IncreaseKey()].BaseValue;
             previewCard.DynamicVars.Damage.BaseValue += damageIncrease;
-            GameRef.Set(previewCard, "ExtraDamage", GameRef.Get<decimal>(previewCard, "ExtraDamage") + damageIncrease);
+            T44PrivateAccess.SetKinglyPunch_ExtraDamage(previewCard, T44PrivateAccess.KinglyPunch_ExtraDamage(previewCard) + ( damageIncrease));
         }
     }
 
@@ -234,7 +244,7 @@ internal static class AfterCardDrawnMirrors
         if (state.CardsLeft <= 0)
         {
             context.Simulator.GainEnergy(context.PreviewCard.Owner, power.Amount);
-            state.CardsLeft = GameRef.GetStatic<int>(typeof(AutomationPower), "_baseCardsLeft");
+            state.CardsLeft = T44PrivateAccess.AutomationPower_BaseCardsLeft();
         }
     }
 
@@ -251,14 +261,16 @@ internal static class AfterCardDrawnMirrors
 
     private static void HandleCorrosiveWavePower(CorrosiveWavePower power, AfterCardDrawnMirrorContext context)
     {
-        // CorrosiveWavePower applies Poison to all hittable enemies; power application
-        // side effects are not mirrored here.
+        // 原版这条 `PowerCmd.Apply<PoisonPower>(…, cardSource: null)`：来源是能力本身，不是抽到的那张牌。
+        // 不给显式来源会让这层毒继承**外层卡牌作用域**（例如后空翻抽到的两张牌），
+        // 于是既被算到那张牌头上、又误触发只认卡牌直接施加的不安油灯并把它标成已触发
+        // （问题包 c4e28f3b：预测毒 11／实机 5，遗物计数 expected=1 actual=0）。
         if (context.PreviewCard.Owner.Creature == power.Owner)
         {
             if (context.CombatState is not ICombatPredictionEffectSink effects)
                 throw new InvalidOperationException("腐蚀波效果缺少可写的预测状态。");
             foreach (Creature enemy in context.State.HittableEnemies)
-                effects.ApplyPower(typeof(PoisonPower), enemy, power.Amount, power.Owner);
+                effects.ApplyPowerFromSource(typeof(PoisonPower), enemy, power.Amount, power.Owner, cardSource: null);
         }
     }
 
@@ -278,6 +290,7 @@ internal static class AfterCardDrawnMirrors
 
 internal sealed class AfterCardDrawnMirrorContext : CombatCardMirrorContext
 {
+    public required CardModel InitialCard { get; init; }
     public required bool FromHandDraw { get; init; }
     public bool IntrinsicCardHandled { get; set; }
 }
@@ -285,7 +298,7 @@ internal sealed class AfterCardDrawnMirrorContext : CombatCardMirrorContext
 internal sealed class HellraiserPredictionState(HellraiserPower power) : IPredictionStateForkable
 {
     public int InfiniteAutoPlaysThisTurn { get; set; } =
-        (int)((int)(GameRef.Get(GameRef.InvokeGeneric(power, "GetInternalData", "Data"), "infiniteAutoPlaysThisTurn")));
+        T44PrivateAccess.Read<int>(T44PrivateAccess.InternalData(power), "infiniteAutoPlaysThisTurn");
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

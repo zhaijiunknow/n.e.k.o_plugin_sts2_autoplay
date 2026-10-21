@@ -1,15 +1,19 @@
-// RitsuLib-free version of CombatSolver.CombatStateTrackerIsolationPatch. During a background search the
-// simulation must never notify the LIVE combat state tracker (that would leak predicted state into the real
-// combat). SimulationNotificationIsolation is entered around Solve; this plain-Harmony prefix suppresses the
-// notification while active. Registered from CombatSolverRuntime.Install().
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
+using STS2RitsuLib.Patching.Models;
 
 namespace CombatSolver;
 
-[HarmonyPatch(typeof(CombatStateTracker), "NotifyCombatStateChanged", [typeof(string)])]
-internal static class CombatStateTrackerIsolationPatch
+internal sealed class CombatStateTrackerIsolationPatch : IPatchMethod
 {
+    public static string PatchId => "combat_solver_simulation_notification_isolation";
+    public static string Description => "阻止预测变量变化把状态通知泄漏到真实战斗 UI";
+
+    public static ModPatchTarget[] GetTargets() =>
+    [
+        new(typeof(CombatStateTracker), "NotifyCombatStateChanged", [typeof(string)]),
+    ];
+
     [HarmonyPriority(Priority.First)]
     public static bool Prefix(string caller)
     {

@@ -1,4 +1,5 @@
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
@@ -7,9 +8,18 @@ using CombatSolver.Engine.Common.Mirrors;
 
 namespace CombatSolver.Engine.InCombat.Simulation;
 
+internal enum CombatTerminalOutcome
+{
+    Victory,
+    Defeat,
+}
+
+internal readonly record struct CombatTerminalStamp(int PlayerTurn, CombatTerminalOutcome Outcome);
+
 internal sealed partial class CombatPredictionSimulator
 {
     private readonly PredictionTrace _trace;
+    private CombatDamageSource? _damageSource;
 
     public CombatPredictionState State { get; }
 
@@ -29,6 +39,54 @@ internal sealed partial class CombatPredictionSimulator
 
     public PredictionTraceFrame? CurrentFrame => _trace.Current;
 
+    /// <summary>Temporarily overrides trace inference for effects such as poison and reflected thorns damage.</summary>
+    public DamageSourceScope PushDamageSource(CombatDamageSource source)
+    {
+        CombatDamageSource? previous = _damageSource;
+        _damageSource = source;
+        return new DamageSourceScope(this, previous);
+    }
+
+    internal CombatDamageSource ResolveDamageSource(PredictedCard? cardSource)
+    {
+        if (_damageSource is { } explicitSource)
+            return explicitSource;
+        if (cardSource is { } card)
+            return CombatDamageSource.For(CombatDamageSourceKind.Card, card.Preview.Id.Entry);
+
+        for (PredictionTraceFrame? frame = CurrentFrame; frame is not null; frame = frame.Parent)
+        {
+            if (frame.Invocation.Action == PredictionActionKind.PotionUse)
+                return CombatDamageSource.For(CombatDamageSourceKind.Potion, frame.Source.Id.Entry);
+            if (frame.Invocation.Action == PredictionActionKind.CardPlay)
+                return CombatDamageSource.For(CombatDamageSourceKind.Card, frame.Source.Id.Entry);
+
+            CombatDamageSourceKind? kind = frame.Source switch
+            {
+                CardModel => CombatDamageSourceKind.Card,
+                PotionModel => CombatDamageSourceKind.Potion,
+                PowerModel => CombatDamageSourceKind.Power,
+                RelicModel => CombatDamageSourceKind.Relic,
+                OrbModel => CombatDamageSourceKind.Orb,
+                MonsterModel => CombatDamageSourceKind.MonsterMove,
+                _ => null,
+            };
+            if (kind is { } modelKind)
+                return CombatDamageSource.For(modelKind, frame.Source.Id.Entry);
+        }
+
+        return CombatDamageSource.Unknown;
+    }
+
+    /// <summary>
+    /// Reusable mirror context for <see cref="Mirrors.HookMirrors.ModifyEnergyCostInCombat"/>.
+    /// </summary>
+    /// <remarks>
+    /// 该 context 在调用返回后没有任何持有者，可以复用；它的 <c>Simulator</c> 是 required init，
+    /// 所以复用范围绑定在单个模拟器上。取用方负责先摘空这个槽位以防重入。
+    /// </remarks>
+    internal Mirrors.Hooks.Card.ModifyEnergyCostInCombatMirrorContext? EnergyCostMirrorScratch;
+
     /// <summary>
     /// Mirrors <see cref="CombatTurnState.IsInProgress"/>.
     /// </summary>
@@ -38,6 +96,10 @@ internal sealed partial class CombatPredictionSimulator
     /// Mirrors <see cref="CombatTurnState.PendingLoss"/>.
     /// </summary>
     public bool IsAboutToLose { get; private set; }
+
+    // Locked only at a vanilla-safe victory/loss check, not by the IsEnding query.
+    // A value copy survives Fork without retaining any combat or simulator graph.
+    public CombatTerminalStamp? TerminalStamp { get; private set; }
 
     /// <summary>
     /// Mirrors <see cref="CombatManager.IsEnding"/>.
@@ -57,7 +119,7 @@ internal sealed partial class CombatPredictionSimulator
             ? runSnapshot.CreatePredictionRngSet()
             : CombatPredictionRngSet.From(combatState.RunState.Rng);
         StateStore = new PredictionStateStore();
-        History = new CombatPredictionHistory(_trace);
+        History = new CombatPredictionHistory(_trace, combatState.Players.Count == 1 ? combatState.Players[0] : null);
         if (combatState is ICombatPredictionRootMaterializable materializable)
             materializable.MaterializeRoot(this);
     }
@@ -70,6 +132,7 @@ internal sealed partial class CombatPredictionSimulator
         CombatPredictionHistory history,
         bool isInProgress,
         bool isAboutToLose,
+        CombatTerminalStamp? terminalStamp,
         int shuffleEventCount,
         ActionRelicTriggerRecorder? actionRelicTriggers)
     {
@@ -80,12 +143,15 @@ internal sealed partial class CombatPredictionSimulator
         History = history;
         IsInProgress = isInProgress;
         IsAboutToLose = isAboutToLose;
+        TerminalStamp = terminalStamp;
         ShuffleEventCount = shuffleEventCount;
         ActionRelicTriggers = actionRelicTriggers;
     }
 
     public CombatPredictionSimulator Fork()
     {
+        GuardOrdinaryCardContinuationFork();
+        GuardOrdinaryExecutionContinuationFork();
         AssertForkable();
 
         using PredictionForkContext context = new();
@@ -101,14 +167,22 @@ internal sealed partial class CombatPredictionSimulator
             history,
             IsInProgress,
             IsAboutToLose,
+            TerminalStamp,
             ShuffleEventCount,
             ActionRelicTriggers);
     }
 
     internal void AssertForkable()
     {
-        if (_trace.Current is not null)
+        // 只是判断有没有活动作用域，不需要把帧物化出来。
+        if (_trace.HasCurrentFrame)
             throw new InvalidOperationException("Combat prediction can only be forked between completed actions.");
+        if (_damageSource is not null)
+            throw new InvalidOperationException("Combat prediction cannot be forked while a damage source is active.");
+        if (_activeDrawDepth != 0)
+            throw new InvalidOperationException("Combat prediction cannot be forked during draw resolution.");
+        if (_activeCardOrPotionEffects is { Count: > 0 })
+            throw new InvalidOperationException("Combat prediction cannot be forked during a card or potion effect.");
         if (ActionRelicTriggers is not null)
             throw new InvalidOperationException("Combat prediction cannot be forked while action relic triggers are being recorded.");
         if (State.CombatState is IPredictionForkBoundary combatBoundary)
@@ -142,13 +216,19 @@ internal sealed partial class CombatPredictionSimulator
     /// It does not simulate the vanilla combat teardown after <c>EndCombatInternal</c>, including
     /// after-combat hooks, rewards, room progression, save operations, music/UI cleanup, or run-loss handling.
     /// </remarks>
-    public bool CheckWinCondition()
+    public bool CheckWinCondition(int playerTurn)
     {
+        if (TerminalStamp.HasValue)
+            return true;
+        if (playerTurn < 1)
+            throw new ArgumentOutOfRangeException(nameof(playerTurn));
         if (!IsAboutToLose && !IsEnding)
         {
             return false;
         }
 
+        TerminalStamp = new CombatTerminalStamp(playerTurn,
+            IsAboutToLose ? CombatTerminalOutcome.Defeat : CombatTerminalOutcome.Victory);
         IsAboutToLose = false;
         IsInProgress = false;
         return true;
@@ -162,6 +242,22 @@ internal sealed partial class CombatPredictionSimulator
     public PredictionTrace.TraceScope PushMethodSource(AbstractModel model, MirrorMethodSpec method)
     {
         return _trace.Push(model, PredictionInvocation.ForMethod(method.BaseMethod));
+    }
+
+    public struct DamageSourceScope(CombatPredictionSimulator simulator, CombatDamageSource? previous)
+        : IDisposable
+    {
+        private readonly CombatPredictionSimulator _simulator = simulator;
+        private readonly CombatDamageSource? _previous = previous;
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _simulator._damageSource = _previous;
+            _disposed = true;
+        }
     }
 
     private bool IsCombatEnding()
@@ -188,6 +284,12 @@ internal sealed partial class CombatPredictionSimulator
                 return false;
             }
         }
+        // 原版在杀死的那一刻就把死亡效果同步结算完了，求解器把它推迟到 ApplyEnemyDeathPowers
+        // 的清扫，而个体在死亡当时就被移出了 State.Enemies。于是中间有一个「场上没有活着的主要
+        // 敌人、但马上会有」的窗口。在那个窗口里宣布胜利会把胜利戳永久锁死，之后补货生成出来
+        // 也不会再复查。
+        if (semantics?.HasUnresolvedSpawningDeath() == true)
+            return false;
         return !Hook.ShouldStopCombatFromEnding(State.CombatState);
     }
 }

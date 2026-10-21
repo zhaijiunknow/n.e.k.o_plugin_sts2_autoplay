@@ -20,6 +20,14 @@ internal static class PowerLifecycleSupport
             ? power.AmountOnTurnStart
             : 0;
 
+    // These native duration counters consume this flag. Other debuffs (e.g. Poison)
+    // can carry it after application without ever consulting it during settlement.
+    public static bool UsesNativeDurationSkip(Type type)
+        => type == typeof(WeakPower) || type == typeof(VulnerablePower) || type == typeof(FrailPower);
+
+    public static bool SemanticallyRelevantSkipNextDurationTick(PowerModel power)
+        => UsesNativeDurationSkip(power.GetType()) && power.SkipNextDurationTick;
+
     public static void UpdateSurroundedForTarget(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
@@ -94,7 +102,7 @@ internal static class PowerLifecycleSupport
                 continue;
             int triggers = combat.AdvanceOrbitEnergy(power, amount);
             if (triggers > 0)
-                simulator.State.GetPlayerCombatState(card.Preview.Owner).GainEnergy(power.Amount * triggers);
+                simulator.GainEnergy(card.Preview.Owner, power.Amount * triggers);
         }
     }
 
@@ -107,11 +115,16 @@ internal static class PowerLifecycleSupport
         if (amount <= 0)
             return;
         Creature owner = card.Preview.Owner.Creature;
-        combat.TriggerRelicsAfterStarsSpent(simulator, card.Preview.Owner, amount);
+        if (!combat.TriggerRelicsAfterStarsSpent(simulator, card.Preview.Owner, amount))
+            return;
         foreach (ChildOfTheStarsPower power in combat.EffectivePowers().OfType<ChildOfTheStarsPower>())
         {
             if (power.Amount > 0 && ReferenceEquals(power.Owner, owner))
+            {
                 simulator.GainBlock(owner, power.Amount * amount, ValueProp.Unpowered);
+                if (simulator.HasPendingChoice)
+                    return;
+            }
         }
     }
 
@@ -141,11 +154,15 @@ internal static class PowerLifecycleSupport
                             && change.Power.Owner.IsEnemy
                             && ReferenceEquals(change.Applier, listener.Owner)
                             && change.Power is not ITemporaryPower:
-                            simulator.Damage(
-                                change.Power.Owner,
-                                listener.Amount,
-                                ValueProp.Unpowered,
-                                listener.Owner);
+                            using (simulator.PushDamageSource(
+                                CombatDamageSource.For(CombatDamageSourceKind.Power, nameof(SleightOfFleshPower))))
+                            {
+                                simulator.Damage(
+                                    change.Power.Owner,
+                                    listener.Amount,
+                                    ValueProp.Unpowered,
+                                    listener.Owner);
+                            }
                             break;
                         case ViciousPower when change.Delta > 0
                                                 && change.Power is VulnerablePower
@@ -154,6 +171,8 @@ internal static class PowerLifecycleSupport
                             simulator.Draw(player, listener.Amount);
                             break;
                     }
+                    if (simulator.HasPendingChoice)
+                        return;
                 }
             }
         }

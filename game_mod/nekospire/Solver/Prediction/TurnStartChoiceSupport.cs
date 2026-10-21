@@ -3,6 +3,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Factories;
 using MegaCrit.Sts2.Core.Models;
 using CombatSolver.Engine.Common;
+using CombatSolver.Engine.InCombat.Extensions;
 using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver;
@@ -24,7 +25,10 @@ internal sealed class TurnStartChoiceCursor(IReadOnlyList<PlanCardChoice>? choic
     private readonly IReadOnlyList<PlanCardChoice> _choices = choices ?? [];
     private readonly Func<TurnStartChoiceRequest, PlanCardChoice?>? _automaticPolicy;
     private int _index;
-    private Action? _beforeNextTake;
+    internal int ConsumedExplicitChoiceCount => _index;
+    internal bool IsEmptyExplicitChoiceCursor => _choices.Count == 0 && _index == 0
+        && _automaticPolicy is null && _beforeNextTake is null;
+    private Func<bool>? _beforeNextTake;
 
     private TurnStartChoiceCursor(
         Func<TurnStartChoiceRequest, PlanCardChoice?> automaticPolicy,
@@ -40,14 +44,18 @@ internal sealed class TurnStartChoiceCursor(IReadOnlyList<PlanCardChoice>? choic
 
     public bool TryTake(TurnStartChoiceRequest request, out PlanCardChoice? choice)
     {
+        // The callback can synchronously open and consume a deeper choice from this same cursor.
+        // Run it before matching the original request, then re-read the cursor position.
+        if (!InvokeBeforeNextTake())
+        {
+            choice = null;
+            return false;
+        }
         if (_index >= _choices.Count)
         {
             choice = _automaticPolicy?.Invoke(request);
-            if (choice != null)
-                InvokeBeforeNextTake();
             return choice != null;
         }
-
         choice = _choices[_index];
         if (!Matches(choice, request))
         {
@@ -56,28 +64,28 @@ internal sealed class TurnStartChoiceCursor(IReadOnlyList<PlanCardChoice>? choic
                 $"当前需要 {request.SourceId}/{request.Effect}/{request.SourcePile}；" +
                 $"计划上下文={choice.ContextId}，当前上下文={request.ContextId}。");
         }
-        InvokeBeforeNextTake();
         _index++;
         return true;
     }
 
     public bool TryTakeIfMatches(TurnStartChoiceRequest request, out PlanCardChoice? choice)
     {
+        if (!InvokeBeforeNextTake())
+        {
+            choice = null;
+            return false;
+        }
         if (_index >= _choices.Count || !Matches(_choices[_index], request))
         {
             choice = _automaticPolicy?.Invoke(request);
-            if (choice != null)
-                InvokeBeforeNextTake();
             return choice != null;
         }
-
         choice = _choices[_index];
-        InvokeBeforeNextTake();
         _index++;
         return true;
     }
 
-    public IDisposable BeforeNextTake(Action callback)
+    public IDisposable BeforeNextTake(Func<bool> callback)
     {
         if (_beforeNextTake != null)
             throw new InvalidOperationException("选牌游标已经存在一个消费前回调。");
@@ -103,14 +111,14 @@ internal sealed class TurnStartChoiceCursor(IReadOnlyList<PlanCardChoice>? choic
             && string.Equals(choice.ContextId, request.ContextId, StringComparison.Ordinal)
             && choice.Timing == request.Timing;
 
-    private void InvokeBeforeNextTake()
+    private bool InvokeBeforeNextTake()
     {
-        Action? callback = _beforeNextTake;
+        Func<bool>? callback = _beforeNextTake;
         _beforeNextTake = null;
-        callback?.Invoke();
+        return callback?.Invoke() ?? true;
     }
 
-    private sealed class BeforeNextTakeScope(TurnStartChoiceCursor owner, Action callback) : IDisposable
+    private sealed class BeforeNextTakeScope(TurnStartChoiceCursor owner, Func<bool> callback) : IDisposable
     {
         public void Dispose()
         {
@@ -120,7 +128,7 @@ internal sealed class TurnStartChoiceCursor(IReadOnlyList<PlanCardChoice>? choic
     }
 }
 
-internal static class TurnStartChoiceSupport
+internal static partial class TurnStartChoiceSupport
 {
     public static bool ResolveGeneratedToHand(
         CombatPredictionSimulator simulator,
@@ -150,6 +158,66 @@ internal static class TurnStartChoiceSupport
             spec,
             contextId,
             combat.ActiveActionChoiceTiming);
+        return ResolveCapturedChoice(simulator, combat, player, cursor, request);
+    }
+
+    /// <summary>
+    /// 在给定候选里挑任意张丢掉，可以一张都不挑。预视就是这个形状。
+    /// </summary>
+    /// <remarks>
+    /// 和赌博筹码的差别只有两处：候选由调用方给出，不是整只手牌；丢完不补抽。
+    /// 候选必须是调用方当时真正给玩家看的那几张，顺序也要一致，否则部署时按卡牌令牌
+    /// 在原生页面上定位会错位。
+    ///
+    /// 下界是 0，所以这条选择永远有合法答案，不会把路线变成不可执行。
+    ///
+    /// <paramref name="maxBranches" /> 给 1 时只保留排序最高的那一条分支，也就是按固定策略作答，
+    /// 不在 beam 上展开。会反复触发的来源（例如每次洗牌都预视的遗物）应当这样用：这类选择本身
+    /// 收益有限，却会在每次洗牌处把搜索宽度乘一遍，在能循环整个牌库的牌组里会彻底压过出牌决策。
+    /// 它仍然走同一条通道，所以计划里照样记录，部署照样应答原生页面。
+    /// </remarks>
+    public static bool ResolvePileDiscard(
+        CombatPredictionSimulator simulator,
+        SimulatedCombatState combat,
+        Player player,
+        TurnStartChoiceCursor? cursor,
+        string sourceId,
+        PileType sourcePile,
+        IReadOnlyList<PredictedCard> options,
+        int? maxBranches = null,
+        string contextId = "")
+    {
+        if (options.Count == 0)
+            return true;
+        if (combat.PendingTurnStartChoice is { } pending && pending.SourceId != sourceId)
+        {
+            string detail = $"Prediction callback must finish the pending choice before requesting another: pending={pending.SourceId} new={sourceId}.";
+            NotSupportedException failure = PredictionUnsupportedException.ForContent(detail,
+                simulator.CurrentFrame?.Ancestors().Select(frame => frame.Source.GetType()).ToArray() ?? []);
+            if (failure is IncompatibleGameplayModException) throw failure;
+            throw new InvalidOperationException(detail);
+        }
+        SimPlayerCombatState state = simulator.State.GetPlayerCombatState(player);
+        IReadOnlyList<PredictedCard> sourceCards = state.GetCardPile(sourcePile)?.Cards
+            ?? throw new InvalidOperationException($"丢弃选择不支持牌堆 {sourcePile}。");
+        CardChoiceSpec spec = new(
+            PlanChoiceEffect.Discard,
+            sourcePile,
+            0,
+            options.Count,
+            options,
+            sourceCards,
+            ReplacementValue: 0d,
+            ContextId: contextId,
+            MaxBranches: maxBranches);
+        TurnStartChoiceRequest request = new(
+            sourceId,
+            PlanChoiceEffect.Discard,
+            sourcePile,
+            options.Count,
+            spec,
+            contextId,
+            combat.ActiveActionChoiceTiming);
         if (cursor == null || !cursor.TryTake(request, out PlanCardChoice? choice))
         {
             combat.SetPendingTurnStartChoice(request);
@@ -159,14 +227,10 @@ internal static class TurnStartChoiceSupport
         IReadOnlyList<PredictedCard> selected = ResolveTokens(
             choice!,
             options,
-            minCount: 1,
-            maxCount: 1);
-        simulator.AddGeneratedCardsToCombat(
-            selected,
-            PileType.Hand,
-            player,
-            CardPilePosition.Bottom,
-            CardGenerationResultKind.Random);
+            minCount: 0,
+            maxCount: options.Count);
+        if (selected.Count > 0)
+            simulator.Discard(selected);
         combat.ClearPendingTurnStartChoice();
         return true;
     }
@@ -200,24 +264,7 @@ internal static class TurnStartChoiceSupport
             spec,
             contextId,
             combat.ActiveActionChoiceTiming);
-        if (cursor == null || !cursor.TryTake(request, out PlanCardChoice? choice))
-        {
-            combat.SetPendingTurnStartChoice(request);
-            return false;
-        }
-
-        IReadOnlyList<PredictedCard> selected = ResolveTokens(
-            choice!,
-            options,
-            minCount: 0,
-            maxCount: options.Count);
-        if (selected.Count > 0)
-        {
-            simulator.Discard(selected);
-            simulator.Draw(player, selected.Count);
-        }
-        combat.ClearPendingTurnStartChoice();
-        return true;
+        return ResolveCapturedChoice(simulator, combat, player, cursor, request);
     }
 
     public static bool Resolve(
@@ -247,7 +294,8 @@ internal static class TurnStartChoiceSupport
             count,
             options,
             sourceCards,
-            ReplacementValue: 0d);
+            ReplacementValue: 0d,
+            IsImplicitAllSelection: options.Count <= requestedCount);
         TurnStartChoiceRequest request = new(
             sourceId,
             effect,
@@ -255,46 +303,65 @@ internal static class TurnStartChoiceSupport
             count,
             spec,
             Timing: combat.ActiveActionChoiceTiming);
-        IReadOnlyList<PredictedCard> selected;
+        return ResolveCapturedChoice(simulator, combat, player, cursor, request);
+    }
+
+    internal static bool ResolveCapturedChoice(CombatPredictionSimulator simulator, SimulatedCombatState combat,
+        Player player, TurnStartChoiceCursor? cursor, TurnStartChoiceRequest request)
+    {
+        CardChoiceSpec spec = request.Spec!;
         if (cursor == null || !cursor.TryTake(request, out PlanCardChoice? choice))
         {
-            combat.SetPendingTurnStartChoice(request);
+            if (!combat.HasPendingChoice)
+            {
+                combat.SetPendingTurnStartChoice(request);
+                simulator.CaptureExecutionChoice(new SimulatedCombatState.TurnSelectionExecutionFrame(player, request));
+            }
+            else
+            {
+                // A one-shot before-selection callback suspended before this request was consumed.
+                simulator.AppendExecutionContinuation(new SimulatedCombatState.TurnSelectionExecutionFrame(player, request));
+            }
             return false;
         }
-        else
+        IReadOnlyList<PredictedCard> selected = request.Effect is PlanChoiceEffect.GenerateToHand or PlanChoiceEffect.DiscardAndDraw
+            ? ResolveTokens(choice!, spec.Options, spec.MinCount, spec.MaxCount)
+            : CardChoiceSupport.ResolveStandaloneChoice(simulator, choice!, spec.Options, request.Count, request.SourcePile);
+        switch (request.Effect)
         {
-            selected = CardChoiceSupport.ResolveStandaloneChoice(
-                simulator,
-                choice!,
-                options,
-                count,
-                sourcePile);
-        }
-        switch (effect)
-        {
+            case PlanChoiceEffect.GenerateToHand:
+                simulator.AddGeneratedCardsToCombat(selected, PileType.Hand, player,
+                    CardPilePosition.Bottom, CardGenerationResultKind.Random);
+                break;
+            case PlanChoiceEffect.DiscardAndDraw:
+                if (selected.Count > 0) simulator.DiscardAndDraw(selected, selected.Count);
+                break;
             case PlanChoiceEffect.Discard:
                 simulator.Discard(selected);
                 break;
             case PlanChoiceEffect.Exhaust:
-                foreach (PredictedCard card in selected)
-                    simulator.Exhaust(card);
+                if (!ContinueExhaustSelection(simulator, selected, 0)) return false;
                 break;
             case PlanChoiceEffect.Transform:
                 foreach (PredictedCard card in selected)
                 {
-                    CardModel replacement = CardFactory.CreateRandomCardForTransform(
-                        card.Preview,
-                        isInCombat: true,
-                        simulator.Rng.CombatCardSelection);
+                    CardModel replacement = simulator.CreateRandomCardForTransform(
+                        card.Preview, isInCombat: true, simulator.Rng.CombatCardSelection);
                     CardChoiceSupport.TransformCardToGeneratedReplacement(simulator, card, replacement);
+                    if (combat.HasPendingChoice)
+                    {
+                        simulator.RejectExecutionContinuation();
+                        return false;
+                    }
                 }
                 break;
             case PlanChoiceEffect.MoveToHand:
                 simulator.AddToPile(selected, PileType.Hand);
                 break;
             default:
-                throw new InvalidOperationException($"不支持的回合开始选牌效果：{effect}。");
+                throw new InvalidOperationException($"不支持的回合开始选牌效果：{request.Effect}。");
         }
+        if (combat.HasPendingChoice) return false;
         combat.ClearPendingTurnStartChoice();
         return true;
     }
