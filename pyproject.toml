@@ -1,6 +1,6 @@
 [project]
 name = "sts2_autoplay"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = []
 
 # 插件包内容规则：NEKO 打包器（neko_plugin_cli）读 [tool.neko.build]，**不读** .gitignore。
@@ -8,5 +8,5 @@ dependencies = []
 # 它们都不是要分发的插件内容；不在这里排除就会被原样打进 .neko-plugin
 # （实测：game_mod 约 18MB + .codegraph 约 38MB，包体积 0.36MB -> 14MB）。
 [tool.neko.build]
-exclude_dirs = ["game_mod", ".codegraph"]
+exclude_dirs = ["game_mod", ".codegraph", ".dsh-artifacts", ".agent-teams"]
 exclude_files = ["deploy-all.ps1"]
