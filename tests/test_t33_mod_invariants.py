@@ -18,16 +18,27 @@ import re
 
 import pytest
 
-#: mod 源码根（repo，不是交付副本）
-_GS = pathlib.Path(
-    r"D:\NekoClaw\n.e.k.o_plugin_sts2_autoplay\game_mod\nekospire\Game\GameStateService.cs"
-)
-_GA = pathlib.Path(
-    r"D:\NekoClaw\n.e.k.o_plugin_sts2_autoplay\game_mod\nekospire\Game\GameActionService.cs"
-)
+
+#: mod 源码根（repo，不是交付副本）。
+#: ★ 不能写死 `D:\NekoClaw\...`：CI 是 Linux，那个路径永远不存在，
+#:   而这里没有 exists() 守卫，会直接 FileNotFoundError ⇒ 用例失败而非跳过。
+#:   改成从本文件向上找含 `game_mod/nekospire` 的仓库根，可移植且能在 CI 上真跑。
+def _find_repo_root() -> pathlib.Path | None:
+    for parent in pathlib.Path(__file__).resolve().parents:
+        if (parent / "game_mod" / "nekospire").is_dir():
+            return parent
+    return None
+
+
+_REPO_ROOT = _find_repo_root()
+_GS = _REPO_ROOT / "game_mod/nekospire/Game/GameStateService.cs" if _REPO_ROOT else None
+_GA = _REPO_ROOT / "game_mod/nekospire/Game/GameActionService.cs" if _REPO_ROOT else None
 
 
 def _src() -> str:
+    """读 mod 源码；仓库根找不到时**在测试内**跳过（模块级 skip 会变成 collection error）。"""
+    if _GS is None:  # pragma: no cover
+        pytest.skip("找不到 game_mod/nekospire（只装了插件产物）⇒ 无法核对 mod 源码")
     return _GS.read_bytes().decode("utf-8")
 
 
@@ -280,7 +291,7 @@ def _code_only(src: str) -> str:
 
 
 def _method_body(src: str, signature: str) -> str:
-    """取出 `signature` 开头那个方法的**完整方法体**（按大括号配平，不用正则贪婪）。
+    r"""取出 `signature` 开头那个方法的**完整方法体**（按大括号配平，不用正则贪婪）。
 
     ★ 为什么不用 `re.search(r"...\{(.*?)^\s*\}", re.M)`：那样会在**第一个行首 `}`**
       就停 —— 而方法体里常有嵌套的 `if { ... }`，第一个行首 `}` 往往是内层的

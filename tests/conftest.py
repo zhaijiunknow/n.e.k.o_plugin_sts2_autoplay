@@ -20,3 +20,9 @@ _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = _PLUGIN_ROOT.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+#: 宿主 N.E.K.O 目录：部分用例需要 `import plugin.core.*` / `import utils.*`。
+#: 只在它**真的存在**时插入 —— CI 上不存在，插进去也没用，反而掩盖问题。
+_NEKO_ROOT = Path(r"D:\NekoClaw\N.E.K.O")
+if _NEKO_ROOT.is_dir() and str(_NEKO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_NEKO_ROOT))

@@ -64,12 +64,9 @@ t17 修好 mod 侧后 `use_potion(AllEnemies)` 会变成 `completed`，那时破
 
 from __future__ import annotations
 
-import sys
-
 import pytest
 
-sys.path.insert(0, r"D:\NekoClaw\N.E.K.O")
-
+# 路径引导统一在 tests/conftest.py（此处不再插 sys.path）
 from plugin.plugins.sts2_autoplay.heuristic_planner import STS2HeuristicPlanner
 from plugin.plugins.sts2_autoplay.loop_runner import _combat_deadlock_signature
 

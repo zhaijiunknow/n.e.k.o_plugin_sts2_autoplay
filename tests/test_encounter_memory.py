@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import pathlib
 from typing import Any
@@ -31,23 +32,46 @@ from plugin.plugins.sts2_autoplay.encounter_memory import (
 # 实机原始载荷（★ 逐字抓取，禁止臆造）
 # ======================================================================================
 
-_LIVE_DIR = pathlib.Path(
-    r"D:\NekoClaw\n.e.k.o_plugin_sts2_autoplay\.dsh-artifacts\_t31"
-)
+#: 实机样本目录。**相对于仓库根**，不再写死 Windows 绝对路径 ——
+#: CI（Linux）上该目录不存在（`.dsh-artifacts/` 是 gitignored），
+#: 所以下面所有取样本的函数都必须容忍"取不到"。
+_LIVE_DIR = pathlib.Path(__file__).resolve().parents[1] / ".dsh-artifacts" / "_t31"
+
+#: 样本文件名（逐字抓取，禁止臆造）
+_LIVE_COMBAT_NAME = "live-poll-20261020_023708.json"
+_LIVE_EVENT_NAME = "live-poll-20261020_023752.json"
 
 
-def _load_live(name: str) -> dict[str, Any]:
+def _try_load_live(name: str) -> dict[str, Any] | None:
+    """读实机样本；不存在则返回 None。
+
+    ★ 关键：这里**绝对不能**调 `pytest.skip` —— 本函数可能在模块导入期被调用，
+      而 pytest 9 起在测试之外 skip 会中止整个文件的收集（collection error）。
+      "取不到就跳过"的判定放在各测试函数内部（见 `live_combat` / `live_event`）。
+    """
     path = _LIVE_DIR / name
-    if not path.exists():  # pragma: no cover —— 副本缺失时明确跳过而非假绿
-        pytest.skip(f"实机样本缺失：{path}")
+    if not path.exists():
+        return None
     env = json.loads(path.read_bytes().decode("utf-8"))
     return env.get("data") if isinstance(env.get("data"), dict) else env
 
 
-#: 实机 COMBAT（run C6CM8CZRR9KQ / floor 12 / BYRDONIS）
-LIVE_COMBAT = _load_live("live-poll-20261020_023708.json")
-#: 实机 EVENT（is_finished=False / WELLSPRING / 2 选项）
-LIVE_EVENT = _load_live("live-poll-20261020_023752.json")
+@functools.lru_cache(maxsize=1)
+def live_combat() -> dict[str, Any]:
+    """实机 COMBAT 载荷；样本缺失时在**测试内**跳过（不是导入期）。"""
+    data = _try_load_live(_LIVE_COMBAT_NAME)
+    if data is None:  # pragma: no cover
+        pytest.skip(f"实机样本缺失：{_LIVE_DIR / _LIVE_COMBAT_NAME}")
+    return data
+
+
+@functools.lru_cache(maxsize=1)
+def live_event() -> dict[str, Any]:
+    """实机 EVENT 载荷；样本缺失时在**测试内**跳过。"""
+    data = _try_load_live(_LIVE_EVENT_NAME)
+    if data is None:  # pragma: no cover
+        pytest.skip(f"实机样本缺失：{_LIVE_DIR / _LIVE_EVENT_NAME}")
+    return data
 
 
 # ---------------------------------------------------------------- 构造器（明确标注）
@@ -186,21 +210,21 @@ def test_live_state_shape_matches_contract_section2() -> None:
         "map", "selection", "character_select", "timeline", "chest", "event", "shop",
         "rest", "reward", "bundles", "modal", "game_over", "main_menu", "agent_view",
     }
-    assert set(LIVE_COMBAT) == expected_top, "顶层 26 键与契约 §2 不符"
-    assert len(LIVE_COMBAT) == 26
+    assert set(live_combat()) == expected_top, "顶层 26 键与契约 §2 不符"
+    assert len(live_combat()) == 26
 
     # combat 6 键（含契约强调的 2 个致命风险键）
-    assert set(LIVE_COMBAT["combat"]) == {
+    assert set(live_combat()["combat"]) == {
         "end_turn_will_kill_player", "enemies", "hand", "lethal_risks", "player", "players",
     }
-    assert LIVE_COMBAT["combat"]["lethal_risks"] == []
-    assert LIVE_COMBAT["combat"]["end_turn_will_kill_player"] is False
+    assert live_combat()["combat"]["lethal_risks"] == []
+    assert live_combat()["combat"]["end_turn_will_kill_player"] is False
 
     # event 5 键 + options 恰好 8 键
-    assert set(LIVE_COMBAT["event"] or {"description", "event_id", "is_finished", "options",
+    assert set(live_combat()["event"] or {"description", "event_id", "is_finished", "options",
                                         "title"}) >= set()
-    assert set(LIVE_EVENT["event"]) == {"description", "event_id", "is_finished", "options", "title"}
-    for o in LIVE_EVENT["event"]["options"]:
+    assert set(live_event()["event"]) == {"description", "event_id", "is_finished", "options", "title"}
+    for o in live_event()["event"]["options"]:
         assert set(o) == {
             "index", "text_key", "title", "description", "is_locked", "is_proceed",
             "will_kill_player", "has_relic_preview",
@@ -213,19 +237,19 @@ def test_run_id_lives_at_top_level_not_under_run() -> None:
 
     若实现按字面写 `run['run_id']` ⇒ 恒 None ⇒ **所有局共用一个 run_id ⇒ 跨局串味**。
     """
-    assert LIVE_COMBAT["run_id"] == "C6CM8CZRR9KQ"
-    assert "run_id" not in LIVE_COMBAT["run"], "★ run 层确实没有 run_id 键"
-    assert LIVE_COMBAT["run"].get("run_id") is None
+    assert live_combat()["run_id"] == "C6CM8CZRR9KQ"
+    assert "run_id" not in live_combat()["run"], "★ run 层确实没有 run_id 键"
+    assert live_combat()["run"].get("run_id") is None
     # 采集器必须取到真实值
     m = EncounterMemory(path=None)
-    m.observe(LIVE_COMBAT)
+    m.observe(live_combat())
     assert m._cur_meta["run_id"] == "C6CM8CZRR9KQ"
 
 
 @pytest.mark.unit
 def test_real_combat_payload_collects_correctly(mem: EncounterMemory) -> None:
     """★ 用**真机 COMBAT 载荷**跑采集器，字段必须真的被解析出来。"""
-    mem.observe(LIVE_COMBAT)
+    mem.observe(live_combat())
     assert mem._cur_key is not None
     turn = mem._cur_turns[0]
     # 实机：BYRDONIS hp 63/90, intents=[Attack 5/3/15]
@@ -921,7 +945,7 @@ def test_observe_does_not_mutate_input(mem: EncounterMemory) -> None:
 @pytest.mark.unit
 def test_observe_does_not_mutate_real_payload(mem: EncounterMemory) -> None:
     """★ 用**实机载荷**再验一次纯观测（真实形状才代表生产）。"""
-    st = json.loads(json.dumps(LIVE_COMBAT))
+    st = json.loads(json.dumps(live_combat()))
     before = json.dumps(st, ensure_ascii=False, sort_keys=True)
     mem.observe(st)
     after = json.dumps(st, ensure_ascii=False, sort_keys=True)

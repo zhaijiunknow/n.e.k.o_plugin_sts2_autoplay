@@ -30,13 +30,11 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from typing import Any
 
 import pytest
 
-sys.path.insert(0, r"D:\NekoClaw\N.E.K.O")
-
+# 路径引导统一在 tests/conftest.py（此处不再插 sys.path）
 from plugin.plugins.sts2_autoplay.runtime_state import STS2RuntimeState as _RealState  # noqa: E402
 from plugin.plugins.sts2_autoplay.snapshot_normalizer import (  # noqa: E402
     STATE_UNAVAILABLE_SCREEN,

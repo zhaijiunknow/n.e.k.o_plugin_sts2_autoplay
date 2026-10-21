@@ -38,12 +38,9 @@ D3 = 非玩家行动窗口期死锁计数越过阈值却不兜底。
 
 from __future__ import annotations
 
-import sys
-
 import pytest
 
-sys.path.insert(0, r"D:\NekoClaw\N.E.K.O")
-
+# 路径引导统一在 tests/conftest.py（此处不再插 sys.path）
 from plugin.plugins.sts2_autoplay.heuristic_planner import STS2HeuristicPlanner
 
 _OUT_OF_WINDOW_LIMIT = STS2HeuristicPlanner._SOLVER_OUT_OF_WINDOW_LIMIT
