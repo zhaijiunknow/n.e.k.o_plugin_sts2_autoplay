@@ -76,7 +76,7 @@ name = "尖塔2陪玩"
 description = "陪伴你在杀戮尖塔2（Slay the Spire 2）中游玩：自动出牌、局势点评与猫娘 LLM 实时解说（游戏内弹幕）。"
 short_description = "Slay the Spire 2 companion: autoplay, situation commentary, and live AI catgirl danmaku in-game."
 keywords = ["slay the spire", "杀戮尖塔", "陪玩", "autoplay", "companion", "sts2", "肉鸽", "卡牌"]
-version = "0.7.7"
+version = "0.7.8"
 entry = "plugin.plugins.sts2_autoplay:STS2AutoplayPlugin"
 
 # 默认语区**必须显式指定**。SDK 的 PluginI18n.t() 在不传 locale 时只按 default_locale 查表，
