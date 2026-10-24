@@ -45,6 +45,21 @@ namespace NekoComm.Game
         public string llm_model { get; set; } = "";
         public int llm_max_tokens { get; set; } = 80;
 
+        // ★★★ t46：`GET /solver/plan` 的搜索时间预算（**秒**）。0 或负数 = 不覆盖（回到上游默认）。
+        //
+        // 为什么必须由本模组自己限流（实机铁证，2026-10-22/24 三份 `godot.log`）：
+        //   `/solver/plan` 是**同步**端点 —— 插件要等到响应回来才出牌。而
+        //   `CombatSolverFacade.SolverFacadeOptions.Default` 的 Deep 预算是 **120000 ms**，
+        //   再加上同一 profile 预算下的补充审计（`SUPPLEMENTAL_AUDIT_BUDGET budget_ms=120000`），
+        //   单次请求实测 **78 s / 137 s（均值）/ 155 s，最长 329 s**；插件旧实现 15 s 读超时后
+        //   放弃并重发，实测**最多 21 个搜索同时在飞**，越拖越慢。
+        //
+        // 取值 12 s 的依据：t45 真机取证里 208 次请求是 min 11 ms / **median 64 ms** / max 12.2 s
+        //   ⇒ 绝大多数回合远低于 12 s，只有病态局面会被这个上限截断（截断时引擎按上游既有语义
+        //   发布已算出的前沿 = `search_status=budget_exceeded`，不会退化成"没有计划"）。
+        //   ⇒ 尾部从"几分钟"变成"最多十几秒"，而正常回合的计划质量不受影响。
+        public double solver_budget_seconds { get; set; } = 12;
+
         private static readonly JsonSerializerOptions Options = new()
         {
             WriteIndented = true,

@@ -19,6 +19,53 @@ namespace NekoComm.Game
         // Flip to false to fall back to the self-built SimSolverPlan path.
         public static bool SolverEnabled = true;
 
+        // ★★★ t46：`/solver/plan` 的**时间预算**必须由本模组收口，不能用上游默认值。
+        //
+        // ## 为什么（玩家口径 + 三份实机日志）
+        //   玩家：「让插件等待求解器，不需要超时设置，不然超时之后会退级策略会影响求解器的结果，
+        //          可能出现本来能过的过不了了。」⇒ 插件侧已经把 `/solver/plan` 改成**无读超时**
+        //   （`transport_client.get_combat_plan`），它现在会老老实实等到我们返回。
+        //   但"没有上限"不等于"合理"：上游 `SolverFacadeOptions.Default` 是
+        //   Short 8000 ms / **Deep 120000 ms**，而 Deep 一旦被选中，同一个 profile 预算还要再跑
+        //   一轮补充审计（`SUPPLEMENTAL_AUDIT_BUDGET budget_ms=120000`）⇒ 实测单次请求
+        //   **78 s / 137 s（均值）/ 155 s，最长 329 s**（`Desktop\新建文件夹` 三份 godot.log）。
+        //   一回合动作等两分钟，玩家就是在看静止画面 ⇒ 这个尾部必须砍掉。
+        //
+        // ## 为什么是"压在 mod 侧"而不是"让插件超时"
+        //   超时放弃 = 换策略 = 结果被悄悄改掉（玩家明确禁止）。所以只能由产生耗时的一侧
+        //   主动把预算压到可玩范围：引擎在时间边界按上游既有语义**发布已算出的前沿**
+        //   （`search_status=budget_exceeded`，见 CombatSolverFacade.MapStatus），
+        //   而不是返回"没有计划" ⇒ 准入门槛照样通过，动作照常出。
+        //
+        // ## 取值
+        //   Short 保持 8000 ms（上游值，正常回合就是它）；Deep 由
+        //   `NekoConfig.solver_budget_seconds`（默认 12 s）封顶。t45 真机取证：208 次请求
+        //   min 11 ms / median 64 ms / max 12.2 s ⇒ 12 s 只截断病态长尾。
+        private const int ShortBudgetMilliseconds = 8000;
+
+        /// <summary>按 `NekoConfig.solver_budget_seconds` 生成 facade 选项（默认 Deep 封顶 12 s）。</summary>
+        internal static SolverFacadeOptions PlanOptions()
+        {
+            SolverFacadeOptions defaults = SolverFacadeOptions.Default;
+            double budgetSeconds = NekoConfig.Current.solver_budget_seconds;
+            // 0/负数/非有限值 ⇒ 显式不覆盖，保持上游 120 s（留给"后台研究"这类离线场景）。
+            if (double.IsNaN(budgetSeconds) || double.IsInfinity(budgetSeconds) || budgetSeconds <= 0)
+                return defaults;
+            int deepMilliseconds = (int)Math.Round(budgetSeconds * 1000.0);
+            if (deepMilliseconds < ShortBudgetMilliseconds)
+                deepMilliseconds = ShortBudgetMilliseconds;
+            return new SolverFacadeOptions
+            {
+                // 除预算外一律沿用上游默认（并行度/伤害阈值/短搜索优先标志），
+                // 保证"策略没变、只是搜索时间有上限"。
+                ForceShortOnly = defaults.ForceShortOnly,
+                ShortBudgetMilliseconds = ShortBudgetMilliseconds,
+                DeepBudgetMilliseconds = deepMilliseconds,
+                MaxDegreeOfParallelism = defaults.MaxDegreeOfParallelism,
+                DamageThreshold = defaults.DamageThreshold,
+            };
+        }
+
         public static async Task<SolverPlanPayload> BuildSolverPlanAsync(CancellationToken cancellationToken = default)
         {
             var combat = CombatManager.Instance.DebugOnlyGetState();
@@ -34,7 +81,9 @@ namespace NekoComm.Game
             {
                 try
                 {
-                    return await CombatSolverFacade.BuildPlanAsync(combat, me, null, cancellationToken);
+                    // ★ t46：显式传预算（见 PlanOptions 的长注释）。传 null 会退回上游
+                    //   SolverFacadeOptions.Default ⇒ Deep 120 s + 120 s 审计，插件要等几分钟。
+                    return await CombatSolverFacade.BuildPlanAsync(combat, me, PlanOptions(), cancellationToken);
                 }
                 catch
                 {
