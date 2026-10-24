@@ -36,6 +36,12 @@ def _internal_client() -> httpx.AsyncClient:
     return get_internal_http_client()
 
 
+#: `_request(..., read_timeout=...)` 的哨兵：传它（默认）⇒ 用本类配置的 `request_timeout`。
+#: 传 `None` ⇒ **该请求不设读超时**（httpx 语义：这一阶段永不超时）。
+#: 只有 `/solver/plan` 会用 `None` —— 理由见 `get_combat_plan` 的注释。
+_DEFAULT_READ_TIMEOUT: Any = object()
+
+
 class STS2TransportError(RuntimeError):
     pass
 
@@ -182,8 +188,28 @@ class STS2TransportClient:
 
         Returns the SolverPlanPayload (in_combat/action/card_index/card_id/target_index/line),
         or {"in_combat": false, "reason": "..."} when not in combat.
+
+        ★★★ t46：**本请求不设读超时**（`read_timeout=None`）—— 算多久就等多久。
+
+        ## 为什么必须去掉读超时（玩家口径 + 两起实机故障）
+
+        1. **等不及就退级，比卡住更坏。** 求解器预算实测会被配到 120 s（`SEARCH_SESSION
+           total_budget_ms=120000`），后面还挂着一轮 120 s 的补充审计
+           （`SUPPLEMENTAL_AUDIT_BUDGET budget_ms=120000`）。旧实现用 15 s 读超时，
+           于是**每一次**都在搜索没算完时抛 `httpx.ReadTimeout`；上层把它当成"没有计划"，
+           从此走上另一条策略路径 —— 同一局面本来能赢，退级后可能输。这不是"卡住"，
+           是**结果被悄悄换掉了**。
+        2. 实机证据（`Desktop\新建文件夹`，nekospire 正常加载的那套环境）：
+           `/solver/plan` 有 202 次 200（min 5 ms）与 23 次失败**耗时 78–155 s**，
+           失败原因是 `HttpListenerException (64) 指定的网络名不再可用` —— 服务端写响应时
+           客户端早已放弃。更糟的是旧实现超时后立刻重发，实测**最多 21 个搜索同时在飞**。
+        3. 连接的建立仍然受 `connect_timeout` 约束：端口不通/对端不是这个 mod 会**立刻**失败，
+           那是错误（要喊出来），不是"在算"（要等）。两者由 `loop_runner` 的
+           `solver_status` 分开记账（见 `runtime_state.solver_status`）。
+
+        读到结果之后是否"可用"由 `solver_play_gate` 判定，本层不解释业务语义。
         """
-        return await self._request("GET", "/solver/plan")
+        return await self._request("GET", "/solver/plan", read_timeout=None)
 
     async def execute_action(self, action: str, **kwargs: Any) -> Dict[str, Any]:
         return await self._request("POST", "/action", json=self._build_action_payload(action, **kwargs))
@@ -325,16 +351,36 @@ class STS2TransportClient:
             bits.insert(0, f"code={code}")
         return f"{message} ({', '.join(bits)})" if bits else message
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        read_timeout: Any = _DEFAULT_READ_TIMEOUT,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """发一个 mod 请求。
+
+        `read_timeout`（t46 新增，仅 `/solver/plan` 用）：
+          · 不传            ⇒ 用本类配置的 `request_timeout`（其余端点照旧）
+          · `None`          ⇒ **不设读超时**：等到对端把响应写完为止
+          · 数字            ⇒ 覆盖本次的读超时
+        ★ 只有 `read` 这一个阶段可被放开；`connect`/`write`/`pool` 仍走本类的超时，
+          所以"端口不通"依旧是秒级失败，不会被无超时拖成永久挂起。
+        """
         url = f"{self.base_url}{path}"
         # 调用方若自带 headers（例如将来的鉴权），以调用方为准，这里只补默认的标识头。
         headers = dict(self.EXTERNAL_CONTROL_HEADERS)
         extra_headers = kwargs.pop("headers", None)
         if isinstance(extra_headers, Mapping):
             headers.update(extra_headers)
+        if read_timeout is _DEFAULT_READ_TIMEOUT:
+            read_stage_timeout: float | None = self.request_timeout
+        else:
+            read_stage_timeout = None if read_timeout is None else float(read_timeout)
         timeout = httpx.Timeout(
             connect=self.request_timeout if self.connect_timeout <= 0 else self.connect_timeout,
-            read=self.request_timeout,
+            read=read_stage_timeout,
             write=self.request_timeout,
             pool=self.request_timeout,
         )

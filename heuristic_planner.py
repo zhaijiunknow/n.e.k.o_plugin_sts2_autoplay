@@ -1817,12 +1817,28 @@ class STS2HeuristicPlanner:
         verdict = str(gate.get("verdict") or "")
         plan_origin = str(context.get("plan_origin") or "none")
         plan_fetch_signature = str(context.get("plan_fetch_signature") or "")
+        # ★★★ t46：求解器当前状态 + 已等秒数（由 loop_runner 的 _planner_context 透传）。
+        #   等待本身不计死锁是**有意**的；但"在算"与"请求失败"必须能一眼分开。
+        solver_status = str(context.get("solver_status") or "")
+        solver_wait_seconds = 0.0
+        try:
+            solver_wait_seconds = float(context.get("solver_wait_seconds") or 0.0)
+        except (TypeError, ValueError):
+            solver_wait_seconds = 0.0
+        solver_last_error = str(context.get("solver_last_error") or "")
         self._solver_gate_last = dict(gate)
         self._solver_gate_last_verdict = verdict
 
         if verdict == "solver_cannot_act":
             self._solver_gate_cannot_act_count += 1
-            self._log_solver_gate(gate=gate, plan_origin=plan_origin, force=True)
+            self._log_solver_gate(
+                gate=gate,
+                plan_origin=plan_origin,
+                force=True,
+                solver_status=solver_status,
+                solver_wait_seconds=solver_wait_seconds,
+                solver_last_error=solver_last_error,
+            )
             return self._combat_solver_only_outcome(
                 snapshot=snapshot,
                 available_actions=available_actions,
@@ -1838,22 +1854,43 @@ class STS2HeuristicPlanner:
 
         # ── waiting_solver：只等，不动作，不计死锁 ────────────────────────────────
         self._solver_gate_wait_count += 1
-        self._log_solver_gate(gate=gate, plan_origin=plan_origin, force=False)
+        self._log_solver_gate(
+            gate=gate,
+            plan_origin=plan_origin,
+            force=False,
+            solver_status=solver_status,
+            solver_wait_seconds=solver_wait_seconds,
+            solver_last_error=solver_last_error,
+        )
         return None
 
-    def _log_solver_gate(self, *, gate: dict[str, Any], plan_origin: str, force: bool) -> None:
+    def _log_solver_gate(
+        self,
+        *,
+        gate: dict[str, Any],
+        plan_origin: str,
+        force: bool,
+        solver_status: str = "",
+        solver_wait_seconds: float = 0.0,
+        solver_last_error: str = "",
+    ) -> None:
         """闸门留痕：一行说清「在等什么 / 三个计数各是多少 / 局面与计划是否对得上」。
 
         ★ 为什么必须留痕（与 t13/t23/t37 同一条纪律）：静默的等待与"插件卡死"在日志里
           无法区分 —— 这正是本项目历史上最贵的几类缺陷的共同形态。
         ★ 为什么带累计计数：本次验收要求报出「被 gate 拦下的 tick 数」，靠数日志行会漏
           （节流/去重/上限都会吃掉行）⇒ 直接把累计值写进行内，**数字自证**。
+        ★★ t46：行尾补「求解器 <状态> 已等=Ns」。`/solver/plan` 不设读超时后，等待可能长达
+          几分钟，这一列就是"现在到底在等谁"的答案；`failed` 与 `computing` 都在 key 里，
+          ⇒ 状态一变立刻打一行，不会被 5 次节流吃掉。
         """
+        solver_status = str(solver_status or "")
         key = "|".join((
             str(gate.get("verdict") or ""),
             str(gate.get("missing") or ""),
             str(gate.get("search_status") or ""),
             plan_origin,
+            solver_status,
         ))
         self._solver_gate_blocked_since_log += 1
         if not force and key == self._solver_gate_log_key and (
@@ -1868,7 +1905,8 @@ class STS2HeuristicPlanner:
                 "[sts2_solver_gate] verdict=%s 在等=%s plan_origin=%s in_combat=%s "
                 "search_status=%s 指纹=%s 首步=%s 原因=%s "
                 "｜累计 allowed=%d waiting=%d cannot_act=%d "
-                "｜死锁计数 deadlock=%d/%d stale_reclaim=%d/%d（等待不计入）",
+                "｜死锁计数 deadlock=%d/%d stale_reclaim=%d/%d（等待不计入）"
+                "｜求解器 %s 已等=%.1fs%s",
                 gate.get("verdict"),
                 gate.get("missing") or "-",
                 plan_origin,
@@ -1884,6 +1922,9 @@ class STS2HeuristicPlanner:
                 self._SOLVER_DEADLOCK_RETRIES,
                 self._solver_stale_reclaim_count,
                 self._SOLVER_STALE_RECLAIM_LIMIT,
+                solver_status or "-",
+                solver_wait_seconds,
+                ("（最近一次失败：%s）" % solver_last_error) if solver_last_error else "",
             )
         except Exception:
             pass

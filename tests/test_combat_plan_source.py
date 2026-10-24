@@ -138,7 +138,10 @@ class TransportGetCombatPlanTests(unittest.TestCase):
         with patch.object(client, "_request", new=AsyncMock(return_value={"in_combat": True, "action": "play_card"})) as m:
             result = asyncio.run(client.get_combat_plan())
 
-        m.assert_awaited_once_with("GET", "/solver/plan")
+        # ★ t46：`read_timeout=None` 是**契约的一部分**，不是实现细节 ——
+        #   求解器预算实测可达 120s（+120s 补充审计），一旦按 15s 超时就会退级换策略，
+        #   让本来能赢的局面输掉。任何"顺手把超时加回去"的改动都必须在这里撞墙。
+        m.assert_awaited_once_with("GET", "/solver/plan", read_timeout=None)
         self.assertEqual(result, {"in_combat": True, "action": "play_card"})
 
 

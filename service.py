@@ -938,7 +938,11 @@ class STS2AutoplayService:
             else ""
         )
         # ★ 专用形态用自己的指纹（它比通用的更具体），但**走同一个闸**。
-        signature = special_signature or self._no_operation_signature(snapshot)
+        # ★★ t46：把求解器状态编进指纹 —— `computing→failed` 是**有意义的局面变化**
+        #   （"在算"变成"等下去也不会好"），必须重新计时并重新报一次，
+        #   而不是被 `stuck_reported` 永久压住。
+        solver_status = str(getattr(self._state, "solver_status", "") or "")
+        signature = (special_signature or self._no_operation_signature(snapshot)) + "|solver=" + solver_status
         now = time()
         if signature != self._state.stuck_signature:
             self._state.stuck_signature = signature
@@ -951,6 +955,12 @@ class STS2AutoplayService:
         if diag is not None:
             # ★ 命中专用屏：走专用文案（`_note_unadvanceable_screen` 自己置 stuck_reported）。
             self._note_unadvanceable_screen(snapshot, diag)
+            return
+        if solver_status in ("computing", "failed"):
+            # ★ t46：战斗里"没动作"的真因几乎总是求解器 —— 别再笼统地说"界面里没有可执行动作"。
+            #   2026-10-24 实测的误诊长这样（actions 里明明有 play_card/end_turn）：
+            #     [sts2_stuck] 界面里没有可执行动作：screen=COMBAT actions=['end_turn','play_card',...]
+            self._note_solver_stuck_report(solver_status, int(now - self._state.stuck_since))
             return
         self._state.stuck_reported = True
         raw = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
@@ -966,6 +976,47 @@ class STS2AutoplayService:
                 % (screen, unknown or "-", sorted(str(action) for action in actions), waited, self._state.autoplay_state)
             ),
             host_text=f"我卡在{detail}这个界面上了，这里没有我能做的事，你手动推一下喵。",
+        )
+
+    def _note_solver_stuck_report(self, solver_status: str, waited: int) -> None:
+        """战斗里"没动作"而**原因在求解器**时专用的一份报告（t46）。
+
+        ★ 为什么必须与通用文案分开：2026-10-24 的实机日志是这么写的 ——
+
+              [sts2_stuck] 界面里没有可执行动作：screen=COMBAT
+                actions=['end_turn', 'play_card', 'save_and_quit']
+
+          actions 里明明有 play_card 与 end_turn，玩家照着这句话只会去怀疑游戏/自己的操作，
+          而真因在另一侧（对端没有 `/solver/plan`，每次 0 ms 回 404）。**误诊比沉默更贵。**
+
+        ★ 两种口径：
+          · `computing` —— 还在算。这是**正常且被允许**的等待（无读超时），所以文案要说清
+            "在等结果、不会降级"，并给出已等秒数，让玩家能判断"再等等"还是"去查"。
+          · `failed`    —— 请求本身失败。等下去**永远不会好**，文案必须点名去查什么。
+        """
+        self._state.stuck_reported = True
+        solver = self.solver_status_payload()
+        waited_s = int(solver.get("wait_seconds") or 0) or waited
+        if solver_status == "computing":
+            self._emit_stuck_report(
+                reason="求解器正在计算，已等 %d 秒（仍在等结果，不降级策略）" % waited_s,
+                log_line=(
+                    "[sts2_stuck] 求解器仍在计算：screen=COMBAT 已等 %s 秒"
+                    "（本 tick 不发动作、不降级 —— 等不及就换策略会让本来能过的战斗过不了；"
+                    "状态见 solver.status=computing）" % waited_s
+                ),
+                host_text="这一手我还在等求解器算完（已经 %d 秒了），算完就出牌，不会乱打喵。" % waited_s,
+            )
+            return
+        self._emit_stuck_report(
+            reason="求解器请求失败：%s（自动玩仍在等，但等下去不会好）" % (solver.get("last_error") or "未知原因"),
+            log_line=(
+                "[sts2_stuck] 求解器请求失败 screen=COMBAT status=failed last_error=%s"
+                " ｜检查：对端是否有 /solver/plan（404=装错 mod / 装的是没有求解器的 fork）、"
+                "base_url 是否指向带求解器的实例（18080 vs 38080）"
+                % (solver.get("last_error") or "未知")
+            ),
+            host_text="我的求解器请求失败了（%s），得你看一眼 mod 有没有装对喵。" % (solver.get("last_error") or "未知原因"),
         )
 
     def _emit_stuck_report(self, *, reason: str, log_line: str, host_text: str) -> None:
@@ -1475,6 +1526,7 @@ class STS2AutoplayService:
                 "host_base_url": self._host_base_url or self._state.base_url,
                 "catgirl_base_url": self._catgirl_base_url,
             },
+            "solver": self.solver_status_payload(),
             "map_policy": {
                 # wait = 彻底等玩家发话（不投票、也不跟票）；follow = 自动跟票；auto = 自己选。
                 "policy": self._map_policy,
@@ -1935,6 +1987,24 @@ class STS2AutoplayService:
 
     def _cfg_action_interval(self) -> float:
         return float(self._cfg.get("action_interval_seconds", 1.5) or 1.5)
+
+    def _cfg_combat_replay_interval(self) -> float:
+        """战斗里**按整回合快照续行**时的出牌间隔（秒，t47）。
+
+        ★ 为什么它必须与 `action_interval_seconds` 分开：`/solver/plan` 返回的是**整回合**
+          的出牌顺序（`line[0].steps`），tick 只是按 `solver_step_index` 逐步执行、不重算。
+          这种 tick 的耗时与"上一次搜索花了多久"毫无关系，却被 t45 的自适应节拍按搜索耗时
+          定价（顶到 3s 上限）⇒ 整回合每张牌白等 3 秒。分开之后：
+            · 需要**重算**的 tick（回合开始 / 局面漂移 / 步骤用尽）→ 仍走自适应节拍（安全）；
+            · 纯**回放**的 tick → 用本值（快）。
+        ★ 回退值 0.5s 的依据：这是实机卡牌动画的量级；比它更快多半只会让 mod 回 `pending`
+          （不推进步骤、也不作废计划，代价是退避重试）。要更快就把它调小，玩家配置有否决权。
+        """
+        try:
+            value = float(self._cfg.get("combat_replay_interval_seconds", 0.5))
+        except (TypeError, ValueError):
+            return 0.5
+        return value if value > 0.0 else 0.05
 
     def _cfg_companion_push_probability(self) -> float:
         try:
@@ -4106,6 +4176,47 @@ class STS2AutoplayService:
                 ai_behavior="respond",
             )
 
+    #: `runtime_state.solver_status` 五态机的中文含义（写进状态包，供 UI / 排障一眼读懂）。
+    SOLVER_STATUS_MEANINGS = {
+        "idle": "本 tick 没取计划（不在战斗决策态）",
+        "computing": "正在等求解器算完（/solver/plan 无读超时，绝不降级换策略）",
+        "ready": "已拿到可用计划（in_combat=True 且 search_status 合法）",
+        "waiting_phase": "mod 回了载荷但还没到玩家出牌阶段（正常，继续等）",
+        "failed": "请求本身失败（404/连接断/非 200）：等下去不会好，检查 mod 与端口",
+    }
+
+    def solver_status_payload(self) -> dict[str, Any]:
+        """暴露"求解器到底出结果了没有"—— 自动玩的等待态。
+
+        ★ 为什么它是必须的（玩家口径 2026-10-25）：`/solver/plan` 改成**无读超时**后，
+          "等多久"没有上限了（等不及就退级会换掉结果，比卡住更坏）。那就必须能从外部
+          查到"它还在算 / 算完了 / 请求本身失败"，否则玩家面对的是一台"开着但不动的机器"。
+        ★ `failed` 与 `computing` 必须分开：前者是 0 ms 的 404（装错 mod、端口指错），
+          等一百年也不会好；后者只是慢。把两者混成一个 `in_combat=None` 正是
+          2026-10-24 两次实机故障"查不出来"的原因。
+        """
+        try:
+            state = self._state
+            status = str(getattr(state, "solver_status", "idle") or "idle")
+            wait_seconds = 0.0
+            if status == "computing":
+                started = float(getattr(state, "solver_wait_started_at", 0.0) or 0.0)
+                wait_seconds = max(0.0, time() - started) if started > 0 else 0.0
+            return {
+                "status": status,
+                "meaning": self.SOLVER_STATUS_MEANINGS.get(status, ""),
+                "wait_seconds": round(wait_seconds, 1),
+                "last_elapsed_seconds": round(float(getattr(state, "solver_last_elapsed_seconds", 0.0) or 0.0), 2),
+                "last_search_status": str(getattr(state, "solver_last_search_status", "") or ""),
+                "last_result_at": float(getattr(state, "solver_last_result_at", 0.0) or 0.0),
+                "last_error": str(getattr(state, "solver_last_error", "") or ""),
+                "wait_count": int(getattr(state, "solver_wait_count", 0) or 0),
+                # 显式写出来：读超时被**故意**去掉，别有人再"顺手加回去"。
+                "read_timeout_seconds": None,
+            }
+        except Exception:
+            return {"status": "unknown", "meaning": "", "read_timeout_seconds": None}
+
     def _emit_status(self) -> None:
         try:
             snap = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
@@ -4124,6 +4235,8 @@ class STS2AutoplayService:
                 # 让"它不动了"变成看得见的事实，而不是要玩家自己盯出来。
                 "stuck_reason": self._state.stuck_reason,
                 "sse_reconnect_count": getattr(self._state, "sse_reconnect_count", 0),
+                # ★ t46：等待求解器期间，状态里必须能读出"在等/出结果了/请求失败"。
+                "solver": self.solver_status_payload(),
             })
         except Exception:
             pass

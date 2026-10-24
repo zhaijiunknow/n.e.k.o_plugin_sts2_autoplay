@@ -257,6 +257,13 @@ class STS2LoopRunner:
             self._solver_plan_sig = None
             self._solver_plan_cached = None
             self._solver_plan_fetch_signature = ""
+            # ★ t46：不在战斗决策态 ⇒ 求解器状态回到 idle。否则状态栏会一直挂着上一场
+            #   战斗留下的 `ready`/`computing`，玩家分不清"现在到底在等谁"。
+            try:
+                self._service._state.solver_status = "idle"
+                self._service._state.solver_wait_started_at = 0.0
+            except Exception:
+                pass
         # ★★ 把求解器计划回填进 snapshot —— 让**所有**消费者读同一份。
         #
         # 起因：`summary_context` 在 :70 就构造完了，而 solver_plan 到 :88 才取。
@@ -897,7 +904,13 @@ class STS2LoopRunner:
         self._hb_log("autoplay-loop EXIT(shutdown=True) tick=%d" % tick)
 
     def _next_tick_interval(self) -> float:
-        """本轮 autoplay 结束后该睡多久（t45 自适应节拍）。
+        """本轮 autoplay 结束后该睡多久。
+
+        两条口径（t47）：
+          ① **按快照续行**（战斗里、缓存计划这一步还能打）⇒ 用 `combat_replay_interval_seconds`
+             （默认 0.5s）。理由见 `_replay_interval_if_cached` 的长注释 —— 这一 tick
+             **不会**打 `/solver/plan`，拿"上一次搜索耗时"给它定价纯属误伤。
+          ② 其余情况 ⇒ 沿用 t45 的自适应节拍（下限 = max(配置值, 上次实测耗时)，上限 3s）。
 
         ★ 为什么把算式放进模块级纯函数 `adaptive_tick_interval`：这里只是一个取数壳，
           真正的规则（下限倍数、上限、为什么不用 budget_ms 当节拍）要在**可单测的地方**
@@ -908,11 +921,64 @@ class STS2LoopRunner:
             base = float(self._service._cfg_action_interval())
         except Exception:
             base = 1.5
+        replay = self._replay_interval_if_cached(base)
+        if replay is not None:
+            return replay
         return adaptive_tick_interval(
             base,
             measured_seconds=self._solver_last_fetch_seconds,
             budget_ms=self._solver_last_budget_ms,
         )
+
+    def _replay_interval_if_cached(self, base: float) -> float | None:
+        """★★★ t47：下一 tick 只是**按整回合快照续行**时，返回快速回放间隔；否则 None。
+
+        ## 玩家口径（本函数的全部理由）
+        > 如果是自动游玩并且场景是战斗，每一回合的出牌顺序在最开始就已经求解出答案了，
+        > 那么每次出牌是不是可以快一点
+
+        对。`/solver/plan` 返回的是**整回合**的 line（`line[0].steps` = 本回合的出牌顺序），
+        tick 按 `solver_step_index` 逐步执行、**不会重算**（日志里的
+        `[sts2_plan] 复用快照 step=k/M`）。既然这一 tick 不打搜索，那"上一次搜索花了 8 秒"
+        就与本次间隔无关 —— 但 t45 的 `adaptive_tick_interval` 仍会把它当**下限**并顶到
+        3s 上限：于是**整回合每一张牌都白等 3 秒**（t45 的初衷只是防"搜索刚落就再搜"）。
+
+        ## 判据（与 tick 完全同源，不另造事实）
+        直接调 tick 里那条 `_reusable_plan(cached, cached_sig, 当前指纹, step_index, snapshot)`：
+        它返回可用计划 ⇒ 下一 tick 必然走 `plan_origin="reused"` ⇒ 安全快跑。
+
+        ## 安全阀（为什么快跑不会把计划打废）
+        · 上一张牌**还没落地**（`last_action_status="pending"` 且 `invalid_action_count>0`）
+          ⇒ 不快跑，回到正常节拍 + 既有退避（`_autoplay_retry_backoff`）。
+          太快时最坏情况是 mod 回 `pending`：D9 的 `_note_action_status` 因此**不推进**
+          `solver_step_index`（不空耗步骤），也不会作废缓存 —— 代价只是多一次退避重试。
+        · 结果只取 `min(base, 回放间隔)`：玩家把 `action_interval_seconds` 调得比回放间隔还小
+          时，仍以他的配置为准（配置永远可以否决更快）。
+        · 任何异常 ⇒ 返回 None（退回安全节拍）。这条路径每 tick 都跑，绝不许抛。
+        """
+        try:
+            state = self._service._state
+            if str(getattr(state, "last_action_status", "") or "") == "pending" and int(
+                getattr(state, "invalid_action_count", 0) or 0
+            ) > 0:
+                return None
+            snapshot = state.snapshot if isinstance(state.snapshot, dict) else {}
+            if not snapshot.get("in_combat"):
+                return None
+            step_index = state.solver_step_index if isinstance(state.solver_step_index, int) else 0
+            plan, _why = _reusable_plan(
+                self._solver_plan_cached,
+                self._solver_plan_sig,
+                _combat_plan_signature(snapshot),
+                step_index,
+                snapshot,
+            )
+            if plan is None:
+                return None
+            replay = float(self._service._cfg_combat_replay_interval())
+            return max(_MIN_COMBAT_REPLAY_INTERVAL_SECONDS, min(float(base), replay))
+        except Exception:
+            return None
 
     # ★ 心跳间隔：每 N 次 tick 记一行（避免刷屏）。按 action_interval≈0.3s 估算，
     #   _HB_EVERY=20 ⇒ 约每 6s 一行，足以判定存活且不会淹没决策日志。
@@ -1005,6 +1071,19 @@ class STS2LoopRunner:
         - `self._solver_fetch_coalesced`  —— 被合并掉的重复请求次数
         - `[sts2_solver_fetch]` 日志行    —— 每次真实请求一行（耗时 / 状态 / 指纹），
           供"出牌前最近一次求解器耗时分布"统计。
+
+        ## ★★★ t46：等待是**显式状态**，不是静默的 None
+
+        `/solver/plan` 已改为**无读超时**（求解器算多久就等多久，退级会换掉结果）。因此本函数
+        必须回答"现在到底在干什么"，写进 `runtime_state.solver_status`：
+
+          `computing`     请求在飞（`[sts2_solver_wait]` 每 5s 一行进度，绝不取消搜索）
+          `ready`         in_combat=True 且 search_status 合法 ⇒ 已出可用结果
+          `waiting_phase` 拿到载荷但 mod 说还没到玩家出牌阶段 ⇒ 正常，继续等
+          `failed`        请求本身失败（404/连接断/非 200）⇒ **等下去不会好**，warning 留痕
+
+        `failed` 与 `computing` 必须分开，否则"装错 mod（0 ms 404）"会伪装成"正在计算"
+        —— 那正是 2026-10-24 两次实机故障的共同外形。
         """
         loop = asyncio.get_running_loop()
         inflight = self._solver_inflight
@@ -1029,26 +1108,142 @@ class STS2LoopRunner:
             #   取计划失败 = 本 tick 没计划，继续走"等待"路径。
             try:
                 plan_coro = client.get_combat_plan()
-            except Exception:
+            except Exception as exc:
+                # 构造期就失败（客户端没有这个端点 / 属性查找炸）同样是**请求失败**，
+                # 旧实现静默返回 None ⇒ 日志里只剩一个 in_combat=None。t46 起必须留痕。
+                self._note_solver_failure(exc, 0.0)
                 return None
             # ★ 必须建 Task（而不是直接 await 协程）：只有 Task 能被第二个 await-er 复用。
             task = loop.create_task(plan_coro)
             self._solver_inflight = {"loop": loop, "task": task}
             started = time()
+            # ★★ t46：进入"等待求解器"。`/solver/plan` 不设读超时（见 transport_client 的
+            #   `get_combat_plan`），所以这里可能等几十秒到几分钟；等待期间必须有状态与留痕，
+            #   否则"在算"与"死了"在日志里长得一模一样（这正是前两起故障查不出来的原因）。
+            self._note_solver_wait_begin(started)
+            ticker = loop.create_task(self._log_solver_wait_progress(task, started))
+            error: BaseException | None = None
             try:
                 fetched = await task
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 —— 任何失败都要记账，绝不再静默吞成 None
                 fetched = None
+                error = exc
             finally:
                 self._solver_inflight = None
+                ticker.cancel()
             elapsed = time() - started
             self._solver_fetch_count += 1
             self._solver_last_fetch_seconds = elapsed
+            if error is not None:
+                self._note_solver_failure(error, elapsed)
+                return None
             payload = fetched if isinstance(fetched, dict) else {}
             self._solver_last_budget_ms = payload.get("budget_ms")
             self._solver_last_search_status = str(payload.get("search_status") or "")
+            self._note_solver_result(payload, elapsed)
             self._log_solver_fetch(elapsed, payload)
             return fetched
+
+    #: 等待求解器时，进度行的间隔（秒）。取值依据：求解器实测 5 ms–330 s（长尾以分钟计），
+    #: 5 秒一行既能在 `tail -f` 里明确看到"还在算"，又不会把日志刷成一片。
+    _SOLVER_WAIT_LOG_EVERY = 5.0
+
+    def _solver_log(self, message: str, *args: Any) -> None:
+        """求解器等待/结果专用日志（前缀固定 `[sts2_solver_wait]` / `[sts2_solver_result]`）。"""
+        try:
+            self._service.logger.info(message, *args)
+        except Exception:
+            pass
+
+    def _note_solver_wait_begin(self, started: float) -> None:
+        """把状态置为 `computing`，并开一行"开始等"。纯观测，不改任何决策字段。"""
+        try:
+            state = self._service._state
+            state.solver_status = "computing"
+            state.solver_wait_started_at = started
+            state.solver_last_error = ""
+            state.solver_wait_count = int(getattr(state, "solver_wait_count", 0)) + 1
+            self._solver_log(
+                "[sts2_solver_wait] 开始等待求解器 n=%d（无读超时：等它算完为止，绝不退级策略）",
+                state.solver_wait_count,
+            )
+        except Exception:
+            pass
+
+    async def _log_solver_wait_progress(self, task: Any, started: float) -> None:
+        """等待期间每 :attr:`_SOLVER_WAIT_LOG_EVERY` 秒一行：证明"在算"，而不是"死了"。
+
+        纯观测：只读 `time()`、只写日志，**绝不**改状态、**绝不**取消搜索
+        （取消就等于退级，玩家明确禁止）。
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._SOLVER_WAIT_LOG_EVERY)
+                if task.done():
+                    return
+                self._solver_log(
+                    "[sts2_solver_wait] 求解器仍在计算 已等=%.1fs（本 tick 不发任何动作、不降级）",
+                    time() - started,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    def _note_solver_failure(self, exc: BaseException, elapsed: float) -> None:
+        """请求**本身**失败（404 / 连接断 / 非 200 / 解析失败）：等下去永远不会好。
+
+        ★ 这与"求解器还在算"必须分开记账：前者要人去看 mod 装没装对、端口指向谁；
+          后者只该安静地等。旧实现把两者都变成 `in_combat=None` + `waiting_solver`
+          ⇒ 装错 mod 的机器静默空了 3 分钟（见 runtime_state.solver_status 的注释）。
+        ★ 仍然**不降级**：失败也只是把状态写成 `failed` 并留痕，下一次 tick 继续取。
+        """
+        try:
+            state = self._service._state
+            detail = ("%s: %s" % (type(exc).__name__, exc)).strip()[:300]
+            state.solver_status = "failed"
+            state.solver_last_elapsed_seconds = elapsed
+            state.solver_last_error = detail
+            self._service.logger.warning(
+                "[sts2_solver_wait] ★ 求解器请求失败（继续等也永远不会好）：%s ｜耗时=%.1fs"
+                " ｜检查：对端是否有 /solver/plan（404=装错 mod 或装的是没有求解器的 fork）、"
+                "base_url 是否指向带求解器的那个实例（18080 vs 38080）",
+                detail,
+                elapsed,
+            )
+        except Exception:
+            pass
+
+    def _note_solver_result(self, payload: dict[str, Any], elapsed: float) -> None:
+        """拿到载荷：分「已出可用结果」与「出了但还没到出牌阶段」两态。"""
+        try:
+            state = self._service._state
+            status = str(payload.get("search_status") or "").strip().lower()
+            in_combat = payload.get("in_combat")
+            usable = in_combat is True and status in SOLVER_SEARCH_STATUSES
+            state.solver_last_elapsed_seconds = elapsed
+            state.solver_last_search_status = status
+            if usable:
+                state.solver_status = "ready"
+                state.solver_last_result_at = time()
+                state.solver_last_error = ""
+                self._solver_log(
+                    "[sts2_solver_result] 出结果 status=ready elapsed=%.1fs search_status=%s line_steps=%d",
+                    elapsed,
+                    status or "-",
+                    len(_current_turn_steps(payload) or []),
+                )
+            else:
+                state.solver_status = "waiting_phase"
+                self._solver_log(
+                    "[sts2_solver_result] 出结果 status=waiting_phase elapsed=%.1fs in_combat=%r"
+                    " search_status=%r（mod 未在玩家出牌阶段计算 ⇒ 继续等，不降级）",
+                    elapsed,
+                    in_combat,
+                    status or None,
+                )
+        except Exception:
+            pass
 
     def _log_solver_fetch_merged(self) -> None:
         try:
@@ -1062,11 +1257,20 @@ class STS2LoopRunner:
             pass
 
     def _log_solver_fetch(self, elapsed: float, payload: dict[str, Any]) -> None:
-        """每次真实 `/solver/plan` 一行：耗时 / 状态 / 是否基于当前局面（取证主证据）。"""
+        """每次真实 `/solver/plan` 一行：耗时 / 状态 / 是否基于当前局面（取证主证据）。
+
+        ★ t46：行尾补 `status=`（runtime_state 里那个五态机的当前取值）。旧格式的字段
+        一个都没动（t39/t44 的解析器依赖这些字段名）。
+        """
         try:
+            status = ""
+            try:
+                status = str(getattr(self._service._state, "solver_status", "") or "")
+            except Exception:
+                status = ""
             self._service.logger.info(
                 "[sts2_solver_fetch] n=%d elapsed_ms=%d in_combat=%s search_status=%s "
-                "budget_ms=%s nodes=%s fingerprint=%s line_steps=%s sim_turn=%s",
+                "budget_ms=%s nodes=%s fingerprint=%s line_steps=%s sim_turn=%s status=%s",
                 self._solver_fetch_count,
                 int(round(elapsed * 1000.0)),
                 payload.get("in_combat"),
@@ -1076,6 +1280,7 @@ class STS2LoopRunner:
                 payload.get("state_fingerprint"),
                 len(_current_turn_steps(payload) or []),
                 payload.get("turn"),
+                status or "-",
             )
         except Exception:
             pass
@@ -1161,7 +1366,25 @@ class STS2LoopRunner:
             #   现在由本工厂统一提供 ⇒ 两条路径必然读同一个 step。
             "pending_card_choice_id": self._service._state.pending_card_choice_id,
             "solver_step_index": self._service._state.solver_step_index,
+            # ★★★ t46：把"求解器现在处于哪一态、已经等了多久、为什么失败"透传给 planner，
+            #   让 `[sts2_solver_gate]` 那一行能直接回答"到底在等谁"。
+            #   （`waiting_solver` 本身不计死锁是**有意**的，但"在等"与"请求失败"必须可区分，
+            #    否则装错 mod 的机器会永远安静地等 —— 2026-10-24 两次实机故障即此形态。）
+            "solver_status": str(getattr(self._service._state, "solver_status", "") or ""),
+            "solver_wait_seconds": self._solver_wait_seconds(),
+            "solver_last_error": str(getattr(self._service._state, "solver_last_error", "") or ""),
         }
+
+    def _solver_wait_seconds(self) -> float:
+        """当前这一轮"等求解器"已经等了多少秒（`computing` 期间实时增长；其余为 0）。"""
+        try:
+            state = self._service._state
+            if str(getattr(state, "solver_status", "")) != "computing":
+                return 0.0
+            started = float(getattr(state, "solver_wait_started_at", 0.0) or 0.0)
+            return max(0.0, time() - started) if started > 0 else 0.0
+        except Exception:
+            return 0.0
 
     def _log_plan_reuse(self, step_index: int, total: int) -> None:
         """按快照继续执行时留痕（同一步只记一次）—— 用来核对"到底省了多少次求解"。"""
@@ -1594,7 +1817,11 @@ def solver_play_gate(
     if not isinstance(solver_plan, dict) or not solver_plan:
         verdict.update(
             missing="solver_plan",
-            why="没有求解器计划（本 tick 未取到 /solver/plan，或取回的是 in_combat=false 的失败载荷）",
+            why=("没有求解器计划（本 tick 未取到 /solver/plan）。"
+                 "★ 看同一行末尾的「求解器 <状态> 已等=Ns」："
+                 "computing=还在算（继续等，不降级）；"
+                 "failed=请求本身失败（404/端口不对/装错 mod，等下去不会好，要人看）；"
+                 "waiting_phase=mod 说还没到玩家出牌阶段（正常）"),
         )
         return verdict
     in_combat = solver_plan.get("in_combat")
@@ -1724,6 +1951,14 @@ _SOLVER_PACING_CAP_SECONDS = 3.0
 #:   背靠背连轴转（每次都撞 budget 边界截断 ⇒ 结果质量下降）。
 #:   倍率 > 1 会把节奏无谓拖慢（间隔大于搜索本身），= 1 恰是"不抢在搜索周期之前"。
 _SOLVER_PACING_FACTOR = 1.0
+
+#: ★★★ t47：「按整回合快照续行」时的**下限保护**（秒）。
+#:   为什么需要它：回放间隔来自玩家配置（`combat_replay_interval_seconds`，默认 0.5），
+#:   配成 0 或负数等于让 autoplay 无间隔空转（每 tick 还各打一次 /state），
+#:   那是"把游戏和 mod 一起拖死"的写法，不是"快"。0.05s 只作防呆兜底。
+#:   ★ 上界不在这里：回放间隔永远取 `min(action_interval_seconds, 配置值)`，
+#:     玩家调小 `action_interval_seconds` 仍是否决权最高的一条。
+_MIN_COMBAT_REPLAY_INTERVAL_SECONDS = 0.05
 
 
 def adaptive_tick_interval(

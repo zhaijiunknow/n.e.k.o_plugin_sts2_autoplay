@@ -122,6 +122,36 @@ class STS2RuntimeState:
     # 回合开始取一次计划后整回合复用；每执行一个战斗步（play_card/use_potion/end_turn）自增，
     # 选牌子动作（select_deck_card）不步进；接近回合末尾/耗尽后重查下一回合并归零。
     solver_step_index: int = 0
+    # ★★★ t46：「等待求解器」必须是**可观测的状态**，不能靠日志里那个 `in_combat=None` 去猜。
+    #
+    # 背景（两起实机故障，同一句话"自动玩开着但一张牌不出"）：
+    #   ① 装错 mod（对端没有 /solver/plan 路由）⇒ 每次 0 ms 回 404；
+    #   ② 求解器预算 120 s + 一轮 120 s 补充审计，而客户端 15 s 读超时 ⇒ 每次都超时。
+    #   两起在旧实现里都退化成同一个日志形态：`in_combat=None` + 闸门 `waiting_solver`，
+    #   而"等待"按设计不计死锁/不计过期、也不降级 ⇒ 静默等到玩家自己发现。
+    #
+    # 现在的口径（玩家要求）：
+    #   · `/solver/plan` **不设读超时** —— 求解器算多久就等多久，绝不因为等不及而退级策略
+    #     （退级会让"本来能过的战斗过不了"，这是比卡住更坏的错）。
+    #   · 于是必须有下面这几个字段，把"还在算 / 算完了 / 请求本身失败了"三件事分开：
+    #       computing    —— 请求在飞，正在等（唯一允许无声等待的状态）
+    #       ready        —— 拿到可用计划（in_combat=True 且 search_status 合法）
+    #       waiting_phase—— 拿到了载荷，但 mod 说还没到玩家出牌阶段（正常，继续等）
+    #       failed       —— 请求本身失败（404/连接断/非 200）：等下去**永远不会好**，必须喊出来
+    #       idle         —— 本 tick 没取（不在战斗决策态）
+    solver_status: str = "idle"
+    # 本次等待的起点（time()）；`computing` 期间用它算"已等 N 秒"。
+    solver_wait_started_at: float = 0.0
+    # 最近一次等待的**总耗时**（秒，结束后定格；computing 期间为 0）。
+    solver_last_elapsed_seconds: float = 0.0
+    # 最近一次成功拿到计划的时刻（time()），用于"这份结果有多新"。
+    solver_last_result_at: float = 0.0
+    # 最近一次请求失败的可诊断文本（`类型: 消息`），成功即清空。
+    solver_last_error: str = ""
+    # 计划自报的 search_status 原值（complete / budget_exceeded / boundary_*）。
+    solver_last_search_status: str = ""
+    # 累计"进入等待"的次数（单飞合并会让它小于 HTTP 请求数）：日志里自报，别靠数行。
+    solver_wait_count: int = 0
     # ★★ t20/D9 修复：「派发成功」已被收紧为「mod 回 completed，或局面确实变了」。
     #   还有效的派发在 mod 回 `status="pending"` 且局面指纹未变时**不再推进**
     #   `solver_step_index`（原实现无条件 +1 ⇒ 步骤被空耗 ⇒ 步骤用尽 ⇒ 重取 ⇒

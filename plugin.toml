@@ -4,7 +4,23 @@ connect_timeout_seconds = 5
 request_timeout_seconds = 15
 poll_interval_idle_seconds = 3
 poll_interval_active_seconds = 1
-action_interval_seconds = 1.5
+# 自动玩的 tick 间隔（秒）。★ 这是**基准值**，不是恒定节拍：
+#   loop_runner.adaptive_tick_interval 拿它当**下限**，再用"上次 /solver/plan 的实测耗时"抬上去
+#   （上限 3s，见 _SOLVER_PACING_CAP_SECONDS），避免搜索刚落就又去重算。
+#   实际生效 = min(3.0, max(本值, 上次求解耗时 × 1.0))。
+# 2026-10-25（玩家口径「每次行动的间隔调低，改成1秒先」）：1.5 → 1。
+action_interval_seconds = 1
+# ★★★ 战斗里「按整回合快照续行」时的出牌间隔（秒）。与上面的基准值是两回事：
+#   `/solver/plan` 一次返回**整回合**的出牌顺序（line[0].steps），tick 只按 solver_step_index
+#   逐步执行、**不会重算**（日志 `[sts2_plan] 复用快照 step=k/M`）。这种 tick 与"上次搜索花了多久"
+#   无关，却被 t45 自适应节拍按搜索耗时定价（顶 3s 上限）⇒ 整回合每张牌白等 3 秒。
+#   现在：需要重算的 tick → 走 action_interval_seconds（安全）；纯回放的 tick → 用本值（快）。
+#   生效值 = min(action_interval_seconds, 本值)；上一张牌还是 pending 时会自动退回正常节拍。
+#   0.5 ≈ 实机卡牌动画量级；再小多半只会换来 mod 的 `pending` 与退避重试。想更快就往下调。
+combat_replay_interval_seconds = 0.5
+# ⚠️ 本项在插件代码里**没有任何读取点**（全仓 grep `post_action_delay` 只命中这里）。
+#   真正决定节奏的是上面的 action_interval_seconds（经 adaptive_tick_interval）。
+#   保留只为不破坏既有配置文件形状，改它不会有效果。
 post_action_delay_seconds = 0.5
 autoplay_on_start = false
 character_strategy = "defect"
