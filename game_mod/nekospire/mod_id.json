@@ -3,7 +3,7 @@
   "name": "猫娘尖塔 NekoSpire",
   "author": "ZhaiJiu",
   "description": "猫娘尖塔 NekoSpire：在杀戮尖塔 2 内提供战斗求解/co-op/局面对账，可独立运行（自配 LLM）或连接 NEKO 客户端。",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "has_pck": true,
   "has_dll": true,
   "dependencies": [

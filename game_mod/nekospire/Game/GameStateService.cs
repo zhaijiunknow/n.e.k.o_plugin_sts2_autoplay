@@ -4023,7 +4023,23 @@ internal static class GameStateService
         }
         catch (Exception ex)
         {
-            Log.Warn($"[NekoComm] Failed to build event payload on screen {currentScreen.GetType().FullName}: {ex}");
+            // ★★★ 0.1.7 修复：这里**必须**空安全。
+            //
+            // 实机（2026-10-25 `godot.log`，`C:\STEAM` 那套安装，4 次）：
+            //     Failed: System.NullReferenceException
+            //        at System.Object.GetType()
+            //        at NekoComm.Game.GameStateService.BuildEventPayload(IScreenContext currentScreen)
+            //        at NekoComm.Game.GameStateService.BuildStatePayloadCore()
+            //        at NekoComm.Game.GameActionService.ExecuteEmbarkAsync()
+            // 前一行日志是 `[WARN] [NekoComm] Unhandled screen type , falling back to EVENT`
+            // （类型名是空串 ⇒ `currentScreen == null`）。
+            //
+            // 病理：`IsEventScreen(null)` 会走"静态房间兜底"返回 true，于是进入 try；开局 `embark`
+            // 那一瞬读不到事件 ⇒ 抛异常 ⇒ 掉进本 catch ⇒ **catch 自己又解引用 null** ⇒ 抛出
+            // NRE ⇒ Router 回 HTTP 500，整次 `/action` 的响应被毁掉（本该只是"这一帧没有事件层"）。
+            // 也就是说：一个纯诊断用的日志字符串，把一次可降级的读取变成了硬失败。
+            var screenType = currentScreen?.GetType().FullName ?? "<null>";
+            Log.Warn($"[NekoComm] Failed to build event payload on screen {screenType}: {ex}");
             return null;
         }
     }
