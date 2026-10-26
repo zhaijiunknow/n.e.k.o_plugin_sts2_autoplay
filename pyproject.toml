@@ -1,6 +1,6 @@
 [project]
 name = "sts2_autoplay"
-version = "0.7.8"
+version = "0.7.9"
 dependencies = []
 
 # 插件包内容规则：NEKO 打包器（neko_plugin_cli）读 [tool.neko.build]，**不读** .gitignore。
