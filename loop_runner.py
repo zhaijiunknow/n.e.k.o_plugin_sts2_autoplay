@@ -12,6 +12,75 @@ from .instructions import instruction_summary, normalize_strategy_instruction
 from .snapshot_normalizer import normalize_snapshot
 
 
+def _process_rss_bytes() -> float:
+    """本进程常驻内存（RSS）字节数；拿不到就返回 0.0（绝不许抛）。
+
+    ★ 为什么按这个顺序取：宿主 venv 里**有 psutil**（NEKO 自己就在用），所以优先用它——
+      最稳且跨平台；没有 psutil 时退回纯 ctypes（Windows 的 `GetProcessMemoryInfo` /
+      `K32GetProcessMemoryInfo`，两者都要显式设 `argtypes`/`restype`，否则 64 位下会静默失败
+      —— 实测第一版就是这样拿到 0.0 的），再退回 POSIX 的 `/proc/self/statm`。
+    ★ 全失败返回 0.0：调用方显示成 `rss=0.0MB`，可观测性代码绝不许抛进游玩链路。
+    """
+    import os
+    import sys
+
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        return float(psutil.Process(os.getpid()).memory_info().rss)
+    except Exception:
+        pass
+
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = _PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(_PROCESS_MEMORY_COUNTERS)
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            handle = kernel32.GetCurrentProcess()
+            for getter in (
+                getattr(ctypes.windll.psapi, "GetProcessMemoryInfo", None),
+                getattr(kernel32, "K32GetProcessMemoryInfo", None),
+            ):
+                if getter is None:
+                    continue
+                try:
+                    getter.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESS_MEMORY_COUNTERS), wintypes.DWORD]
+                    getter.restype = wintypes.BOOL
+                    if getter(handle, ctypes.byref(counters), counters.cb):
+                        return float(counters.WorkingSetSize)
+                except Exception:
+                    continue
+            return 0.0
+        with open("/proc/self/statm", "r", encoding="ascii") as fh:
+            pages = int(fh.read().split()[1])
+        return float(pages * os.sysconf("SC_PAGE_SIZE"))
+    except Exception:
+        try:
+            import resource
+
+            return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024.0
+        except Exception:
+            return 0.0
+
+
 class STS2LoopRunner:
     # Mod /events/stream event types that mark a real state change worth re-fetching /state for.
     _RELEVANT_EVENT_TYPES = frozenset({
@@ -29,6 +98,8 @@ class STS2LoopRunner:
         self._service = service
         self._poll_task: asyncio.Task[Any] | Future[Any] | None = None
         self._autoplay_task: asyncio.Task[Any] | Future[Any] | None = None
+        # ★ t52：内存自检任务（每 N 秒一行 `[sts2_mem]`；`memory_report_interval_seconds<=0` 时不起）
+        self._mem_task: asyncio.Task[Any] | Future[Any] | None = None
         self._shutdown = False
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._owner_thread: threading.Thread | None = None
@@ -527,6 +598,25 @@ class STS2LoopRunner:
         ):
             self._ensure_owner_loop()
             self._event_task = self._create_task(self._event_loop(), name="sts2-event-stream")
+        # ★★★ t52：内存自检。玩家反馈"玩尖塔时 NEKO 占用越来越大"，而**增长发生在哪一块**
+        #   只能靠数据回答（宿主是 13 个进程：Electron 壳 + 主 server + 每插件一个宿主进程）。
+        #   本任务每 N 秒打一行 `[sts2_mem]`：本进程 RSS + asyncio 任务数 + gc 对象数 +
+        #   我方容器的长度 ⇒ 一眼分清"是我们在涨"还是"涨在主 server/renderer"。
+        #   ★ 取周期必须防御式：`start_background` 也会被桩服务/旧服务对象调用，
+        #     缺这个 getter 绝不能让"复活刷新通路"这条关键路径抛异常
+        #     （t14/D4 的教训：刷新通路死了只能 reload 插件）。
+        if self._memory_report_interval() > 0 and (
+            self._mem_task is None or self._task_done(self._mem_task)
+        ):
+            self._ensure_owner_loop()
+            self._mem_task = self._create_task(self._memory_report_loop(), name="sts2-mem-report")
+
+    def _memory_report_interval(self) -> float:
+        """内存自检周期（秒）；服务对象没有这个配置读取时就退回 300s。`<=0` = 关闭。"""
+        try:
+            return float(self._service._cfg_memory_report_interval())
+        except Exception:
+            return 300.0
 
     def start_autoplay(self) -> None:
         self._shutdown = False
@@ -1439,7 +1529,7 @@ class STS2LoopRunner:
 
     def stop_background_sync(self) -> None:
         self._shutdown = True
-        for task in (self._autoplay_task, self._poll_task, self._event_task):
+        for task in (self._autoplay_task, self._poll_task, self._event_task, self._mem_task):
             if task is None or task.done():
                 continue
             try:
@@ -1450,7 +1540,79 @@ class STS2LoopRunner:
         self._autoplay_task = None
         self._poll_task = None
         self._event_task = None
+        self._mem_task = None
         self._stop_owner_loop()
+
+    # ── ★★★ t52：内存自检（回答"NEKO 占用为什么越来越大"）──────────────────────────
+    async def _memory_report_loop(self) -> None:
+        """每 `memory_report_interval_seconds` 打一行 `[sts2_mem]`。纯观测，异常一律吞掉。"""
+        try:
+            while not self._shutdown:
+                interval = 300.0
+                try:
+                    interval = float(self._service._cfg_memory_report_interval())
+                except Exception:
+                    interval = 300.0
+                await asyncio.sleep(max(30.0, interval))
+                if self._shutdown:
+                    return
+                try:
+                    self._service.logger.info("[sts2_mem] %s", self._memory_report_line())
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    def _memory_report_line(self) -> str:
+        """拼一行内存快照：**本进程 RSS** + asyncio 任务数 + gc 对象数 + **我自己容器的长度**。
+
+        ★ 为什么要有"我方容器长度"：玩家反馈的是"越玩越大"，而宿主里有 13 个进程
+          （Electron 壳 / 主 server / 每个插件一个宿主进程）。只有把"我方结构有没有在涨"
+          和"RSS 有没有在涨"放在同一行，才能判断增长发生在哪一侧 ——
+          否则只能靠猜（本项目历史上靠猜归因的代价很高）。
+        ★ 全程 try/except：可观测性代码绝不许影响游玩链路（与 `_hb_log` 同族纪律）。
+        """
+        parts: list[str] = []
+        try:
+            parts.append("rss=%.1fMB" % (_process_rss_bytes() / (1024 * 1024)))
+        except Exception:
+            parts.append("rss=?")
+        try:
+            import gc
+
+            parts.append("gc_objs=%d" % len(gc.get_objects()))
+        except Exception:
+            parts.append("gc_objs=?")
+        try:
+            loop = asyncio.get_running_loop()
+            parts.append("tasks=%d" % len(asyncio.all_tasks(loop)))
+        except Exception:
+            # 不在事件循环里（例如单测直接调用）也要保留这个字段，否则解析方会以为漏了。
+            parts.append("tasks=?")
+        try:
+            state = self._service._state
+            parts.append(
+                "recent{act=%d,delta=%d,dec=%d,ops=%d,deliv=%d}"
+                % (
+                    len(state.recent_action_frames),
+                    len(state.recent_continuous_deltas),
+                    len(state.recent_decision_memory),
+                    len(state.recent_companion_player_ops),
+                    len(state.recent_deliveries),
+                )
+            )
+            snapshot = state.snapshot if isinstance(state.snapshot, dict) else {}
+            parts.append("snapshot_keys=%d" % len(snapshot))
+            parts.append("raw_state_keys=%d" % len(state.raw_state if isinstance(state.raw_state, dict) else {}))
+            cached = self._solver_plan_cached
+            steps = len(_current_turn_steps(cached) or []) if isinstance(cached, dict) else 0
+            parts.append("plan_steps=%d" % steps)
+            parts.append("solver_status=%s" % (getattr(state, "solver_status", "") or "-"))
+        except Exception:
+            pass
+        return " ".join(parts)
 
 
 def _combat_deadlock_signature(snapshot: dict[str, Any]) -> str:

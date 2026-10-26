@@ -4,6 +4,14 @@ connect_timeout_seconds = 5
 request_timeout_seconds = 15
 poll_interval_idle_seconds = 3
 poll_interval_active_seconds = 1
+# ★★★ 内存自检周期（秒）。<=0 = 关掉。每 N 秒打一行 `[sts2_mem]`：
+#   rss=插件宿主进程的常驻内存 / tasks=asyncio 任务数 / gc_objs=gc 对象数 /
+#   recent{...}=我方几个环形队列的长度 / snapshot_keys / plan_steps / solver_status。
+#   为什么要有：玩家反馈"玩尖塔时 NEKO 占用越来越大"，而 NEKO 是 13 个进程
+#   （Electron 壳 + 主 server + 每个插件一个宿主进程 + renderer/gpu）——
+#   只有把"本进程 RSS"和"我方容器长度"放进同一条时间序列，才能判断是我们在涨，
+#   还是主 server / renderer 在涨（后者与插件无关）。排查时可临时调到 60。
+memory_report_interval_seconds = 300
 # 自动玩的 tick 间隔（秒）。★ 这是**基准值**，不是恒定节拍：
 #   loop_runner.adaptive_tick_interval 拿它当**下限**，再用"上次 /solver/plan 的实测耗时"抬上去
 #   （上限 3s，见 _SOLVER_PACING_CAP_SECONDS），避免搜索刚落就又去重算。

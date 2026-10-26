@@ -2017,6 +2017,20 @@ class STS2AutoplayService:
     def _cfg_action_interval(self) -> float:
         return float(self._cfg.get("action_interval_seconds", 1.5) or 1.5)
 
+    def _cfg_memory_report_interval(self) -> float:
+        """内存自检的周期（秒，t52）。`<=0` = 关掉自检。
+
+        ★ 为什么需要它：玩家反馈"玩尖塔时 NEKO 占用越来越大"，而 NEKO 是 13 个进程
+          （Electron 壳 / 主 server / 每个插件一个宿主进程 / 多个 renderer）。没有一条
+          "本进程 RSS + 我方容器长度"的时间序列，就只能靠猜是哪一块在涨。
+        ★ 默认 300s：5 分钟一行的量级既可看出斜率，又不会污染日志（对照：插件平时
+          0.5–1.5 行/秒）。
+        """
+        try:
+            return float(self._cfg.get("memory_report_interval_seconds", 300))
+        except (TypeError, ValueError):
+            return 300.0
+
     def _cfg_combat_replay_interval(self) -> float:
         """战斗里**按整回合快照续行**时的出牌间隔（秒，t47）。
 
