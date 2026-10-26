@@ -1751,11 +1751,12 @@ class STS2AutoplayService:
             return True
         return bool(getattr(self, "_coop_room_open", False))
 
-    def set_danmaku_enabled(self, enabled: bool) -> dict[str, Any]:
+    def set_danmaku_enabled(self, enabled: bool, *, sync_mod: bool = True) -> dict[str, Any]:
         """游戏内弹幕总开关（插件侧真闸门）。
 
-        关闭后 _push_catgirl 直接早退：既不生成 LLM 点评，也不拉头像，更不会 POST /danmaku。
-        同时把 mod 侧的 /danmaku 收口（danmaku_push_enabled）也一起写掉并清屏，避免重连窗口期
+        关闭后 _push_catgirl 不再 POST /danmaku：**改走宿主点评**（`push_message`，见 t51 的
+        `_push_host_commentary`）或直接静音，取决于 `host_commentary_when_danmaku_off`。
+        同时把 mod 侧的 /danmaku 收口（danmaku_push_enabled）写掉并清屏，避免重连窗口期
         或其它本地调用者把弹幕漏出来。与 catgirl_llm_enabled 无关——后者只切换点评文本来源。
         """
         self._danmaku_enabled = bool(enabled)
@@ -1765,6 +1766,13 @@ class STS2AutoplayService:
         self._state.last_push_scene_key = ""
         self._state.last_push_reason = ""
         self._emit_status()
+        # ★★★ t51：让 docstring 那句承诺成真 —— 把开关同步给 mod（`danmaku_push_enabled`
+        #   + 关闭时清屏）。此前只有 UI 入口（neko_interface）会做，于是"模式策略自动关弹幕"
+        #   只关了一半：mod 侧仍收弹幕、屏幕上的旧弹幕也不清。
+        #   `sync_mod=False`：调用方自己会 `await sync_danmaku_gate_to_mod()` 并拿结果时用，
+        #   避免同一次开关写两遍 mod。
+        if sync_mod:
+            self._schedule_mod_danmaku_gate_sync()
         message = (
             self.t("danmaku.enabled", default="已打开游戏内猫娘弹幕。")
             if self._danmaku_enabled
@@ -1800,6 +1808,27 @@ class STS2AutoplayService:
             except Exception as exc:
                 self.logger.debug(f"[sts2] clear danmaku overlay failed (non-fatal): {exc}")
         return result
+
+    def _schedule_mod_danmaku_gate_sync(self) -> None:
+        """fire-and-forget：把插件侧的开关同步到 mod（`danmaku_push_enabled` + 关闭时清屏）。
+
+        ★ 为什么要补这一步（t51）：`set_danmaku_enabled` 的 docstring 一直写着"同时把 mod 侧的
+          `/danmaku` 收口也一起写掉并清屏"，但函数体里**没有**做 —— 真正写 mod 的
+          `sync_danmaku_gate_to_mod()` 只被 UI 入口（`neko_interface.py`）调用。
+          后果：模式策略自动关弹幕时（autoplay 启动那一下），mod 侧的收口与屏幕上残留的旧弹幕
+          都不动 ⇒ 与注释承诺不一致，观感是"关了还看得见老弹幕 / 开了没反应"。
+        ★ 失败一律吞掉：这是纵深防御，插件侧的 `_push_catgirl` 闸门才是主闸。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # 没有运行中的循环（启动/收尾阶段）：跳过同步，等下一次出口动作
+        try:
+            task = loop.create_task(self.sync_danmaku_gate_to_mod())
+            # fire-and-forget 必须取一次异常，否则 asyncio 会报 "never retrieved"。
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        except Exception:
+            pass
 
     # ---- 对话式地图协作（sts2_set_route）-----------------------------------------------
 
@@ -3226,6 +3255,68 @@ class STS2AutoplayService:
             # 无论复盘成功与否都要恢复 —— 卡在"暂停"上等于猫娘永久停手。
             self._resume_after_reflection()
 
+    def _is_host_commentary_enabled(self) -> bool:
+        """弹幕关着时，是否把点评改走宿主（`push_message(ai_behavior="respond")`）。
+
+        ★ 玩家口径（2026-10-26）：「关闭弹幕，但是可以用 push_message 让猫娘点评一下」。
+        ★ 默认 **True**：与既有的「尖塔速报」（`host_digest_enabled` 默认 True）同一个取向 ——
+          插件本来就会在代打时给本体发消息让它开口；这里只是把**本回合的想法**也让它说。
+        ★ 注意它**只在弹幕关着时**生效（见 `_push_catgirl`）：弹幕开着还推宿主 = 一句话说两遍。
+        """
+        return bool(self._cfg.get("host_commentary_when_danmaku_off", True))
+
+    def _host_commentary_min_interval(self) -> float:
+        """`_is_host_commentary_enabled` 那条通道的最小间隔（秒），配置可覆盖，下限 5s。"""
+        try:
+            value = float(self._cfg.get("host_commentary_min_interval_seconds", self.HOST_COMMENTARY_MIN_INTERVAL_SECONDS))
+        except (TypeError, ValueError):
+            return self.HOST_COMMENTARY_MIN_INTERVAL_SECONDS
+        return max(5.0, value)
+
+    def _push_host_commentary(self, text: str, *, scene_key: str = "") -> bool:
+        """把一段**点评**改走宿主：`push_message` → 猫娘在聊天里用自己的口吻说。
+
+        与 `_push_proactive_to_host` 的关系：那个是**发送出口**（visibility=[] / respond /
+        ephemeral，三个开关的理由都写在它的注释里），本方法是**点评这条线的节流壳**。
+
+        三道闸（缺一就会变成刷屏或重复）：
+          ① 开关：`host_commentary_when_danmaku_off`；
+          ② 去重：同一个场景键只讲一次（`last_host_commentary_key`）；
+          ③ 节流：距上次 ≥ `host_commentary_min_interval_seconds`（默认 45s）。
+        返回 True 表示真的推了（供测试与日志核对）。
+        """
+        body = str(text or "").strip()
+        if not body or not self._is_host_commentary_enabled():
+            return False
+        key = str(scene_key or body[:24])
+        if key and key == getattr(self._state, "last_host_commentary_key", ""):
+            return False
+        now = time()
+        last = float(getattr(self._state, "last_host_commentary_at", 0.0) or 0.0)
+        interval = self._host_commentary_min_interval()
+        if last > 0.0 and (now - last) < interval:
+            self.logger.info(
+                "[sts2_catgirl_host] throttled %.1fs < %.0fs key=%s（弹幕关着，宿主点评按间隔走）",
+                now - last,
+                interval,
+                key[:40],
+            )
+            return False
+        self._state.last_host_commentary_key = key
+        self._state.last_host_commentary_at = now
+        self.logger.info(
+            "[sts2_catgirl_host] pushed commentary to host（danmaku off）chars=%s key=%s",
+            len(body),
+            key[:40],
+        )
+        self._push_proactive_to_host(
+            "（弹幕关着，所以这句直接在聊天里说给玩家听，用你自己的口吻，别念稿、一两句就够）"
+            + body,
+            kind="autoplay_commentary",
+            priority=4,
+        )
+        return True
+
     def _push_proactive_to_host(self, text: str, *, kind: str, priority: int = 5) -> None:
         """把一段内容**悄悄**交给本体，让它自己主动开口讲。
 
@@ -3298,7 +3389,18 @@ class STS2AutoplayService:
     # ---- 弹幕双线参数 -------------------------------------------------------------------
     # 高风险判据：血比低于此值，或敌人这一下的意图总伤害 >= 当前生命的一半。
     HIGH_RISK_HP_RATIO = 0.5
-    # 给本体的局势速报节流（秒）。**每次推送都会让本体开一次口**（ai_behavior="respond"），
+    #: ★★★ t51：弹幕关着时，「把点评改走宿主（猫娘在聊天里说）」的节流（秒）。
+    #:
+    #: 玩家口径（2026-10-26）：「关闭弹幕，但是可以用 push_message 让猫娘点评一下」。
+    #: 游戏内弹幕在 autoplay 期间是**故意关掉的**（2026-10-19 指令：代打时没人盯屏幕，
+    #: 弹幕刷出去没收益还挤占 LLM 与日志）；但"没人看弹幕"不等于"不用说话" ——
+    #: 聊天窗口里的猫娘正好是那个该说话的地方，所以换一条通道，而不是把弹幕闸门整个打开。
+    #:
+    #: 为什么比弹幕节流得更狠（45s vs 10s 的 LLM 间隔）：`push_message` 带
+    #: `ai_behavior="respond"`，每推一次都让本体**立刻开一次口** = 一次完整 AI 回合（有 token 成本）。
+    #: 45 秒 ≈ 一个回合内最多说一句，既不冷场也不会变成刷屏。
+    HOST_COMMENTARY_MIN_INTERVAL_SECONDS = 45.0
+    # 给本体的局势速报（秒）。**每次推送都会让本体开一次口**（ai_behavior="respond"），
     # 所以这里不能像"只喂上下文"时那么密 —— 25 秒会让它一分钟讲两三次，成了刷屏。
     HOST_DIGEST_MIN_INTERVAL_SECONDS = 75.0
     # 拿不到可执行动作持续多久才算"卡住"（要记日志 + 告诉本体）。跨屏切换时短暂拿不到动作是正常的：
@@ -3695,11 +3797,17 @@ class STS2AutoplayService:
         - 否则推启发式文本（保持即时性，避免无弹幕）
         """
         kind = str(payload.get("summary_kind") or "")
-        # 弹幕总闸门：关掉时连 LLM 生成与头像 HTTP 都不做（省一次 N.E.K.O 主 server 请求）。
+        # 弹幕总闸门：关掉时连 LLM 生成与头像 HTTP 都不做（省一次 N.E.K.O. 主 server 请求）。
         # _catgirl_llm_enabled=false 只是把 LLM 点评降级为启发式文本，不是关弹幕——见 danmaku_enabled。
-        if not self._danmaku_enabled:
+        # ★★★ t51：但"弹幕关着 + 开了宿主点评"是**要说话**的组合 ⇒ 必须继续生成文本，
+        #   否则聊天里那句也无从谈起（`_push_catgirl` 会把它改走 push_message）。
+        if not self._danmaku_enabled and not self._is_host_commentary_enabled():
             self.logger.info("[sts2_catgirl_llm] suppressed danmaku disabled kind=%s screen=%s", kind, payload.get("screen"))
             return
+        if not self._danmaku_enabled:
+            self.logger.info(
+                "[sts2_catgirl_llm] danmaku off ⇒ 改走宿主点评 kind=%s screen=%s", kind, payload.get("screen")
+            )
         # 弹幕高密度：不再用 should_comment / LLM 生成间隔节流拦截。防刷屏统一交给外层
         # _deliver_catgirl_sync 里的 _should_deliver_sync（指纹+场景/间隔去重）。
         enabled = self._catgirl_llm_enabled
@@ -3773,8 +3881,24 @@ class STS2AutoplayService:
         放在这一处即可覆盖全部来源。
 
         ``fetch_avatar=False``：只用**已缓存**的头像，绝不为它等 HTTP —— 即时短句靠这个保住延迟。
+
+        ★★★ t51：弹幕关着时**不静音，换通道**。
+
+            玩家口径（2026-10-26）：「关闭弹幕，但是可以用 push_message 让猫娘点评一下」。
+            游戏内弹幕在 autoplay 期间是**故意关的**（2026-10-19 指令：代打时没人盯屏幕，
+            弹幕刷出去没收益还挤占 LLM 与日志）；但"没人盯弹幕"不等于"不用说话"——
+            这一支把同一段点评交回宿主（`push_message` + `ai_behavior="respond"`），
+            由猫娘在聊天窗口用自己的口吻说。
+
+            ★ 只在**弹幕关着**时走这条路：开着弹幕还推宿主 = 同一句点评说两遍。
+            ★ 也正因为这一支不需要头像，`return` 必须在"取头像"之前（否则为一条
+              发不出去的弹幕白等一次最长 3 秒的 HTTP）。
         """
         if not self._danmaku_enabled:
+            self._push_host_commentary(
+                text,
+                scene_key=str(getattr(self._state, "last_push_scene_key", "") or ""),
+            )
             return
         client = self._client
         if client is None or not text:

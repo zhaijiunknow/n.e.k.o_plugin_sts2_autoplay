@@ -36,6 +36,17 @@ neko_commentary_probability = 0.65
 companion_push_probability = 0.5
 neko_commentary_min_interval_seconds = 4
 neko_critical_commentary_always = true
+# ★★★ 弹幕关着时，点评改走宿主（`push_message`，猫娘在聊天窗口里用自己的口吻说）。
+#   玩家口径（2026-10-26）：「关闭弹幕，但是可以用 push_message 让猫娘点评一下」。
+#   背景：游戏内弹幕在 autoplay 期间是**故意关掉**的（2026-10-19 指令：代打时没人盯屏幕，
+#   弹幕刷出去没收益还挤占 LLM 与日志 —— 优先级 coop>autoplay>陪玩，见 danmaku_enabled）。
+#   但"没人盯弹幕"不等于"不用说话"：这条开关让同一段点评换一条通道说出去。
+#   · 只在**弹幕关着**时生效（弹幕开着还推宿主 = 同一句说两遍）；
+#   · 默认 true（与「尖塔速报」host_digest_enabled 同一个取向）；
+#   · 每次推送都会让本体**立刻开一次口**（一次完整 AI 回合，有 token 成本）⇒ 默认 45 秒一次。
+#   设 false = 回到"代打全程静音"的老行为。
+host_commentary_when_danmaku_off = true
+host_commentary_min_interval_seconds = 45
 neko_guidance_max_queue = 50
 neko_auto_low_hp_threshold = 0.3
 neko_auto_safe_hp_threshold = 0.5

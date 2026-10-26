@@ -119,8 +119,12 @@ class STS2NekoInterface:
         return result
 
     async def set_danmaku(self, enabled: bool) -> dict[str, Any]:
-        """游戏内弹幕总开关（关掉后插件不再推 /danmaku，自动游玩不受影响）。"""
-        result = self._service.set_danmaku_enabled(enabled)
+        """游戏内弹幕总开关（关掉后插件不再推 /danmaku，自动游玩不受影响）。
+
+        ★ t51：`sync_mod=False` —— 这里自己 `await` 同步并把结果（`mod_gate`）回报给玩家，
+          所以让 service 别再排一次 fire-and-forget 的同步（否则同一次开关写两遍 mod）。
+        """
+        result = self._service.set_danmaku_enabled(enabled, sync_mod=False)
         gate = await self._service.sync_danmaku_gate_to_mod()
         result["mod_gate"] = gate
         if not enabled:

@@ -732,9 +732,17 @@ def test_catgirl_llm_enabled_but_unavailable_falls_back_without_going_silent(mon
 
 @pytest.mark.unit
 def test_danmaku_disabled_blocks_llm_avatar_and_post_entirely() -> None:
-    """`danmaku_enabled=False` 是**真闸门**：连 LLM 生成与头像 HTTP 都不发生。"""
+    """`danmaku_enabled=False` 是**真闸门**：连 LLM 生成与头像 HTTP 都不发生。
+
+    ★ t51 补充：0.7.9 起还有一条**替代通道** —— 弹幕关着时若开着
+      `host_commentary_when_danmaku_off`（默认 true），同一段点评会改走宿主 `push_message`
+      让猫娘在聊天里说（见 `tests/test_t51_host_commentary.py`）。
+      本用例钉的是**"两路都关"的老契约**，所以显式把那条通道关掉；
+      "弹幕关 + 宿主开 ⇒ 生成但不 POST /danmaku"由 t51 的用例覆盖。
+    """
     service, client = _service()
     service._danmaku_enabled = False
+    service._cfg["host_commentary_when_danmaku_off"] = False
 
     llm_calls: list[dict[str, Any]] = []
 

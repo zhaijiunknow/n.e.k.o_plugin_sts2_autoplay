@@ -219,6 +219,13 @@ class STS2RuntimeState:
     last_host_digest_at: float = 0.0
     # 最近一次交给本体的局势速报对应的场景键（同一局面只讲一次）。
     last_host_digest_key: str = ""
+    # ★★★ t51：「弹幕关着 ⇒ 点评改走宿主（猫娘在聊天里说）」的记账。
+    #   与上面的 `last_host_digest_*` **刻意分开**：速报是"局势播报"，点评是"这一手的想法"，
+    #   两者各自节流，不能互相顶掉（否则一边讲了另一边就哑）。
+    #   为什么必须节流：`push_message(ai_behavior="respond")` 每推一次都会让本体**立刻开一次口**
+    #   （一次完整 AI 回合，有 token 成本）—— 弹幕是"免费刷屏"，聊天不是。
+    last_host_commentary_at: float = 0.0
+    last_host_commentary_key: str = ""
     # 本局生命轨迹（每次刷新追加一条），局末总结时用来做"哪里损血"的归因。
     hp_trail: list[dict[str, Any]] = field(default_factory=list)
     hp_trail_run_id: str = ""
