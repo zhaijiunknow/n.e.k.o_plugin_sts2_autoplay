@@ -42,6 +42,19 @@ def _src() -> str:
     return _GS.read_bytes().decode("utf-8")
 
 
+def _src_action() -> str:
+    """读 `GameActionService.cs`；仓库根找不到时**在测试内**跳过（与 `_src()` 同口径）。
+
+    ★ 为什么必须补这个入口：本组「水晶球 / 启明」不变量原先直接 `_GA.read_bytes()`。
+      而 `_GA` 在"只装了插件产物"的地方（例如把 tests 复制进 NEKO 的 plugin/plugins 下跑）
+      是 `None` ⇒ `AttributeError: 'NoneType' object has no attribute 'read_bytes'`，
+      一条**假红**。同文件其它用例走 `_src()` 会正常 skip，两套口径不该并存。
+    """
+    if _GA is None:  # pragma: no cover
+        pytest.skip("找不到 game_mod/nekospire（只装了插件产物）⇒ 无法核对 mod 源码")
+    return _GA.read_bytes().decode("utf-8")
+
+
 # ======================================================================================
 # 不变量 1：两处守卫必须**同源**（队长 ③ 的核心约束）
 # ======================================================================================
@@ -147,7 +160,10 @@ def test_divine_progress_wait_watches_real_progress_not_child_count() -> None:
        我们不动节点 ⇒ 那条路对我不适用）⇒ 即使真揭开了也会被判 `pending`（假阴性）。
     ⇒ 本测试钉住：必须观察 DivinationCount 与 IsHidden。
     """
-    ga = _GA.read_bytes().decode("utf-8")
+    # ★ 与同文件其它用例一致：找不到 mod 源码就 skip，不要 AttributeError。
+    #   只装了插件产物（例如把 tests 目录复制进 NEKO 的 plugin/plugins 下跑）时，
+    #   `_REPO_ROOT` 为 None ⇒ `_GA` 为 None，直接 `.read_bytes()` 会变成一条假红。
+    ga = _src_action()
     m = re.search(r"private static async Task<bool> WaitForCrystalSphereProgressAsync\((.*?)\n    \}", ga, re.S)
     assert m, "★ 找不到 WaitForCrystalSphereProgressAsync"
     body = m.group(1)
@@ -172,7 +188,10 @@ def test_crystal_sphere_candidates_use_row_major_like_cells() -> None:
       不能让插件靠顺序猜（否则 candidates[i] 与 option_index=i 会错位）。
     """
     s = _src()
-    ga = _GA.read_bytes().decode("utf-8")
+    # ★ 与同文件其它用例一致：找不到 mod 源码就 skip，不要 AttributeError。
+    #   只装了插件产物（例如把 tests 目录复制进 NEKO 的 plugin/plugins 下跑）时，
+    #   `_REPO_ROOT` 为 None ⇒ `_GA` 为 None，直接 `.read_bytes()` 会变成一条假红。
+    ga = _src_action()
     assert "candidates.Add(new CrystalSphereCellPayload" in s, "★ candidates 必须实际收集"
     assert "clicked=(" in ga, (
         "★★ mod 必须报出被点格子的真实坐标（序号↔坐标的权威映射），"
@@ -230,7 +249,10 @@ def test_divine_action_registered_in_both_places() -> None:
     要么插件发了却被判 `invalid_action`（409）。
     """
     s = _src()
-    ga = _GA.read_bytes().decode("utf-8")
+    # ★ 与同文件其它用例一致：找不到 mod 源码就 skip，不要 AttributeError。
+    #   只装了插件产物（例如把 tests 目录复制进 NEKO 的 plugin/plugins 下跑）时，
+    #   `_REPO_ROOT` 为 None ⇒ `_GA` 为 None，直接 `.read_bytes()` 会变成一条假红。
+    ga = _src_action()
     assert 'names.Add("divine_crystal_sphere")' in s, "★ 可用动作清单里必须加"
     assert '"divine_crystal_sphere" => ExecuteDivineCrystalSphereAsync(request)' in ga, (
         "★ 处理表里必须加"
@@ -250,7 +272,10 @@ def test_divine_uses_official_forceclick_not_raw_signal() -> None:
         `callvirt ForceClick` + `call Task.Delay`。
     ⇒ 必须用 `ForceClick()`。这条测试把该结论钉死在源码不变量上。
     """
-    ga = _GA.read_bytes().decode("utf-8")
+    # ★ 与同文件其它用例一致：找不到 mod 源码就 skip，不要 AttributeError。
+    #   只装了插件产物（例如把 tests 目录复制进 NEKO 的 plugin/plugins 下跑）时，
+    #   `_REPO_ROOT` 为 None ⇒ `_GA` 为 None，直接 `.read_bytes()` 会变成一条假红。
+    ga = _src_action()
     assert "target.ForceClick();" in ga, "★★ 必须调 ForceClick（官方同款两步点击）"
     # 不许再出现"只发信号"那行（它已被证明无效）
     assert "target.EmitSignal(NClickableControl.SignalName.Released)" not in ga, (
