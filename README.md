@@ -141,6 +141,8 @@
 
 **档位会同步给 mod**（`POST /config {coop_control_mode: auto|advise|hold}`），因为 mod 有自己的自动玩驱动：只停插件等于没停。映射为 `program→auto`、`advise→advise`、`standby→hold`。与地图策略一样，这个同步只在**插件附着**时才有意义（见上文的租约判定）；插件不在时 mod 一律自己跑。
 
+**游戏没开也能切档（v0.7.11 起）。** 档位/游玩模式/陪玩开关都属于插件**本地偏好**，切换后只是"尽力刷新一次局面"：刷新失败返回 `refreshed: false` 并打一条 `[sts2_entry_refresh_skipped]`，设置本身照样生效。此前"停手 / 陪玩"这两个入口在 mod 连不上时会把 `Route not found` 抛到 NEKO 的入口兜底，变成一条 `Unexpected STS2 plugin entry failure` 红字（而玩家看到的却是"没生效"）。
+
 ## 游玩模式（认真 / 捣蛋 / 笨蛋）
 
 和"控制档位"是两件不同的事：控制档位决定**谁来拍板**，游玩模式决定**拍得多不认真**。
@@ -208,6 +210,43 @@
 
 1. 在 NEKO 里启用猫爪 + 本插件。插件连接时会通过 `POST /config` 关掉 Mod 自己的 LLM/弹幕，把解说交给 NEKO 侧猫娘。
 2. 用插件的 `sts2_start_autoplay` 等入口控制自动玩，`sts2_open_coop_room` 打开 co-op 房间。
+
+### 更新/安装插件失败："plugin package cannot be installed safely"（v0.7.11 起）
+
+**症状**：在 NEKO 市场里点更新，等一会儿失败；`logs\N.E.K.O_Plugin_<日期>.log` 里有：
+
+```text
+market_install_task outcome=failed ... error_code=install_failed
+    message=plugin package cannot be installed safely
+InstallSourceManager.mark_removed: builtin channel is locked (directory=sts2_autoplay)
+delete_plugin: failed to update install source for plugin_dir=...\resources\bin\plugin\plugins\sts2_autoplay:
+    ('BUILTIN_CHANNEL_LOCKED', 'builtin plugin sts2_autoplay cannot be soft-deleted')
+```
+
+**原因（实测，2026-10-26）**：部分 NEKO 发行构建把本插件**内置打包**进了
+`<NEKO安装目录>\resources\bin\plugin\plugins\sts2_autoplay`。内置渠道是**硬锁**的
+（`InstallSourceManager.mark_removed` 直接拒绝 `BUILTIN_CHANNEL_LOCKED`），而"从市场装新版"
+等于"替换这个内置副本"——该链路在那些构建上走不通，于是市场每次都报
+`PLUGIN_INSTALL_BLOCKED`。**包本身没问题**：同一份 `.neko-plugin`（sha256 校验通过）
+换一个不含内置副本的构建，26 秒就装好了。
+
+**怎么绕过去**：
+
+1. **换 NEKO 构建**（首选）：内置插件清单里**不含** `sts2_autoplay` 的构建（如
+   `N.E.K.O_0.0.0-2026102x` 之后的版本，内置 12 个插件）可以直接从市场安装/更新。
+2. **手动删掉内置副本**：退出 NEKO → 删除
+   `<NEKO安装目录>\resources\bin\plugin\plugins\sts2_autoplay` → 重启 NEKO → 再从市场安装。
+3. 若报 `error_code=download_failed`（`category=timeout` / `connection_error`），那是
+   从 GitHub Release 下载资产失败（网络/代理），换网络或挂代理重试即可 —— 与插件无关。
+
+**怎么确认装的是哪一版**：从 v0.7.11 起，启动行会打**读自 `plugin.toml`** 的真实版本：
+
+```text
+[sts2_code_version] version=0.7.11
+```
+
+（v0.7.10 及更早这里是写死的旧代号 `20260521_companion_eval_debug`，看不出真实版本 —— 这也是
+"玩家以为更新了、其实还在跑内置旧副本"当初那么难确认的原因。）
 
 
 # Mod 部分（C# · 游戏内 Godot Mod）
