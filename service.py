@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from hashlib import sha1
+from pathlib import Path
 from random import Random, random
 from time import time
 from typing import Any, Callable
@@ -45,6 +46,39 @@ from .transport_client import STS2ActionRejected, STS2TransportClient, STS2Trans
 # 「当前游戏信息状态」面板：状态推送最小间隔（防刷爆 SSE 有界队列）/ 心跳间隔（空闲时也定期刷新）
 STATUS_PUSH_MIN_INTERVAL = 2.0
 STATUS_PUSH_HEARTBEAT = 5.0
+
+#: `plugin.toml` 里读不到版本时的兜底标记（绝不假装知道版本）。
+PLUGIN_VERSION_UNKNOWN = "unknown"
+
+
+def _read_plugin_version(plugin_toml: Path | None = None) -> str:
+    """读本插件**自己**的版本号，供启动行 `[sts2_code_version]` 使用。
+
+    ★ t54 为什么必须有这个函数（缺陷出处）：这一行此前是**写死的字符串**
+      `20260521_companion_eval_debug`（一个日期式的旧代号，永远不变）。于是 2026-10-26
+      给玩家排障时，日志里**根本看不出他跑的是 0.7.6 / 0.7.7 / 0.7.8 中的哪一个** ——
+      只能靠"日志里有没有某个标签"（`[sts2_solver_wait]` / `[sts2_mem]`）去反推，
+      代价是整整一轮误判：他"更新成功"之后其实还停在旧内置副本上，而我们花了很久才确认。
+
+    刻意**不用 tomllib**（Python 3.11+ 才有；NEKO 各发行构建自带的解释器版本不一），
+    也刻意不用完整 TOML 解析：只认 `plugin.toml` 顶层第一个 `version = "..."`。
+    读失败一律返回 :data:`PLUGIN_VERSION_UNKNOWN`，绝不抛（启动行不许影响启动）。
+    """
+    path = plugin_toml if plugin_toml is not None else Path(__file__).with_name("plugin.toml")
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() != "version":
+                continue
+            version = value.strip().strip('"').strip("'")
+            if version:
+                return version
+    except Exception:
+        return PLUGIN_VERSION_UNKNOWN
+    return PLUGIN_VERSION_UNKNOWN
 
 
 
@@ -119,7 +153,9 @@ class STS2AutoplayService:
 
     async def startup(self, cfg: dict[str, Any]) -> dict[str, Any]:
         try:
-            self.logger.info("[sts2_code_version] 20260521_companion_eval_debug")
+            # ★ t54：报**真实**版本（读 plugin.toml），不再打写死的旧代号。
+            #   排障第一句话就是"你跑的是哪一版"，此前这一行给的是无效信息。
+            self.logger.info("[sts2_code_version] version=%s", _read_plugin_version())
         except Exception:
             pass
         self._cfg = dict(cfg)
