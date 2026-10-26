@@ -55,15 +55,23 @@ class STS2NekoInterface:
     async def _refresh_if_connected(self) -> bool:
         """尽力刷新一次快照；连不上 mod 就跳过。
 
-        档位与游玩模式都是**插件本地的偏好**——玩家完全可能先设好再开游戏。若因为
-        游戏没开就连带把整个切换判为失败，NEKO 会得到一个报错，而设置其实早就生效了。
-        所以这里吞掉连接错误，并在返回值里如实说明 refresed 与否。
+        档位、游玩模式、停手、陪伴模式都是**插件本地的偏好**——玩家完全可能先设好再开游戏。
+        若因为游戏没开就连带把整个切换判为失败，NEKO 会得到一个报错，而设置其实早就生效了。
+        所以这里吞掉连接错误，并在返回值里如实说明 refreshed 与否。
+
+        ★ t54：失败**不静默**——打一条 `[sts2_entry_refresh_skipped]`。
+        此前这里只有 debug 级，于是"设置了但没刷到局面"在玩家日志里完全不可见，
+        玩家只能看到界面不更新、再去猜是不是没生效。
         """
         try:
             await self._service.refresh_state(trigger_sync=True)
             return True
         except Exception as exc:
-            self._service.logger.debug(f"[sts2] refresh after a local setting change skipped (non-fatal): {exc}")
+            self._service.logger.info(
+                "[sts2_entry_refresh_skipped] 本地设置已生效，但刷新局面失败（多半是游戏没开 / mod 未连上）：%s: %s",
+                type(exc).__name__,
+                exc,
+            )
             return False
 
     async def set_control_mode(self, mode: str) -> dict[str, Any]:
@@ -100,7 +108,13 @@ class STS2NekoInterface:
         mode_info = self._service.set_standby(standby)
         # standby 也要同步给 mod：只停插件等于没停，mod 有自己的自动玩驱动。
         sync = await self._service.sync_control_mode_to_mod()
-        await self._service.refresh_state(trigger_sync=True)
+        # ★★★ t54：「停手 / 继续」是**插件本地状态**，不许依赖游戏可达。
+        #   这里是 `_refresh_if_connected()` 而不是 `refresh_state()`：玩家在游戏没开（或 mod 版本
+        #   不匹配、路由 404）时按下停手，档位**必须**生效；否则 `tick()` 抛出的
+        #   `STS2ActionRejected: Route not found` 会一路冒到 `__init__._run_entry`，
+        #   变成一条 `Unexpected STS2 plugin entry failure` 红字，而玩家看到的却是"没切成功"。
+        #   实测出处：玩家 2026-10-26 16:00:03 的 `set_companion_mode` 就是这样炸的。
+        refreshed = await self._refresh_if_connected()
         mode_label = "standby" if self._service._state.standby else "active"
         message = self.t("neko.standby.changed", default="已切换到 {mode_label} 模式。", mode_label=mode_label)
         return {
@@ -110,12 +124,16 @@ class STS2NekoInterface:
             "standby": self._service._state.standby,
             "mode": mode_info,
             "mod_sync": sync,
+            "refreshed": refreshed,
         }
 
     async def set_companion_mode(self, enabled: bool) -> dict[str, Any]:
         result = self._service.set_companion_mode(enabled)
         if enabled:
-            await self._service.refresh_state(trigger_sync=True)
+            # ★★★ t54：与 `set_standby` 同理 —— 陪伴模式是本地偏好，开着游戏没开着也得能切。
+            #   返回值里带 `refreshed`，让"开了但没连上 mod"与"开了且刷到局面"在数据上可区分
+            #   （同 `set_control_mode` / `set_play_style` / `set_instance` 的口径）。
+            result["refreshed"] = await self._refresh_if_connected()
         return result
 
     async def set_danmaku(self, enabled: bool) -> dict[str, Any]:
