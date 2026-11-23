@@ -1,7 +1,8 @@
 // Seam adapter between the N.E.K.O mod's HTTP contract (SolverPlanPayload) and the vendored CombatSolver
-// search brain. RitsuLib is installed so the game assembly is runtime-publicized and the faithful search
-// runs. Capture on the game thread, offload the search to a worker thread, map SolverResult -> payload.
-// Recommendation only — never deploys.
+// search brain (upstream 1.0.0: HotKernel pure-value combat kernel + HotSearch). The combat root is
+// captured on the game thread (the only place that reads live game objects — private members go through
+// GameRef reflection), the search runs on a worker thread over value-type state only, and the resulting
+// SolverResult is mapped onto the payload. Recommendation only — never deploys.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -11,14 +12,12 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Players;
 using NekoComm.Game.Sim;
 using CombatSolver;
+using CombatSolver.HotSearch;
 
 namespace NekoComm.Game;
 
 internal static class CombatSolverFacade
 {
-    const int ShortBudgetMilliseconds = 3000;
-    const int DeepBudgetMilliseconds = 3000;
-
     public static async Task<SolverPlanPayload> BuildPlanAsync(
         CombatState state,
         Player me,
@@ -27,26 +26,37 @@ internal static class CombatSolverFacade
     {
         options ??= SolverFacadeOptions.Default;
 
+        // Multiplayer (co-op): the kernel plans for the LOCAL player only. The player count is frozen
+        // into the root's rules (enemy HP / move-block scaling); teammates are not simulated — their
+        // future plays are unknowable — so the plan is "what I should do if nobody else acts". The
+        // payload says so in its warnings (see BuildWarnings).
+
+        // Same precondition upstream applies before it adopts a result: only the local player's Play phase
+        // has a hand to plan for. Anything else is "not my turn yet" — the caller waits and asks again.
+        if (state.CurrentSide != CombatSide.Player || me.PlayerCombatState?.Phase != PlayerTurnPhase.Play)
+            return Failed("not_play_phase", "CombatSolver 只能在玩家出牌阶段计算。");
+
         CombatRootSnapshot root;
         SolverDisplayNames names;
         BattleDamageSnapshot damage;
-        bool includeTurnSetup;
+        SearchPolicySnapshot policy;
         // Card-side coverage denominator: the LIVE hand at root-capture time (same moment and same set as
         // the captured root snapshot — the hand this plan's current turn plays from). Null => the hand
         // could not be read, and coverage is then reported as explicitly unknown (-1), never as a fake 0.
         SimCoverageCard[]? handCoverage = null;
         try
         {
-            // Always capture the LIVE Play-phase combat state (the current turn's real hand), so the line's
-            // current turn and card_index are grounded to the actual hand. The turn-setup Start-phase snapshot
-            // path was a diagnostic addition and caused stale-snapshot / live-hand mismatches; the 0.28 engine
-            // grounds the current turn from a Play-phase root on its own, so Start+IncludeTurnSetup is not needed.
-            root = CombatRootSnapshot.Capture(state);
-            includeTurnSetup = false;
+            // Engine-default potion economics: a potion is spent only when it saves at least its HP
+            // threshold (PotionHpThresholds: 9 / 14 / 18 by tier). This replaces the facade's former
+            // "accept <= 8 HP loss, else escalate by potion count" loop — the 1.0.0 search prices potions
+            // inside one objective instead of vetoing them after the fact.
+            PotionHpThresholds thresholds = PotionHpThresholds.Default;
+            root = CombatRootSnapshot.Capture(state, predictPotionReward: false, potionThresholds: thresholds);
             if (!ReferenceEquals(root.PlayerIdentity, me))
                 return Failed("solver_failed", "捕获的玩家与本地玩家不一致。");
             names = SolverDisplayNames.Capture(state);
             damage = BattleDamageTracker.Observe(state);
+            policy = BuildPolicy(state, options, thresholds);
             try
             {
                 handCoverage = CaptureHandCoverage(me);
@@ -62,37 +72,10 @@ internal static class CombatSolverFacade
             return Failed("capture_failed", $"CombatSolver 捕获真机状态失败: {ex.Message}\n{ex.StackTrace}");
         }
 
-        // Potion tolerance gate (production policy): solve with the engine's Smart policy (Disabled-first
-        // internally PLUS the supplemental audits — required/smart potion use, opening power) like the
-        // standalone solver. If the Smart route's battle damage is within the effective tolerance (default 8,
-        // +6 when the player holds Burning Blood), accept it. Otherwise ESCALATE by potion count (1, then 2, ...)
-        // and keep the fewest potions that bring damage within tolerance. A pure Disabled policy skipped the
-        // audits and returned a losing line; Smart lands on a 0-potion line where one exists.
-        var tolerance = new SolverPotionTolerance(options.DamageThreshold, HasBurningBlood(me));
-        var smartPolicy = BuildPolicy(options, SolverPotionPolicy.Smart, includeTurnSetup);
         SolverResult result;
         try
         {
-            var first = await RunSolveAsync(root, names, damage, smartPolicy, cancellationToken);
-            if (tolerance.IsWithinTolerance(first.Snapshot.CumulativePlayerHpLost))
-                return MapResult(first, me, options, root, handCoverage);   // acceptable damage -> no potions
-
-            int potionSlots = me.Potions.Count();
-            SolverResult best = first;
-            for (int n = 1; n <= potionSlots; n++)
-            {
-                var bounded = await RunSolveAsync(
-                    () => new CombatBeamSolver(root, names, damage, smartPolicy, cancellationToken, null,
-                        searchProfile: options.ShortBudgetMilliseconds is int s ? SolverProfilePresets.Short with { SoftTimeBudgetMilliseconds = s } : SolverProfilePresets.Short,
-                        potionPolicyOverride: SolverPotionPolicy.Smart,
-                        potionFreePolicyBaseline: null, maximumPotionUses: n).Solve());
-
-                if (tolerance.IsWithinTolerance(bounded.Snapshot.CumulativePlayerHpLost))
-                    return MapResult(bounded, me, options, root, handCoverage);   // fewest potions that hit tolerance
-                if (bounded.BestNode.Score > best.BestNode.Score)
-                    best = bounded;                            // keep the best we found so far
-            }
-            result = best;
+            result = await Task.Run(() => Solve(root, names, damage, policy, cancellationToken), cancellationToken);
         }
         catch (Exception ex)
         {
@@ -100,68 +83,73 @@ internal static class CombatSolverFacade
             return Failed("solver_failed", $"CombatSolver 搜索失败: {ex.Message}{inner}\n{ex.StackTrace}");
         }
 
-        return MapResult(result, me, options, root, handCoverage);
+        return MapResult(result, me, policy, root, handCoverage, state.Players.Count);
     }
 
-    private static async Task<SolverResult> RunSolveAsync(
+    private static SolverResult Solve(
         CombatRootSnapshot root, SolverDisplayNames names, BattleDamageSnapshot damage,
         SearchPolicySnapshot policy, CancellationToken ct)
-        => await Task.Run(
-            () => CombatSearchCoordinator.Solve(root, names, damage, policy, ct, null), ct);
-
-    private static async Task<SolverResult> RunSolveAsync(
-        Func<SolverResult> solve)
-        => await Task.Run(solve, default);
-
-    private static bool HasBurningBlood(Player me)
-        => me.Relics.Any(relic =>
-            string.Equals(relic.Id.Entry, "BURNING_BLOOD", StringComparison.OrdinalIgnoreCase));
-
-    private static SearchPolicySnapshot BuildPolicy(SolverFacadeOptions options, SolverPotionPolicy potionPolicy, bool includeTurnSetup)
     {
-        var shortProfile = options.ShortBudgetMilliseconds is int s
-            ? SolverProfilePresets.Short with { SoftTimeBudgetMilliseconds = s }
-            : SolverProfilePresets.Short;
-        var deepProfile = options.DeepBudgetMilliseconds is int d
-            ? SolverProfilePresets.Deep with { SoftTimeBudgetMilliseconds = d }
-            : SolverProfilePresets.Deep;
+        // Same scheduling as upstream's search worker: the coordinator thread yields to the game.
+        Thread worker = Thread.CurrentThread;
+        ThreadPriority previousPriority = worker.Priority;
+        worker.Priority = ThreadPriority.BelowNormal;
+        try
+        {
+            return HotSearchCoordinator.Solve(root, names, damage, policy, ct);
+        }
+        finally
+        {
+            worker.Priority = previousPriority;
+        }
+    }
 
+    // Mirrors upstream SolverController.CaptureSearchPolicy with a default SolverSettingsData (Medium
+    // preset, Smart potions, ProgressionFirst bosses, relic strategy on, no growth budgets), so
+    // /solver/plan searches with the same authority as the standalone mod's own auto-turn-search. The one
+    // knob nekospire exposes is the think-time ceiling.
+    private static SearchPolicySnapshot BuildPolicy(
+        CombatState state, SolverFacadeOptions options, PotionHpThresholds thresholds)
+    {
         var diagnostics = new SearchDiagnosticsSink(
             msg => Entry.Logger?.Info(msg),
             msg => Entry.Logger?.Debug(msg));
-        var frame = new SearchFramePressureSignal();
-        var memory = new SearchMemoryPressureSignal();
-        memory.Disable();
 
         return new SearchPolicySnapshot(
-            Profile: options.ForceShortOnly ? shortProfile : deepProfile,
-            PotionPolicy: potionPolicy,
-            PotionStrategy: new PotionStrategySnapshot(potionPolicy, System.Array.Empty<PotionSlotDirective>()),
+            Profile: SolverSearchProfile.Default,
+            PotionPolicy: SolverPotionPolicy.Smart,
+            PotionStrategy: new PotionStrategySnapshot(SolverPotionPolicy.Smart, Array.Empty<PotionSlotDirective>())
+            {
+                Thresholds = thresholds,
+            },
             DetailedDiagnostics: false,
             VerifyIncrementalSearch: false,
+            FixedBudget: false,
             MeasurePhasePerformance: false,
             MaxDegreeOfParallelism: options.MaxDegreeOfParallelism,
-            // No budget override: the Short/Deep profile budgets (Medium preset) are authoritative, as in
-            // the engine's own auto-turn-search. Passing an override on top of the profile is redundant and,
-            // when set to 3s, hid the winning line.
-            FixedBudget: false,
             BudgetOverrideMilliseconds: null,
-            AcceptableBattleHpLoss: 0,
-            // The facade captures a live Play-phase root, so IncludeTurnSetup must be false — CombatBeamSolver
-            // would throw "回合准备选牌搜索只能在玩家回合准备阶段计算" if true on a Play-phase root. The 0.28 engine
-            // grounds the current turn to the real hand from a Play-phase root, so turn-setup seeding is not needed.
-            IncludeTurnSetup: includeTurnSetup,
-            TheftPolicy: null,
+            // The root is always a live Play-phase capture (gated above), so there is no pending turn
+            // setup to expand.
+            IncludeTurnSetup: false,
+            TheftPolicy: TheftEncounterStrategy.IsApplicable(state) ? SolverTheftPolicy.PreserveResources : null,
             ActTransitionBossHpStrategy: BossHpStrategy.ProgressionFirst,
             FinalBossHpStrategy: BossHpStrategy.ProgressionFirst,
-            Diagnostics: diagnostics,
-            FramePressureSignal: frame,
-            MemoryPressureSignal: memory);
+            AcceptableBattleHpLoss: 0,
+            Diagnostics: diagnostics)
+        {
+            Act3BossStrategy = SearchPolicySnapshot.IsAct3BossEncounter(
+                state.RunState.CurrentActIndex, state.Encounter?.Id.Entry),
+            RelicTargets = RelicCounterCatalog.Capture(state, enabled: true, rules: Array.Empty<RelicCounterRule>()),
+            GrowthOpportunityTargets = GrowthOpportunityPolicy.Capture(state),
+            // Wall-clock ceiling for the adaptive Stage 2/3 deepening on hard fights; easy turns finish
+            // in Stage 1 well below it. The engine clamps this to 1..15 s.
+            MaxHardFightThinkSeconds = options.MaxThinkSeconds,
+        };
     }
 
     private static SolverPlanPayload MapResult(
-        SolverResult result, Player me, SolverFacadeOptions options, CombatRootSnapshot root,
-        IReadOnlyList<SimCoverageCard>? handCoverage)
+        SolverResult result, Player me, SearchPolicySnapshot policy, CombatRootSnapshot root,
+        IReadOnlyList<SimCoverageCard>? handCoverage, int playerCount)
     {
         var first = result.BestNode.Actions.FirstOrDefault();
         // Group the forecasted line into per-turn buckets; each turn's steps end with an "end_turn"
@@ -179,6 +167,14 @@ internal static class CombatSolverFacade
 
         SimCoverageSummary coverageSummary = SummarizeCoverage(result, handCoverage);
         var warnings = BuildWarnings(result, coverageSummary, handCoverage);
+        if (playerCount > 1)
+        {
+            // Not a prediction gap of a card: a scope statement. Teammates' actions, and the shared RNG
+            // they consume (shuffles, random targets), are outside the model, so later turns of the line
+            // are a forecast under "teammates do nothing".
+            warnings = warnings.Append($"multiplayer:teammates_not_modeled:players={playerCount}").ToArray();
+        }
+        int expandedNodes = (int)Math.Min(int.MaxValue, Math.Max(result.ExpandedNodes, result.TotalExpandedNodes));
 
         return new SolverPlanPayload
         {
@@ -187,9 +183,9 @@ internal static class CombatSolverFacade
             score = result.BestNode.Score,
             state_fingerprint = StateFingerprint(root),
             line = line,
-            beam_width = SolverProfilePresets.Short.BeamWidth,
+            beam_width = policy.Profile.BeamWidth,
             horizon = result.SearchedTurns,
-            max_turn_actions = SolverProfilePresets.Deep.MaxCardBranchesPerNode,
+            max_turn_actions = policy.Profile.MaxCardBranchesPerNode,
             draw_model = "combatsolver",
             warnings = warnings,
             coverage = new CoverageSummaryPayload
@@ -199,15 +195,16 @@ internal static class CombatSolverFacade
                 unsupported = coverageSummary.Unsupported,
                 ignored = coverageSummary.Ignored,
                 potions = result.PotionCount,
-                risk = result.Snapshot.HasRisk || !result.Forecast.IsExactForModeledDamage,
+                risk = result.Snapshot.HasRisk || !result.Forecast.IsExactForModeledDamage || playerCount > 1,
             },
             win_prob = ProbeWinProbability(result.Snapshot),
             search_status = MapStatus(result),
-            budget_ms = (long)result.Elapsed.TotalMilliseconds,
-            nodes_expanded = result.ExpandedNodes,
-            // The 0.27 engine is a beam search (no Monte-Carlo rollouts), so rollouts_total is reported as
-            // the number of expanded search nodes — the beam-search analog of search effort.
-            rollouts_total = result.ExpandedNodes,
+            // A request may run several adaptive stages; report the whole request, not just the last pass.
+            budget_ms = (long)Math.Max(result.Elapsed.TotalMilliseconds, result.TotalSearchElapsed.TotalMilliseconds),
+            nodes_expanded = expandedNodes,
+            // rollouts_total is reported as the number of expanded search nodes — the beam-search analog
+            // of search effort (the engine's turn-boundary rollouts are an internal evaluator detail).
+            rollouts_total = expandedNodes,
             confidence = ProbeConfidence(result),
             policy_explanation = BuildPolicyText(first),
         };
@@ -222,7 +219,7 @@ internal static class CombatSolverFacade
                     System.Text.Encoding.UTF8.GetBytes(root.ContinuationStamp.StateText)))
             [..16];
 
-    // The 0.27 engine is a heuristic beam search, not a Monte-Carlo P(victory) estimator. The values below
+    // The engine is a heuristic beam search, not a Monte-Carlo P(victory) estimator. The values below
     // are derived, defensible proxies (documented per field) rather than fabricated guarantees.
     private static double ProbeConfidence(SolverResult result)
     {
@@ -294,8 +291,8 @@ internal static class CombatSolverFacade
     /// <item>DENOMINATOR = the LIVE hand captured on the game thread together with the root snapshot
     /// (== the root snapshot's hand, i.e. the hand <see cref="MapStepCardIndex"/> indexes into).
     /// It is <b>not</b> <c>result.Snapshot.HandCount</c>: that is the hand count of the FINAL simulated
-    /// node at the end of the searched horizon (CombatBeamSolver.Phases.cs:493-513), a different quantity
-    /// in a different unit — subtracting one from the other was the old bug.</item>
+    /// node at the end of the searched horizon, a different quantity in a different unit — subtracting
+    /// one from the other was the old bug.</item>
     /// <item>NUMERATOR = one bucket per card of that hand ⇒ exact+inferred+unsupported+ignored == hand size
     /// (never a gap-entry count, never a <c>Math.Max(0, …)</c> plug).</item>
     /// <item>EVIDENCE = <c>result.Snapshot.PredictionGaps</c>, but a gap counts only for the card it is
@@ -431,53 +428,11 @@ internal static class CombatSolverFacade
 
 internal sealed class SolverFacadeOptions
 {
-    // Defaults mirror the vendored engine's Medium performance preset (SolverSearchProfile.Short/Deep),
-    // so /solver/plan searches with the same authority as the engine's own auto-turn-search. The previous
-    // 3s / ForceShortOnly / single-thread defaults under-searched and could miss a killing line the engine
-    // itself finds. Deep is allowed but only triggers when Short does not resolve the route.
-    public static SolverFacadeOptions Default { get; } = new()
-    {
-        ForceShortOnly = false,
-        ShortBudgetMilliseconds = 8000,
-        DeepBudgetMilliseconds = 120000,
-        MaxDegreeOfParallelism = SolverWeights.DefaultSearchMaxDegreeOfParallelism,
-        DamageThreshold = 8,
-    };
-    public bool ForceShortOnly { get; init; }
-    public int? ShortBudgetMilliseconds { get; init; }
-    public int? DeepBudgetMilliseconds { get; init; }
-    public int MaxDegreeOfParallelism { get; init; }
+    public static SolverFacadeOptions Default { get; } = new();
 
-    /// <summary>Base battle-damage tolerance (default 8): if the no-potion route loses at most this many
-    /// HP, it is accepted and potions are not searched. +6 when the player holds Burning Blood.</summary>
-    public int DamageThreshold { get; init; }
-}
+    /// <summary>Wall-clock ceiling (seconds) for the engine's adaptive hard-fight deepening. Engine
+    /// default 4 s; the engine clamps to 1..15 s.</summary>
+    public double MaxThinkSeconds { get; init; } = SearchPolicySnapshot.DefaultMaxHardFightThinkSeconds;
 
-/// <summary>Production potion-tolerance policy. Searches NO-potion first; accepts it while the route's
-/// battle damage stays within an effective threshold (base threshold + Burning Blood heal).</summary>
-internal sealed class SolverPotionTolerance
-{
-    public const int BurningBloodHeal = 6;
-
-    public int BaseThreshold { get; }
-    public bool HasBurningBlood { get; }
-    public int EffectiveThreshold => BaseThreshold + (HasBurningBlood ? BurningBloodHeal : 0);
-
-    public SolverPotionTolerance(int baseThreshold, bool hasBurningBlood)
-    {
-        BaseThreshold = baseThreshold;
-        HasBurningBlood = hasBurningBlood;
-    }
-
-    /// <summary>Pure recompute helper. Given a potion budget and a damage threshold, returns the effective
-    /// battle-damage tolerance (threshold + Burning Blood heal). potionCount is the potion budget at the
-    /// decision point; the current formula applies the heal regardless of how many potions are held.</summary>
-    public int Recompute(int potionCount, int damageThreshold)
-    {
-        _ = potionCount;
-        return damageThreshold + (HasBurningBlood ? BurningBloodHeal : 0);
-    }
-
-    public bool IsWithinTolerance(int noPotionDamage)
-        => noPotionDamage <= EffectiveThreshold;
+    public int MaxDegreeOfParallelism { get; init; } = SolverWeights.DefaultSearchMaxDegreeOfParallelism;
 }

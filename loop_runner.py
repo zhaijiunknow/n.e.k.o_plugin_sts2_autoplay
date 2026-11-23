@@ -1867,32 +1867,34 @@ def _plan_step_is_executable(step: dict[str, Any], snapshot: dict[str, Any]) -> 
 #
 # ## `search_status` 的合法取值（**依据，不是猜**）
 #   `GET /solver/plan` 的该字段由
-#   `game_mod/nekospire/Solver/CombatSolverFacade.cs:205` 的 `MapStatus(result)` 产生，
-#   该函数本体在同文件 `:409-412`：
+#   `game_mod/nekospire/Solver/CombatSolverFacade.cs` 的 `MapStatus(result)` 产生
+#   （`MapResult` 里 `search_status = MapStatus(result)`）：
 #
 #       result.BoundaryReason == None       ⇒ "complete"
 #       result.BoundaryReason == TimeLimit  ⇒ "budget_exceeded"
 #       其它                                ⇒ "boundary_" + BoundaryReason.ToString().ToLowerInvariant()
 #
 #   而 `BoundaryReason` 即
-#   `game_mod/nekospire/Solver/Search/CombatPlan.cs:51-65` 的 `SearchBoundaryReason`：
+#   `game_mod/nekospire/Solver/Search/CombatPlan.cs` 的 `SearchBoundaryReason`
+#   （内嵌 CombatSolver 1.0.0；0.50.1 时代多一个 `MemoryNoProgress`，上游已删）：
 #       None, Shuffle, NoCards, UnsupportedEffect, DynamicResolution, PendingChoice,
-#       EventDefeat, TurnLimit, NodeLimit, TimeLimit, MemoryNoProgress
-#   ⇒ `MapStatus` 的**值域全集**（逐成员枚举，11 个）恰为下面 `SOLVER_SEARCH_STATUSES`。
+#       EventDefeat, TurnLimit, NodeLimit, TimeLimit
+#   ⇒ `MapStatus` 的**值域全集**（逐成员枚举，10 个）恰为下面 `SOLVER_SEARCH_STATUSES`。
+#   （`tests/test_t45_solver_gate.py` 直接读这两个 C# 源文件核对，注释腐坏会被它抓住。）
 #
 # ## 为什么「已算出结果」= 「search_status ∈ 全集」，而不是只认 "complete"
-#   1. `/solver/plan` 是**同步**端点：`BuildPlanAsync`（:22-104）必须 await 完 `Solve()`
+#   1. `/solver/plan` 是**同步**端点：`BuildPlanAsync` 必须 await 完 `Solve()`
 #      才会走到 `MapResult`。⇒「返回过」本身已证明搜索结束；`search_status` 描述的是
 #      **同一次**返回里"搜索为什么停下"。
-#   2. 真正的"没算出结果"形态**不是**某个 boundary，而是 `Failed(...)`（:425-429）：
+#   2. 真正的"没算出结果"形态**不是**某个 boundary，而是 `Failed(...)`：
 #      `in_combat=false` 且 `search_status` **缺失**。实机原样（2026-10-20 23:47，
 #      本机 18080 实测）：
 #          {"in_combat":false, "search_status":null, "line":[],
 #           "warnings":["CombatSolver 搜索失败: 只能在玩家出牌阶段计算。..."]}
 #      ⇒ 空 / null / 不认识的字符串 = 没算出结果 = 等待。
 #   3. 若只认 "complete"，则 `budget_exceeded` 与所有 `boundary_*` 都会被判成"没算完"。
-#      而 mod 的默认预算是 Short 8000ms / Deep 120000ms（`SolverFacadeOptions.Default`，
-#      同文件 :438-445），复杂战斗里几乎每次都在 budget 边界截断 ⇒ **永远等不到"完成"
+#      而引擎对难局的加深有墙钟上限（`solver_budget_seconds` → `MaxHardFightThinkSeconds`，
+#      见 mod 的 `GameSolverService.PlanOptions`），复杂战斗里经常在 budget 边界截断 ⇒ **永远等不到"完成"
 #      ⇒ 卡死**，正是本次任务同样明令禁止的另一半。上游同构：`SolverController` 在
 #      TimeLimit 边界同样先发布已算出的前沿（incumbent）再停。
 #   ⇒ 结论：全集内 = 已算出结果，可以继续接受"首步可执行"与"指纹一致"两道判定；
@@ -1909,7 +1911,6 @@ SOLVER_SEARCH_STATUSES = frozenset({
     "boundary_eventdefeat",         # EventDefeat
     "boundary_turnlimit",           # TurnLimit
     "boundary_nodelimit",           # NodeLimit
-    "boundary_memorynoprogress",    # MemoryNoProgress
 })
 
 #: 闸门判定结果（日志里的 `verdict=` 取值，稳定字符串以便 grep）。
@@ -2008,7 +2009,7 @@ def solver_play_gate(
             missing="search_status",
             why=(
                 "求解器还没算出结果：search_status=%r 不在 MapStatus 值域内"
-                "（合法值见 loop_runner.SOLVER_SEARCH_STATUSES，依据 CombatSolverFacade.cs:409-412）"
+                "（合法值见 loop_runner.SOLVER_SEARCH_STATUSES，依据 CombatSolverFacade.cs 的 MapStatus）"
                 % (solver_plan.get("search_status"),)
             ),
         )

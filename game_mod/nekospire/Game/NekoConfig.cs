@@ -58,6 +58,10 @@ namespace NekoComm.Game
         //   ⇒ 绝大多数回合远低于 12 s，只有病态局面会被这个上限截断（截断时引擎按上游既有语义
         //   发布已算出的前沿 = `search_status=budget_exceeded`，不会退化成"没有计划"）。
         //   ⇒ 尾部从"几分钟"变成"最多十几秒"，而正常回合的计划质量不受影响。
+        //
+        // CombatSolver 1.0.0 起：本值映射到引擎的 `MaxHardFightThinkSeconds`（难局自适应加深的墙钟上限，
+        //   上游默认 4 s，引擎钳到 1..15 s）。含义没变——"一次请求最多想多久"；上面的实测数字是
+        //   0.50.1 引擎时代的，留作这个开关为什么存在的依据。见 GameSolverService.PlanOptions。
         public double solver_budget_seconds { get; set; } = 12;
 
         private static readonly JsonSerializerOptions Options = new()

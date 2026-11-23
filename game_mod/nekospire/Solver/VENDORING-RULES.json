@@ -1,28 +1,26 @@
 {
-  "schema": "nekospire-combat-solver-vendoring-rules/1",
+  "schema": "nekospire-combat-solver-vendoring-rules/2",
   "_comment": [
-    "手写文件：vendor 边界的唯一事实来源。sync-vendor.ps1 读它来判定'哪些上游文件该进/该出'，",
-    "并生成 VENDORING-MANIFEST.json（现状普查）。改边界请改这里，不要改生成的清单。",
-    "判据来自上游 docs/ARCHITECTURE.md 的模块归属表 + 本仓库的构建约束（无 Publicizer / 无 Godot SDK）。"
+    "手写文件：vendor 边界的唯一事实来源。game_mod/scripts/vendor-combat-solver.py 读它来决定",
+    "'哪些上游文件进 vendor 闭包、哪些本地文件绝不能被覆盖'。改边界请改这里。",
+    "私有成员适配配方（哪一处改写成 GameRef 反射调用）写在那个脚本里，并带命中数断言。",
+    "schema/2 对应上游 1.0.0 的 HotKernel 架构；schema/1（0.28 -> 0.50.1 的 Engine/Search 架构）已随旧引擎一并作废。"
   ],
 
   "upstream": {
     "repository": "https://github.com/Torch1230/CombatSolver",
-    "expected_version": "0.50.1",
-    "expected_commit": "6031deb",
+    "expected_version": "1.0.0",
+    "expected_commit": "1ca3d6ce",
+    "expected_commit_note": "同步时上游 main 的 HEAD；1.0.0 当时尚未打标签、也未发布到创意工坊（工坊版本为 0.51.9）。上游检出不做任何修改；nekospire 自己的行为补丁见 local_patches。",
+    "min_game_version": "0.113.0",
     "license": "MIT",
     "license_holders": [
       "Copyright (c) 2026 Torch1230 and contributors",
       "Copyright (c) 2026 hotwords123 (portions derived from Random Foreseer)"
     ],
-    "vendored_baseline_version": "0.28",
-    "current_vendored_version": "0.50.1",
-    "current_vendored_note": "2026-10 已完成一次同步：基线 v0.28.0 -> 0.50.1。结果落在分支 sync-combat-solver-0501（worktree D:\\NekoClaw\\.dsh-artifacts\\nekospire-sync-0501），Release 编译零错误 + SimTests 全通过；真实对局行为尚未验证。",
-    "baseline_tag": "v0.28.0",
-    "baseline_evidence": "逐字比对钉死：本地 246 个 vendor 文件里 245 个在上游 v0.28.0 存在，其中 199 个逐字相同（81.2%）；邻近标签明显更低（v0.27.0/0.27.2 = 171，v0.28.1 = 197，v0.28.2 = 177，v0.28.3 = 160，v0.29.1 = 155）。峰值精确落在 v0.28.0，与 README 里『vendored CombatSolver 0.28』的说法一致。",
-    "baseline_requires_history": "三方合并分析需要上游完整历史（非浅克隆）。补齐：git -C <上游> fetch --unshallow --tags",
+    "architecture": "HotKernel（纯值战斗内核）+ HotSearch；旧的 Engine/InCombat 镜像、Prediction 补偿层、CombatBeamSolver 已被上游整体删除",
     "architecture_doc": "docs/ARCHITECTURE.md",
-    "release_notes_dir": "docs/releases"
+    "previous_vendored_version": "0.50.1"
   },
 
   "local": {
@@ -30,220 +28,123 @@
     "namespace_root": "CombatSolver"
   },
 
-  "vendor_subtrees": ["Engine", "Prediction", "Runtime", "Search"],
+  "vendor_subtrees": ["Engine", "HotKernel", "HotSearch", "Prediction", "Search"],
+  "_vendor_subtrees_note": "这五棵子树整棵取（上游 1.0.0 里它们已经不含任何 Godot 节点或 UI 依赖）。",
 
-  "exclude_subtrees": {
-    "Api": "独立模组的对外 API 外壳（Entry/生命周期），本仓库用自己的 CombatSolverRuntime + EntryShim 替代",
-    "Diagnostics": "诊断/性能录制（PerformanceRecording 继承 Godot Node）",
-    "Replay": "复盘归档与检查点（依赖 Api/Diagnostics，且本仓库用 EntryShim 边界隔离）",
-    "Strategy": "独立模组的策略文字资源",
-    "Testing": "上游 237 个文件的测试宿主，不随引擎分发",
-    "UI": "Godot 覆盖层（SolverOverlay*），本仓库用自己的游戏内弹幕渲染"
-  },
-
-  "exclude_file_patterns": {
-    "_comment": "在 vendor_subtrees 内部按文件名/路径排除。hard=确认是独立模组外壳，不进 vendor。",
-    "hard": [
-      "Entry.cs",
-      "SolverController.cs",
-      "SolverController*.cs",
-      "SolverSettings.cs",
-      "CombatSolverLog.cs",
-      "CombatBugReport*.cs",
-      "CombatReplayRecording.cs",
-      "CombatDiagnosticJournal.cs",
-      "CombatShowcase*.cs",
-      "OnlinePresence.cs",
-      "RunStatistics.cs",
-      "RuntimeGcStartup.cs",
-      "SearchCompletionNotifier.cs",
-      "SolvedRouteCache.cs",
-      "PortfolioSelectorRuntime.cs",
-      "*Overlay*.cs",
-      "SolverDispatcher.cs",
-      "PlayerTurnSetupPatches.cs",
-      "NativeChoiceRuntime.cs",
-      "NodePoolSignalLifetimePatch.cs",
-      "RichTextEnvironmentLifetimePatch.cs",
-      "CombatInstantModePatch.cs",
-      "CombatReplayOutcome.cs",
-      "SearchGcPolicy.cs",
-      "SearchGcPolicy.Recovery.cs",
-      "SystemMemoryReleaseService.cs"
-    ],
-    "candidate": [],
-    "_candidate_note": "原先把最后 5 个标为 candidate（SolverDispatcher / PlayerTurnSetupPatches / NativeChoiceRuntime / 两个 Node 补丁）。实测这 5 个全部含 Godot 耦合（: Node 或 using Godot;），按'Godot 耦合即外壳'的既定规则一律排除 —— 本模组用 CombatSolverFacade 自己驱动捕获/搜索/部署，不需要独立模组的调度器与原生回合接线。若将来要接原生回合，需先把这 5 个文件去 Godot 化。"
-  },
-
-  "adapt_required": [
-    {
-      "path": "Search/BeamPortfolioSelector.cs",
-      "issue": "godot-coupling",
-      "why": "Search 核心，但含 Godot 引用，必须去 Godot 化后才可编入 Microsoft.NET.Sdk 工程"
-    },
-    {
-      "path": "Search/CombatBeamSolver.BeamRetentionPolicy.Routing.cs",
-      "issue": "godot-coupling",
-      "why": "CombatBeamSolver 的 partial 分片，属于搜索大脑本体，不可排除；只能去掉其中的 Godot 调用"
-    },
-    {
-      "path": "Search/CombatBeamSolver.Expansion.Opening.cs",
-      "issue": "godot-coupling",
-      "why": "同上：partial 分片，排除会导致大量 missing-type 连锁错误（实测过一次，炸出 47 类错误）"
-    },
-    {
-      "path": "Search/CombatBeamSolver.ExpansionPlan.cs",
-      "issue": "godot-coupling",
-      "why": "同上"
-    },
-    {
-      "path": "Search/CombatBeamSolver.PathDiagnostics.cs",
-      "issue": "godot-coupling",
-      "why": "同上"
-    }
+  "vendor_files": [
+    "Runtime/BattleDamageTracker.cs",
+    "Runtime/CombatRootSnapshot.cs",
+    "Runtime/ContinuationStamp.cs",
+    "Runtime/DingyDaggerDisplayNames.cs",
+    "Runtime/LiveCombatStamp.cs",
+    "Runtime/LiveEndTurnRiskEvaluator.cs",
+    "Runtime/SolverDisplayNames.cs",
+    "Runtime/SolverProgress.cs"
   ],
+  "_vendor_files_note": [
+    "Runtime/ 只取根捕获与结果合同需要的 8 个文件，其余都是独立模组外壳。",
+    "SolverDisplayNames.cs 含 `using Godot;`（读 Marker2D / 节点 GlobalPosition 给敌人排座次）——它只是**使用** Godot 类型，",
+    "不声明 Node 子类，所以不需要 Godot.NET.Sdk 的源生成器，可以原样编入。"
+  ],
+
+  "exclude_files": {},
+
+  "excluded": {
+    "Api": "预战预报子进程 / 展柜 API，独立模组外壳",
+    "Diagnostics": "性能录制（PerformanceRecording 继承 Godot Node）",
+    "Replay": "复盘归档，只被外壳使用",
+    "Testing": "上游无人测试宿主，不随引擎分发",
+    "UI": "Godot 覆盖层（SolverOverlay*），本模组用自己的游戏内弹幕",
+    "Runtime/(其余 31 个文件)": "Entry / SolverController* / SolverDispatcher / SolverSettings / PlayerTurnSetupPatches / NativeChoiceRuntime / 缺陷报告 / 展柜 / 战绩 / 在线状态 / SolverWarmup(引用 SolvedRouteCache 与 SolverText) —— 生命周期、控制器、原生回合接线与外壳服务；本模组用 CombatSolverFacade 自己驱动捕获与搜索，且只给建议不部署"
+  },
 
   "always_preserve_local": [
     {
       "path": "Solver/Engine/Common/GameRef.cs",
-      "why": "反射适配层：上游直接访问游戏私有成员（Publicizer 路线在本模组的加载路径下已实测失效），全部改走这里。上游没有这个文件，重新 vendor 时绝不能被覆盖或删除。"
+      "why": "反射适配层：上游靠 Krafs.Publicizer 直接读游戏私有成员，本模组的加载路径下那条路实测失效，全部改走这里。上游没有这个文件；它位于被整棵替换的 Engine/ 子树里，脚本会先取出再放回。"
+    }
+  ],
+
+  "local_patches": {
+    "_comment": "只存在于 nekospire 内嵌副本里的行为补丁，定义在 game_mod/scripts/vendor_local_patches.py，由同步脚本在换入上游、完成私有访问改写之后重放。每个锚点必须恰好命中一次，上游改动了周围代码就会让同步失败。",
+    "multiplayer-local-player": "多人（co-op）战斗里为本地玩家规划：玩家数与原版两个缩放系数冻结进 HotCombatRulesSnapshot，战斗中新建/孵化/复活的怪物生命与敌方行动格挡按人数缩放，两处“唯一玩家”假设改取本地玩家。5 个文件、11 处。队友不建模。"
+  },
+
+  "local_files": [
+    {
+      "path": "Solver/SolverShellShims.cs",
+      "why": "补齐被排除的外壳文件所声明、而 vendor 闭包又引用的类型：SolverPotionPolicy / BossHpStrategy / SolverSettings(.Current/.ResolvePotionThresholds)（上游 Runtime/SolverSettings.cs）、SearchProgressDisplayState（上游 Runtime/SolverControllerSessions.cs）；并用 global using 让改写后的 vendor 文件解析到 GameRef。每次同步后要与上游对应声明逐字核对。"
     },
     {
       "path": "Solver/EntryShim.cs",
-      "why": "补齐被排除的上游 src/Api/Entry.cs 所声明的 CombatSolver.Entry（Logger / ModId），让被 vendor 的文件零改动解析。"
-    },
-    {
-      "path": "Solver/SolverPolicyEnums.cs",
-      "why": "补齐被排除的 src/Runtime/SolverSettings.cs 所声明的 SolverPotionPolicy / BossHpStrategy 枚举。"
+      "why": "补齐被排除的上游 src/Runtime/Entry.cs 所声明的 CombatSolver.Entry（Logger / ModId）。"
     },
     {
       "path": "Solver/CombatSolverFacade.cs",
-      "why": "接缝：把上游 SolverResult 映射成本模组的 SolverPlanPayload（HTTP /solver/plan 的合同）。"
+      "why": "接缝：主线程捕获根 -> 后台 HotSearchCoordinator.Solve -> 把 SolverResult 映射成 HTTP /solver/plan 的 SolverPlanPayload。只给建议，从不部署。"
     },
     {
       "path": "Solver/CombatSolverRuntime.cs",
-      "why": "接缝：从 NekoComm.ModEntry 安装引擎运行时与两个 Harmony 隔离补丁。"
+      "why": "接缝：从 NekoComm.ModEntry 接好引擎日志并 PatchAll 本模组自己的 Harmony 补丁。"
     }
   ],
-
-  "vendor_extra_files": [
-    {
-      "upstream_path": "src/Strategy/CardMechanismFacts.cs",
-      "local_path": "Solver/Strategy/CardMechanismFacts.cs",
-      "why": "虽然位于被排除的 Strategy/ 子树，但它是代码而非文案（纯值事实函数），不含 Godot，且被 Search 核心（CombatBeamSolver.StateEvaluation 等 4 个文件）使用。2026-10 实测：不纳入会报 CS0103 CardMechanismFacts。"
-    }
-  ],
-
-  "_exclusion_pattern_notes": {
-    "SolverController*.cs": "实测过宽：SolverController.cs 与 SolverController.Testing.cs 含 Godot，但 SolverControllerSessions.cs 不含。不过 SolverControllerSessions 牵连整条缺陷报告链（CombatBugReportUploadPolicy / CombatBugReportIssueLedger / ReplanCause），故仍排除，改用 adaptation_rules 的 lattice-shim 配方补声明。",
-    "Search 核心禁止按 Godot 粗筛": "Search/CombatBeamSolver.* 的 partial 分片若含 Godot 调用也**必须 vendor**（去 Godot 化处理）；排除它们会引发大量 missing-type 连锁错误。见 adapt_required。"
-  },
 
   "adaptation_rules": [
     {
-      "id": "rng-private-fields",
-      "detect": "CS1061/CS0117 指向 Rng 的 _counter / _random._s0..3",
-      "action": "改用公开的序列化往返：rng.ToSerializable().counter / .state0..3；Clone 用 new Rng(rng.ToSerializable())",
-      "why": "游戏公开了 ToSerializable / Rng(SerializableRng)，能忠实捕获 counter 与四个 Xoshiro 状态字，且零私有访问——比反射更优。主树 Engine/Common/PredictionExtensions.cs 的注释记录了此结论。"
-    },
-    {
       "id": "private-member-access",
-      "detect": "编译报 CS0122（不可访问）或 CS1061/CS0117（找不到成员）",
-      "action": "改走 GameRef.Get/Set/Get<T>，不要引入 Krafs.Publicizer",
-      "why": "Publicizer 的 IgnoresAccessChecksTo 对 plain-SDK 插件模组不被 mod 加载器承认，直接 ldfld 私有字段会抛 FieldAccessException（本仓库 GameRef.cs 头部已记录此实测结论）"
+      "detect": "编译报 CS1061 / CS0117（找不到成员）或 CS0122（不可访问），对象是游戏类型的私有字段/属性",
+      "action": "在 vendor-combat-solver.py 的 PRIVATE_MEMBERS 里登记 成员名 -> C# 类型，由脚本改写成 GameRef.Get<T>(接收者, \"成员\")；类型以真实 sts2.dll 元数据为准，不要猜",
+      "why": "Publicizer 的 IgnoresAccessChecksTo 对 plain-SDK 插件模组不被 mod 加载器承认，直接 ldfld 私有字段会抛 FieldAccessException（GameRef.cs 头部记录了实测结论）。1.0.0 里私有访问全部集中在主线程根导入层（HotKernel/Import），搜索热路径不碰游戏对象，所以反射开销只发生在每次捕获根的时候。"
     },
     {
-      "id": "readonly-property-write",
-      "detect": "CS0200 无法为只读属性赋值",
-      "action": "改走 GameRef.Set(obj, \"PropName\", value)——GameRef 内部会回退到 backing field",
-      "why": "上游用 publicizer 直接给只读属性赋值；我们靠 GameRef 的 backing-field 回退达成同样效果"
+      "id": "protected-internal-data",
+      "detect": "CS0122 指向 PowerModel.GetInternalData<T>() / XPower.Data",
+      "action": "在 INTERNAL_DATA_FIELDS 里登记 字段名 -> 类型；脚本改写成 GameRef.Get<T>(GameRef.InvokeGeneric(x, \"GetInternalData\", \"Data\")!, \"字段\")",
+      "why": "GetInternalData 是 protected 泛型方法，XPower.Data 是非公开嵌套类型，连类型名都写不出来；反射调用后返回 object，再按字段名取值。"
     },
     {
-      "id": "internal-game-type",
-      "detect": "编译报 CS0122 且对象是游戏类型（如 CombatTurnState）",
-      "action": "改用同语义的公开入口（如 CombatManager.DebugOnlyGetState()），或把该成员从 vendor 集合里剔除",
-      "why": "反射无法把 internal 类型变成可命名类型；主树 CombatManagerExtensions.cs 的注释记录了同款解法"
+      "id": "rng-private-fields",
+      "detect": "CS1061 指向 Rng._counter / Rng._random._s0..3",
+      "action": "改用公开的 rng.ToSerializable().counter / .state0..3（脚本里的 RNG_CAPTURE 配方）",
+      "why": "游戏公开了 ToSerializable()，忠实携带 counter 与四个 xoshiro 状态字，零私有访问，比反射更好。"
     },
     {
-      "id": "godot-coupling",
-      "detect": "文件含 using Godot; 或类型继承 Node",
-      "action": "整文件排除；若该文件是核心（Search/Prediction/Engine 主体，尤其 CombatBeamSolver 的 partial 分片），则只移植其非 Godot 部分",
-      "why": "本仓库用 Microsoft.NET.Sdk，不带 Godot 源生成器；被排除的是外壳，不是算法"
+      "id": "private-property-pattern",
+      "detect": "CS0117 指向属性模式里的私有属性（如 `case SilkenTress { IsUsed: false }:`）",
+      "action": "改写成 `case SilkenTress tress when !GameRef.Get<bool>(tress, \"IsUsed\"):`（脚本里的 EXACT 配方）",
+      "why": "属性模式不能走反射，只能拆成类型模式 + when 子句。"
     },
     {
       "id": "excluded-declaration",
-      "detect": "编译报 CS0246/CS0234 指向被排除子树的类型",
-      "action": "优先排除引用方；若引用方是核心，则在引用方文件末尾就地补 lattice shim（带注释说明上游声明位置）",
-      "why": "维持'零改动解析 vendor 文件'的设计。范例：SolverProgress.cs 末尾的 SearchProgressDisplayState（已核实与上游 0.50.1 实现逐字相同）"
-    },
-    {
-      "id": "profile-api-drift",
-      "detect": "CS1739/CS1929 指向 SolverSearchProfile.Short/Deep、SearchPolicySnapshot.ShortProfile、CombatBeamSolver.shortCheckpointMilliseconds",
-      "action": "0.50.1 取消了 Short/Deep 双档，改为单一 SolverSearchProfile.Default + SearchPolicySnapshot.Profile + BudgetOverrideMilliseconds；需重构 CombatSolverFacade 的两段式预算映射",
-      "why": "这是设计级适配而非机械改名，必须读懂接缝意图后再改"
+      "detect": "编译报 CS0246 / CS0103 指向被排除外壳文件里的类型",
+      "action": "在 Solver/SolverShellShims.cs 里补声明（注明上游出处），不要改 vendor 文件",
+      "why": "维持 'vendor 文件除私有访问外零改动' 的设计，重新同步时不需要手工合并。"
     },
     {
       "id": "csharp-version",
       "detect": "上游用了 C# 14 语法导致编译失败",
       "action": "改写成 C# 13 等价写法",
-      "why": "游戏工具链是 .NET 9 / C# 13"
-    },
-    {
-      "id": "rng-state-restore",
-      "detect": "CS1061 指向 Rng._counter / MegaRandom._s0..3（含上游新增的 ToRng 方法体）",
-      "action": "用公开的 SerializableRng record 做往返：new SerializableRng { counter=..., state0..3=... } 再 new Rng(serializable)",
-      "why": "SerializableRng 是 public record 且字段可写、Rng 有公开 ctor 接受它，忠实且零私有访问。2026-10 同步时上游新增的 ToRng 就是这么改的。"
-    },
-    {
-      "id": "protected-internal-data",
-      "detect": "CS0122 指向 PowerModel.GetInternalData<T>() / X.Data",
-      "action": "改用 GameRef.InvokeGeneric(x, \"GetInternalData\", \"<嵌套类型名>\")；其返回值是 object，再取值要外面包一层 GameRef.Get<T>(..., \"member\")",
-      "why": "protected 方法反射可调，但返回 object，直接 .member 会 CS1061（实测踩过，4 处）"
-    },
-    {
-      "id": "static-private-const",
-      "detect": "CS0117 指向 Type._somethingKey / _baseCardsLeft 之类静态私有成员",
-      "action": "GameRef.GetStatic<T>(typeof(Type), \"_somethingKey\")",
-      "why": "GameRef 已有 GetStatic<T> 重载（2026-10 确认）。这批 key 是 0.50.1 新增的 private static 常量字符串。"
-    },
-    {
-      "id": "gameRef-using",
-      "detect": "CS0103 当前上下文中不存在名称 GameRef",
-      "action": "在文件里补 using CombatSolver.Engine.Common;",
-      "why": "被上游改动过、或新 vendor 进来的文件缺这个 using（实测 4 个文件）"
-    },
-    {
-      "id": "policy-api-drift",
-      "detect": "CS0117/CS1739 指向 SolverSearchProfile.Short/Deep、SearchPolicySnapshot.ShortProfile/DeepProfile/ForceShortOnly/ShortBudgetOverrideMilliseconds、CombatBeamSolver.shortCheckpointMilliseconds",
-      "action": "0.50.1 合并为单一 Profile + FixedBudget + BudgetOverrideMilliseconds，并新增必填 AcceptableBattleHpLoss；CombatBeamSolver 的 searchProfile 仍在但 shortCheckpointMilliseconds 已移除",
-      "why": "设计级适配。AcceptableBattleHpLoss 建议映射到本仓库自己的 DamageThreshold（与药水容忍门同一个量），但注意 StopAtAcceptableBattleHpLoss 默认 true 可能让引擎提前停止——必须游戏内验证。"
-    },
-    {
-      "id": "growth-capacity-single-player",
-      "detect": "游戏内 `solver unusable` 且 warnings 含“捕获真机状态失败: Sequence contains more than one element”，堆栈指向 CombatSolver.MadScienceGrowth.CaptureRemainingCapacity -> SimulatedCombatState..ctor -> CombatRootSnapshot.Capture",
-      "action": "把 Search/GrowthPolicy.cs 里 MadScienceGrowth.CaptureRemainingCapacity 的 `combat.Players.Single()` 换成 `LocalContext.GetMe(combat) ?? throw new InvalidOperationException(\"找不到本地玩家。\")`（并补 using MegaCrit.Sts2.Core.Context / .Entities.Players）",
-      "why": "上游缺陷（截至 main@6031deb 仍原样存在，该行由上游提交 4d2c5506 引入，v0.28.0 尚无此文件）。co-op 下 combat.Players 有两个玩家，Single() 抛异常并沿构造函数冒泡，导致搜索一次都启动不了、/solver/plan 静默退回启发式规划。引擎其余部分本就按玩家数处理（_players 数组、MultiplayerScalingModel 分离、Players.Count != 1 时缩放怪物血量），且该函数喂的成长账本（_growthRewards / MadScienceUpgradeCapacity）只记本地玩家，故取本地玩家语义正确——与引擎既有五处 LocalContext.GetMe 调用点一致。改了它会让本文件从“逐字同上游”变为本地独有，同步后必须重新施加。"
+      "why": "游戏工具链是 .NET 9 / C# 13（上游 1.0.0 自己的 LangVersion 也是 13.0，目前无此问题）。"
     }
   ],
 
   "pipeline_pitfalls": {
-    "_comment": "2026-10 这次同步踩到的坑，都固化进 game_mod/scripts/apply-vendor-sync.py 了。",
-    "line_endings": "三方合并前必须把 ours/base/theirs 全部规范化为 LF。否则 CRLF/LF 差异让每一行都'不同'，14 个真冲突会被夸大成 38 个整文件冲突（实测）。",
-    "incremental_build": "取可信错误数必须清 obj/bin。MSBuild 增量判定会让编译阶段被跳过，实测同一棵树报 1 个错误 vs 279 个错误。",
-    "syntax_error_masking": "C# 语法错误（冲突标记、正则误伤）会抑制整个语义分析，此时错误数反而变小。看到'突然只剩 1 个错误'要先怀疑语法错误。",
-    "stale_untracked_files": "重新 vendor 前必须清空 vendor 子树的 .cs。git reset --hard 不删除'变成未跟踪'的旧文件，被排除的文件会残留并继续参与编译（实测踩过）。",
-    "regex_assignment": "把 X.member = v 改写成 GameRef.Set 时，正则必须避开 ==、!=、<=、>=、=>，且不能用 [^;]+ 跨行（实测把 card.Affliction == null 改成 GameRef.Set(..., = null) 并吞掉后续代码）。",
-    "recipe_pollution": "从旧代码反推配方时，方法名不要当成员名（GetInternalData 被误当私有字段，生成了 GameRef.Get(x, \"GetInternalData\")<T>() 这种非法形态）。"
+    "stale_files": "重新 vendor 前必须清空 vendor 子树的 .cs（脚本会做）。被上游删除或被排除的旧文件留在磁盘上会继续参与编译。",
+    "incremental_build": "取可信错误数必须 --no-incremental（build-errors.py 会带）。MSBuild 增量判定会跳过编译阶段，给出虚假的低错误数。",
+    "error_phases": "C# 先报'找不到类型'(CS0246)，这些修完才会报语义错误（CS1061/CS0122）。第一轮只有十几个错误不代表快完了。",
+    "recipe_hit_counts": "配方的命中数是断言不是统计。上游新增/删除一处私有访问时脚本会失败——这是设计：宁可同步时停下来，也不要带着漏改的私有访问进游戏。",
+    "game_api_drift": "游戏更新会同时打断 Solver 之外的代码（0.113 改了商店购买、联机加入、进阶文案等 API）。build-errors.py 的输出要连 Game/ 与 Server/ 一起看。"
   },
 
   "definition_of_done": [
-    "dotnet build game_mod/nekospire/nekospire.csproj -c Release 零错误",
-    "python -m pytest tests -q 无新增失败",
-    "Solver/VENDORING-MANIFEST.json 重新生成且本地独有文件仍只有 GameRef.cs",
-    "README 的引擎版本号与许可证描述与上游一致"
+    "python game_mod/scripts/vendor-combat-solver.py 干跑报告 0 个待写文件、0 个陈旧文件、配方全部命中",
+    "python game_mod/scripts/build-errors.py 报告 0 错误（Release）",
+    "dotnet run --project game_mod/SimTests 全通过",
+    "插件侧 pytest 无新增失败",
+    "README / VENDORING.md 的引擎版本号与许可证描述与上游一致"
   ],
 
   "not_verifiable_here": [
-    "求解器在真实对局中的行为（本机没有游戏可跑）。一次未被发现的语义回归可能让胜率悄悄变差，必须由作者在游戏内验证。"
+    "求解器在真实对局中的行为。编译通过只说明类型对得上；反射读到的私有成员是否齐全、根捕获是否完整、路线质量是否正常，必须由作者在游戏内验证。"
   ]
 }

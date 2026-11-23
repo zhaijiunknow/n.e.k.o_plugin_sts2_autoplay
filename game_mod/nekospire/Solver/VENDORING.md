@@ -1,86 +1,115 @@
 # 内嵌 CombatSolver 引擎的 vendor 机制
 
-本目录（`game_mod/nekospire/Solver/`）里的引擎**不是整棵拷贝**，而是"**按边界取一个闭包，再叠三层本地适配**"。
+本目录（`game_mod/nekospire/Solver/`）里的引擎**不是整棵拷贝**，而是"**按边界取一个闭包，再叠两层本地代码**"。
 这份文档说明边界怎么划、适配怎么留、以及将来怎么再同步一次。
 
 配套文件：
 
 | 文件 | 性质 | 作用 |
 |---|---|---|
-| `VENDORING-RULES.json` | **手写**（唯一事实来源） | vendor 边界、排除清单、必须去 Godot 化的文件、适配规则 |
-| `VENDORING-MANIFEST.json` | **生成**（不要手改） | 现状普查：每个已 vendor 文件与上游的逐行比对结果 |
-| `game_mod/scripts/sync-vendor.ps1` | 工具 | 读规则 → 生成普查 → 打差距报告；加 `-Apply` 才真正改写源码 |
-| `VENDORING-GAP-REPORT.md` | 生成时机同上 | 当前版本与上游的差距与工作量评估 |
+| `VENDORING-RULES.json` | **手写**（唯一事实来源） | vendor 边界、必须保留的本地文件、适配规则、完成标准 |
+| `VENDORING-MANIFEST.json` | **生成**（不要手改） | 现状普查：上游提交、每个 vendor 文件的内容哈希、哪些文件带私有访问改写 |
+| `game_mod/scripts/vendor-combat-solver.py` | 工具 | 读规则 → 换入上游闭包 → 把私有成员访问改写成 GameRef 反射（带命中数断言）→ 写清单 |
+| `game_mod/scripts/build-errors.py` | 工具 | 非增量 Release 编译，按错误码/文件汇总 |
+| `game_mod/SolverSmoke/` | 工具 | 离线冒烟：不启动游戏，用真实 `sts2.dll` 建真实战斗，驱动**构建出的** `nekospire.dll` 求解并执行计划 |
 
 ---
 
-## 1. 上游与基线
+## 1. 上游与当前版本
 
 - 上游仓库：<https://github.com/Torch1230/CombatSolver>
 - 许可证：**MIT**（`Copyright (c) 2026 Torch1230 and contributors`；Random Foreseer 部分 `Copyright (c) 2026 hotwords123`）
-- 上游当前版本：**0.50.1**（commit `6031deb`）
-- **内嵌基线：上游标签 `v0.28.0`**（已用逐字比对钉死，证据见下）
+- **当前内嵌：上游 1.0.0，`main@1ca3d6ce`**（同步时尚未打标签、也未发布到创意工坊；工坊版本是 0.51.9）
+  **+ nekospire 自己的本地补丁**（不改上游，见第 1.1 节）
+- 适配游戏：《杀戮尖塔 2》0.113.x，RitsuLib ≥ 0.6.11
 
-### 基线是怎么钉死的
+### 1.0.0 是一次架构重写，不是版本递增
 
-把本地 246 个 vendor 文件与上游各个候选标签逐个逐字比对：
+上游在 1.0.0 把旧引擎整体删除（`Engine/InCombat` 的 Hook 镜像、`Prediction` 补偿层、`CombatBeamSolver`，
+src 净减约 10 万行），换成：
 
-| 上游标签 | 逐字相同 | 命中率 |
-|---|---:|---:|
-| `v0.27.0` / `v0.27.2` | 171 / 242 | 70.7% |
-| **`v0.28.0`** | **199 / 245** | **81.2%** ← 峰值 |
-| `v0.28.1` | 197 / 245 | 80.4% |
-| `v0.28.2` | 177 / 245 | 72.2% |
-| `v0.28.3` | 160 / 245 | 65.3% |
-| `v0.29.1` | 155 / 245 | 63.3% |
+- **HotKernel**：纯值类型的战斗内核。主线程由 `HotKernel/Import/` 把一场真实战斗导入成紧凑的值状态
+  （`HotRootBundle`），之后的模拟只在值拷贝上进行。
+- **HotSearch**：在 HotKernel 上跑的自适应三段式搜索（`HotSearchCoordinator.Solve`）。
 
-峰值精确落在 `v0.28.0`，与 README 里"vendored CombatSolver 0.28"的说法一致。**所以合并基线是 `v0.28.0`，不是"某个模糊的 0.28 时代"。**
+对本模组的直接后果：
 
-> 这个基线是三方合并的 `base`，它把"哪些文件能整份取上游新版本、哪些必须人工合并"变成了可计算的事实——见 `VENDORING-GAP-REPORT.md`。
+| | 0.50.1（旧） | 1.0.0（现在） |
+|---|---|---|
+| 后台搜索碰不碰游戏对象 | 碰（克隆真实 Model 再模拟），所以要一批 Harmony 隔离补丁 | **不碰**，隔离补丁全部不再需要 |
+| 私有成员访问散在哪 | 40 个文件、226 处 | **只在主线程根导入层**：4 个文件、72 处 |
+| 与上游的差异形态 | 56 个文件被手工改编，每次同步都要三方合并 | 除私有访问改写外**零改动**，改写由脚本重放 |
+| 第三方模组内容 | 部分支持 | **明确拒绝**（`VanillaRootGate` 抛 `IncompatibleGameplayModException`） |
+| 多人战斗 | 引擎按玩家数处理 | 上游只建模一名玩家、多人局根本不搜索；**nekospire 的本地补丁补上了人数规则**（见 1.1） |
 
-> `Engine/README.md` 记录了更早的来源：`Engine/` 子树最初来自本地 RandomForeseer 分支的 commit `598dce06`，随后改名到 `CombatSolver.Engine` 命名空间。上游 CombatSolver 自己也 vendoring 了同一套引擎，所以按 CombatSolver 的标签追踪仍然有效。
+旧机制（基线 `v0.28.0`、三方合并、`sync-vendor.ps1`、`VENDORING-GAP-REPORT.md`）随旧引擎一并作废，
+那两份文件留作历史记录。
 
-### 前提：上游需要完整历史
+### 1.1 本地补丁：多人战斗的本地玩家模型
 
-三方分析要读 `v0.28.0` 的源码树，所以上游克隆**不能是浅克隆**。补齐：
+上游检出（`D:\NekoClaw\CombatSolver`）**不做任何修改**。这组改动只存在于 nekospire 的内嵌副本里：
+定义在 `game_mod/scripts/vendor_local_patches.py`，同步脚本在换入上游、完成私有访问改写之后重放
+（5 个文件、11 处，每个锚点必须恰好命中一次）。要点：
 
-```powershell
-git -C D:\NekoClaw\CombatSolver fetch --unshallow --tags
-```
+- 内核仍只模拟**本地玩家**；队友不建模、不搜索其动作。
+- 人数规则冻结进 `HotCombatRulesSnapshot`（`PlayerCount` / `MultiplayerHpScale` / `MultiplayerEnemyBlockScale`）：
+  战斗中新建/孵化/复活的怪物生命、敌方获得的行动格挡按原版公式缩放。单人时全为 1，行为与文本不变。
+- 两处“唯一玩家”假设改成取本地玩家（`MadScienceGrowth.CaptureRemainingCapacity`、`BattleDamageTracker`）。
 
-（实测上游共 1659 个提交、109 个标签，`--depth 1` 补成完整历史只占十几 MB。）
+**已知不精确**：全队共享的 RNG 流（洗牌、随机目标）会被队友消耗，内核只推进本地玩家那一份，所以多人下
+跨回合的洗牌顺序不保证一致；随机选玩家的敌方效果按“总是命中本地玩家”处理；指向队友的多人牌没有队友
+目标可选。接缝因此在多人计划的 warnings 里加 `multiplayer:teammates_not_modeled:players=N` 并把
+`coverage.risk` 置真。
+
+**取证**（一次性，2026-11）：把同样的改动临时放进上游的离线差分模糊测试（内核每一步与真实游戏逐字段对比，
+60 场同种子）跑过：单人 56/60 → 56/60，失败桶逐个相同（无回归）；加一名不行动的队友 13/60 → 18/60，
+测试宿主再让队友不会死后 30/60，剩余失败以共享 RNG 分歧为主。上游已恢复原样，那个带 `--teammates` 的
+模糊测试入口没有保留；现在能重跑的是 `game_mod/SolverSmoke --teammates …`（见第 5 节）。
+
+**再同步时**：锚点对不上说明上游改了这些位置——先看上游是否已经自己支持多人（那就删掉对应补丁），
+否则按新代码重写锚点。
 
 ---
 
 ## 2. 三层结构
 
-### 第 1 层：vendor 闭包（来自上游，尽量零改动）
+### 第 1 层：vendor 闭包（来自上游，83 个文件）
 
-上游 4 个子树里**不属于独立模组外壳**的部分：
+| 子树 | 文件数 | 说明 |
+|---|---:|---|
+| `HotKernel/` | 42 | 整棵取。`State/`、`Rules/`、`Sim/` 是纯值内核；`Import/` 是唯一读游戏对象的子层 |
+| `HotSearch/` | 11 | 整棵取 |
+| `Search/` | 17 | 整棵取（1.0.0 里已瘦身成对外 DTO 与策略合同：`CombatPlan`、`SearchPolicySnapshot`…） |
+| `Prediction/` | 4 | 整棵取 |
+| `Engine/` | 1 | 整棵取（只剩 `PredictionUnsupportedException`） |
+| `Runtime/` | 8 / 39 | 只取根捕获与结果合同需要的：`CombatRootSnapshot`、`ContinuationStamp`、`LiveCombatStamp`、`BattleDamageTracker`、`SolverProgress`、`SolverDisplayNames`、`DingyDaggerDisplayNames`、`LiveEndTurnRiskEvaluator` |
 
-| 子树 | 上游总数 | 本仓库已 vendor |
-|---|---|---|
-| `Engine/` | 170 | 132 |
-| `Prediction/` | 56 | 41 |
-| `Runtime/` | 64 | **12**（上游这棵树基本已变成 Godot 外壳） |
-| `Search/` | 252 | 61 |
+命名空间保持上游原样（`CombatSolver.*`），**不改名**。
 
-命名空间保持上游原样（`CombatSolver.*`，根命名空间 `CombatSolver`），**不改名**——这样重新 vendor 时不需要做任何重命名变换。
-
-### 第 2 层：本地保留文件（重新 vendor 时**绝不能被覆盖**）
+### 第 2 层：本地保留文件
 
 | 文件 | 为什么存在 |
 |---|---|
-| `Engine/Common/GameRef.cs` | **反射适配层**。上游直接读写游戏私有成员（`card._cloneOf`、`power._amount`、`cost._unused`…），本模组无权这么做，全部改走这里。上游**没有**这个文件。 |
-| `EntryShim.cs` | 补上被排除的上游 `src/Api/Entry.cs` 所声明的 `CombatSolver.Entry`（`Logger` / `ModId`），让 vendor 文件**零改动**解析这些引用。 |
-| `SolverPolicyEnums.cs` | 补上被排除的 `src/Runtime/SolverSettings.cs` 所声明的 `SolverPotionPolicy` / `BossHpStrategy` 枚举。 |
+| `Engine/Common/GameRef.cs` | **反射适配层**。上游靠 Krafs.Publicizer 直接读游戏私有成员，本模组不能这么做（见约束一），全部改走这里。上游没有这个文件；它位于被整棵替换的 `Engine/` 里，脚本会先取出再放回。 |
+| `SolverShellShims.cs` | 补齐被排除的外壳文件所声明、而 vendor 闭包又引用的类型：`SolverPotionPolicy` / `BossHpStrategy` / `SolverSettings`（上游 `Runtime/SolverSettings.cs`）、`SearchProgressDisplayState`（上游 `Runtime/SolverControllerSessions.cs`）；并用一条 `global using` 让改写后的文件解析到 `GameRef`。**每次同步后要与上游对应声明逐字核对。** |
+| `EntryShim.cs` | 补齐被排除的上游 `Runtime/Entry.cs` 所声明的 `CombatSolver.Entry`（`Logger` / `ModId`）。 |
 
 ### 第 3 层：接缝（本模组自己的代码）
 
 | 文件 | 作用 |
 |---|---|
-| `CombatSolverFacade.cs` | 把上游 `SolverResult` 映射成本模组的 `SolverPlanPayload`（HTTP `/solver/plan` 的合同）。只给建议，**从不出手部署**。 |
-| `CombatSolverRuntime.cs` | 从 `NekoComm.ModEntry` 安装引擎运行时与两个 Harmony 隔离补丁。 |
+| `CombatSolverFacade.cs` | 主线程 `CombatRootSnapshot.Capture` → 后台 `HotSearchCoordinator.Solve` → 把 `SolverResult` 映射成 `SolverPlanPayload`（HTTP `/solver/plan` 的合同）。只给建议，**从不出手部署**。 |
+| `CombatSolverRuntime.cs` | 从 `NekoComm.ModEntry` 接好引擎日志，并 `PatchAll` 本模组自己的 Harmony 补丁。 |
+
+接缝里三处需要知道的设计决定：
+
+1. **搜索策略照抄上游默认设置**（`SolverController.CaptureSearchPolicy` + 默认 `SolverSettingsData`：Medium 档、
+   Smart 药水、进度优先的 Boss 策略、遗物策略开）。本模组只暴露一个旋钮：`NekoConfig.solver_budget_seconds`
+   → `MaxHardFightThinkSeconds`（难局自适应加深的墙钟上限，引擎钳到 1..15 秒）。
+2. **药水**：旧接缝有一套自己的"损血 ≤ 8 就不用药，否则按药水数量逐级放开"的循环；1.0.0 把药水放进同一个
+   目标函数里定价（`PotionHpThresholds`：按档位 9 / 14 / 18 点血才值得用一瓶），所以那套循环删掉了。
+3. **前置条件显式把关**：不在本地玩家出牌阶段时，`BuildPlanAsync` 直接返回 `in_combat=false` + 原因，
+   不去捕获根。多人战斗照常求解（只为本地玩家规划），并在 warnings 里注明队友未建模。
 
 ---
 
@@ -92,90 +121,116 @@ git -C D:\NekoClaw\CombatSolver fetch --unshallow --tags
 
 > Publicizer 的 `IgnoresAccessChecksTo("sts2")` 在 plain-SDK 插件模组下**不被 mod 加载器承认**（实测：直接 `ldfld` 一个私有字段仍然抛 `FieldAccessException`），RitsuLib 也不做运行时公开化。
 
-**后果**：上游每一处直连游戏私有成员的地方，都必须改写成 `GameRef` 反射调用。这是每次再 vendor 的**主要工作量**。当前基线有 **226 处调用、散在 40 个文件**（见清单里的 `uses_gameref` 字段）。
+**后果**：上游每一处直连游戏私有成员的地方，都必须改写成 `GameRef` 反射调用。1.0.0 里这些访问全部落在
+主线程根导入层，共 **72 处、4 个文件**：
+
+| 文件 | 改写 |
+|---|---|
+| `HotKernel/Import/HotRootBuilder.cs` | 48 处私有字段/属性 + 14 处 `GetInternalData<XPower.Data>()` |
+| `HotKernel/Import/HotImportSupport.cs` | 7 处私有字段 + RNG 状态改用公开的 `Rng.ToSerializable()` |
+| `HotKernel/Import/VanillaRootGate.cs` | 1 处 `GetInternalData` |
+| `Search/PotionRewardOutlook.cs` | 1 处私有属性模式 |
+
+改写**不是手工做的**：配方登记在 `vendor-combat-solver.py`（成员名 → C# 类型，类型取自真实 `sts2.dll` 元数据），
+每个文件带**期望命中数**。上游新增或删除一处私有访问 ⇒ 命中数对不上 ⇒ 脚本失败。这是有意的：宁可同步时
+停下来，也不要带着漏改的访问进游戏。
+
+反射开销只发生在**每次捕获根**的时候（一次 `/solver/plan` 一次），搜索热路径不经过它。
 
 ### 约束二：**不能用 Godot.NET.Sdk**
 
-本工程是 `Microsoft.NET.Sdk`（原因见 `Game/DanmakuOverlay.cs` 注释：游戏数据目录不带 Godot 源生成器，继承 `_Process` 的 C# 节点不会被接线）。
+本工程是 `Microsoft.NET.Sdk`（游戏数据目录不带 Godot 源生成器，自己声明的 `Node` 子类不会被接线）。
 
-**后果**：任何 `using Godot;` 或继承 `Node` 的上游文件都不能编进来。判别方法就是这两个特征串。
+**后果**：凡是**声明** `Node` 子类的上游文件都不能编进来。只是**使用** Godot 类型的文件没问题
+（`SolverDisplayNames.cs` 读 `Marker2D` / 节点坐标给敌人排座次，原样编入）。1.0.0 的 vendor 子树里已经没有
+任何 `Node` 子类，这条约束目前只用来解释为什么 `Runtime/` 的外壳不取。
 
 ### 约束三：**工具链是 .NET 9 / C# 13**
 
-上游如果用 C# 14 语法（例如 C# 14 的 extension blocks），要改写成 C# 13 等价写法。`Engine/README.md` 记录了历史上做过同类改写。
+上游 1.0.0 自己的 `LangVersion` 也是 13.0，目前没有需要降级改写的语法。
 
 ---
 
-## 4. 边界怎么划（分类规则）
-
-判据来自上游自己的 `docs/ARCHITECTURE.md` 模块归属表：
-
-| 上游模块 | 处置 | 理由 |
-|---|---|---|
-| §3 Search（搜索大脑） | **vendor** | 引擎本体 |
-| §4 `Engine/InCombat/Simulation/`、`Engine/InCombat/Mirrors/`、`Prediction/` | **vendor** | 模拟与预测，引擎本体 |
-| §2 `Runtime/` 中的 `CombatRootSnapshot`、`ContinuationStamp`、`SearchMemoryPressureSignal` 等 | **vendor** | 主线程根捕获/续用戳/内存压力信号，嵌入方也需要 |
-| §2 `Runtime/` 中的 `Entry.cs`、`SolverController*`、`SolverDispatcher`、`SolverSettings`、`PlayerTurnSetupPatches`、`NativeChoiceRuntime` | **排除** | 独立模组的生命周期/控制器/调度器/原生回合接线；本模组用 `CombatSolverFacade` 自己驱动 |
-| §5 UI（`SolverOverlay*`） | **排除** | 本模组用自己的游戏内弹幕渲染 |
-| §6 Testing（237 个文件） | **排除** | 测试宿主不随引擎分发 |
-| `Api/`、`Diagnostics/`、`Replay/`、`Strategy/` | **排除** | 独立模组的外壳/网络展柜/缺陷报告/性能录制 |
-| **特例**：Search 核心的 partial 分片若含 Godot 调用 | **vendor 但要先去 Godot 化** | 它们是 `CombatBeamSolver` 的一部分，排除会引发大量 missing-type 连锁错误（实测过一次，炸出 47 类错误） |
-
-具体的文件名模式、排除清单与"必须去 Godot 化"清单，**以 `VENDORING-RULES.json` 为准**——不要在这份文档里找权威答案，改动只改那个 JSON。
-
----
-
-## 5. 再同步一次的标准流程
-
-核心思路：**用 `v0.28.0` 当基线做三方合并**，而不是"逐文件比 0.50.1"。前者能把工作量算清楚，后者会被"代码在文件之间搬家"误导。
+## 4. 再同步一次的标准流程
 
 ```powershell
-# 0) 拿到上游 + 补齐历史（三方分析需要标签 v0.28.0）
-git clone https://github.com/Torch1230/CombatSolver.git D:\NekoClaw\CombatSolver
-git -C D:\NekoClaw\CombatSolver fetch --unshallow --tags
+# 0) 更新上游
+git -C D:\NekoClaw\CombatSolver pull
 
-# 1) 只读差距报告 —— 安全，不动任何源码
-#    报告会给出：可整份取上游的文件数 / 必须人工合并的冲突文件清单 / 新增核心文件数
-game_mod\scripts\sync-vendor.ps1
+# 1) 干跑：报告会写哪些文件、删哪些陈旧文件、配方是否全部命中（不动任何源码）
+python game_mod\scripts\vendor-combat-solver.py
 
-# 2) 按报告处理：
-#    a. 「与 base 逐字相同」的文件 -> 直接用上游新版本覆盖（零冲突）
-#    b. 「人工三方合并」的 38 个文件 -> 逐个把上游改动合进我们的改编版，保住 GameRef 适配
-#    c. 「保留我们的」8 个文件 -> 不动
-#    d. 5 个 Search 核心 -> 去 Godot 化后编入
-#    e. 新核心文件 -> 按规则纳入（其中含私有成员访问的要改走 GameRef）
+# 2) 若上游版本/提交变了：先改 VENDORING-RULES.json 的 upstream.expected_version / expected_commit，
+#    并核对 SolverShellShims.cs 里每个声明与上游是否仍然逐字一致。
 
-# 3) 真正执行（会先备份到 game_mod/build/vendor-backup/Solver-<时间戳>.zip）
-game_mod\scripts\sync-vendor.ps1 -Apply
+# 3) 执行：清空 vendor 子树 → 拷入上游闭包 → 放回 GameRef.cs → 重放私有访问改写 → 重写清单
+python game_mod\scripts\vendor-combat-solver.py --apply
 
-# 4) 从备份里取回 5 个本地保留文件（脚本刻意不自动做，避免静默用错版本）
+# 4) 编译到零错误（Solver/ 之外的 Game/、Server/ 也会被游戏更新打断，一起看）
+python game_mod\scripts\build-errors.py --all
+#    CS1061 / CS0117 / CS0122 指向游戏类型的私有成员 -> 在脚本的 PRIVATE_MEMBERS / INTERNAL_DATA_FIELDS
+#                                                      里登记（类型以 sts2.dll 元数据为准），并更新 EXPECTED 命中数
+#    CS0246 / CS0103 指向被排除的外壳类型            -> 在 SolverShellShims.cs 里补声明
+#    接缝报错（CombatSolverFacade.cs）                -> 读懂上游 SolverController 的对应改动后再改
 
-# 5) 按编译错误逐类适配，直到零错误：
-#    CS0122/CS1061  -> 改走 GameRef
-#    CS0246/CS0234  -> 排除引用方，或在 Shim 里补声明
-#    Godot/Node     -> 去 Godot 化
-
-# 6) 重新生成普查并跑测试
-game_mod\scripts\sync-vendor.ps1
+# 5) 验证
+dotnet run --project game_mod\SimTests -c Release
 dotnet build game_mod\nekospire\nekospire.csproj -c Release
-python -m pytest tests -q
+dotnet run --project game_mod\SolverSmoke -c Release -- --character IRONCLAD --encounter NibbitsWeak --turns 4
+#    插件侧 pytest 见仓库根的 AGENTS.md
 ```
 
 ### 完成标准
 
-见 `VENDORING-RULES.json` 的 `definition_of_done`。核心是：**Release 编译零错误 + 现有测试无新增失败 + 清单里本地独有文件仍只有 `GameRef.cs` + README 版本号与许可证描述与上游一致。**
-
-### ⚠️ 本机**验证不了**的部分
-
-这台机器上**没有游戏可跑**。任何同步动作最多只能保证"**编译通过 + 测试通过**"，**无法验证求解器在真实对局里的行为**。
-
-求解器是本模组最要命的部件（它决定你打哪张牌）。一次未被发现的语义回归，可能让胜率**悄悄**变差而日志里看不出异常。**所以每次同步后必须由作者在游戏里实测。**
+见 `VENDORING-RULES.json` 的 `definition_of_done`。
 
 ---
 
-## 6. 已知的历史教训（避免重犯）
+## 5. 验证边界
 
-1. **"含 Godot 就排除"这条规则不能无脑套到 Search 上。** 曾经这么干过，把 `CombatBeamSolver.Phases.cs`、`Retention.cs`、`BeamRetentionPolicy.cs` 等 partial 分片砍掉，立刻炸出 47 类缺失错误。这些文件是搜索大脑本体，只能去 Godot 化，不能排除。
-2. **逐文件差异比对会被"代码在文件之间搬家"误导。** 例如 `CombatBeamSolver.Expansion.cs` 上游 306 行、本仓库 3430 行，而 `CyclePlanning.cs` 正好相反——说明代码被重新切分过。可靠的办法是看**类型/成员**层面，或者干脆让编译器来判断。
-3. **比较文件时一定要先规范化换行符与 BOM。** 否则会出现"245 个文件全都不同"的假象——实际上其中 54 个是逐字相同的，只是 CRLF/LF 不同。
-4. **PowerShell 脚本必须存成 UTF-8 with BOM。** Windows PowerShell 5.1 默认按 GBK 读 `.ps1`，无 BOM 的中文注释会被撕碎并引发语法错误（本脚本踩过一次）。生成的 JSON 则相反，写成不带 BOM 更便于其它工具读取。
+### 离线冒烟能证明什么
+
+`game_mod/SolverSmoke/` 是一个普通 .NET 9 控制台程序。它借用上游 `OfflineSearchHarness` 的引导代码
+（从上游检出目录**链接**进来，不复制）在没有 Godot 引擎的进程里把游戏核心层跑起来，开一局真实的跑局、
+进一场真实的战斗，然后每个玩家回合：
+
+1. 通过反射调用**构建出的 `nekospire.dll`** 里的 `CombatSolverFacade.BuildPlanAsync`
+   —— 就是 `GET /solver/plan` 背后的那个入口，同一份 IL，没有公开化；
+2. 把返回的本回合步骤按插件的口径（按 `card_id` 在手牌里找牌、按 `target_index` 取敌人）打到实机战斗上；
+3. 结束回合，重复。
+
+任何一步出错都以非零退出：门面拒绝了一个真实的出牌阶段根、`search_status` 不在插件闸门认可的集合里、
+或者计划里的某一步被游戏拒绝。
+
+所以它覆盖了编译覆盖不到的东西：**GameRef 的成员名和类型对不对、根捕获在真实对象上跑不跑得通、
+搜索出来的步骤游戏认不认**。可以用 `--relics` / `--cards` / `--potions` / `--powers` 把那些"根捕获要读其私有
+状态"的遗物、卡牌、能力摆上台面专门打一遍。
+
+### 它证明不了什么（必须在游戏里看）
+
+- **游戏进程内的加载**：真实的模组加载器、Godot 运行时、RitsuLib 的实际加载顺序。约束一那条实测结论
+  （加载器不承认 Publicizer）就是只在游戏里才成立的事实，离线进程里看不出来。
+- **`SolverDisplayNames` 的真实路径**：离线没有 `NCombatRoom` 节点，敌人排座次走的是无节点分支。
+- **选牌类步骤**：冒烟遇到带 `choice_card_id` 的步骤会停手（需要按计划驱动选牌界面，不在冒烟范围内）。
+- **路线质量与耗时**：离线只看"能不能算、算出来的能不能打"，不评价打得好不好、卡不卡。
+- **真实联机的多人战斗**：冒烟的 `--teammates` 用的是游戏自带的“虚拟多人”（单机网络服务 + 多名不行动的
+  队友），能验证人数规则与根捕获，验证不了真实联机下队友行动、同步与共享 RNG 的影响。
+
+**每次同步后仍然必须由作者在游戏里实测。**
+
+---
+
+## 6. 历史教训（避免重犯）
+
+1. **"命中数是断言，不是统计"。** 给私有访问写改写规则时，一定要绑定到具体文件和期望次数。内核自己的结构体
+   里也有 `_base` 这样的字段名，无差别的正则会把它们也改成反射调用（1.0.0 同步时 `HotCostModifiers.cs`
+   就被误伤过一次，靠"没登记的文件一律原样取"这条规则挡住）。
+2. **取可信错误数必须非增量编译。** MSBuild 增量判定会跳过编译阶段，给出虚假的低错误数。
+3. **C# 的错误是分阶段报的。** "找不到类型"修完之后才会出现"找不到成员"。第一轮只有十几个错误不代表快完了。
+4. **游戏更新不只打断求解器。** 0.111 → 0.113 同时改了商店购买（`OnTryPurchaseWrapper` →
+   `MerchantSynchronizer.PurchaseLocalEntry`）、联机加入（`JoinFlow` 构造函数）、进阶文案（多了 `GameMode` 参数）
+   和大厅玩家字段。这些在 `Game/` 里，编译错误要连它们一起看。
+5. **比较文件前先规范化换行符与 BOM。** 上游是 LF，本仓库工作区是 CRLF（`core.autocrlf=true`）。
+6. **读 C# 源码的测试会被同步打到。** `tests/test_t45_solver_gate.py` 直接解析 `Search/CombatPlan.cs` 里的
+   `SearchBoundaryReason` 枚举，要求它与插件的 `SOLVER_SEARCH_STATUSES` 逐项相等。上游增删枚举成员时
+   （1.0.0 删了 `MemoryNoProgress`），插件侧 `loop_runner.py` 必须同步改。

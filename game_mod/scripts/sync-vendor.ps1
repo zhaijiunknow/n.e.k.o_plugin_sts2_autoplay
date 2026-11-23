@@ -54,6 +54,12 @@ if (-not (Test-Path $rulesPath))  { throw "找不到规则文件: $rulesPath" }
 if (-not (Test-Path $UpstreamRoot)) { throw "找不到上游克隆: $UpstreamRoot（先 git clone https://github.com/Torch1230/CombatSolver.git）" }
 
 $rules = Get-Content $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+# 本脚本只认识 schema/1 的规则（0.28 -> 0.50.1 的 Engine/Search 架构：三方合并 + 按文件名排除）。
+# 内嵌引擎换成上游 1.0.0（HotKernel）后规则升到 schema/2，同步改由 vendor-combat-solver.py 负责。
+# 在新规则上继续跑会按不存在的排除清单清空并重拷 vendor 子树，所以这里直接拒绝。
+if ($rules.schema -ne "nekospire-combat-solver-vendoring-rules/1") {
+    throw "sync-vendor.ps1 已随旧引擎作废（规则 schema = $($rules.schema)）。请改用: python game_mod\scriptsendor-combat-solver.py"
+}
 $upSrc = Join-Path $UpstreamRoot "src"
 if (-not (Test-Path $upSrc)) { throw "上游缺少 src/ 目录: $upSrc" }
 

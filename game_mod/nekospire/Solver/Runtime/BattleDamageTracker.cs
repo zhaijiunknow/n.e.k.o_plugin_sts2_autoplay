@@ -105,8 +105,14 @@ internal static class BattleDamageTracker
         ClearPlan();
     }
 
+    // The tracked battle damage is the LOCAL player's; in a co-op combat that is LocalContext.GetMe,
+    // not "the only player".
     private static Player? GetSinglePlayer(ICombatState? combat)
-        => combat?.Players.Count == 1 ? combat.Players[0] : null;
+        => combat == null
+            ? null
+            : combat.Players.Count == 1
+                ? combat.Players[0]
+                : MegaCrit.Sts2.Core.Context.LocalContext.GetMe(combat.Players);
 
     internal static int RecoveredOrGainedForDisplay(int startHp, int currentHp, int observedLoss)
         => Math.Max(0, observedLoss + currentHp - startHp);

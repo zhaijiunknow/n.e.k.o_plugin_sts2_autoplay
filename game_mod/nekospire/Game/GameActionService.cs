@@ -3104,6 +3104,18 @@ internal static class GameActionService
         };
     }
 
+    // Game 0.113 replaced MerchantEntry.OnTryPurchaseWrapper with the same path the shop UI takes
+    // (NMerchantSlot.OnSelected): MerchantSynchronizer.PurchaseLocalEntry runs the purchase locally and
+    // propagates it to co-op peers so every client applies it deterministically. The unsynchronized
+    // call is only for an entry that is not registered in a synchronized inventory (no Id).
+    private static Task<bool> PurchaseMerchantEntryAsync(MerchantEntry entry, MerchantInventory inventory)
+    {
+        var synchronizer = RunManager.Instance.MerchantSynchronizer;
+        return synchronizer != null && entry.Id.HasValue
+            ? synchronizer.PurchaseLocalEntry(entry)
+            : entry.OnTryPurchaseUnsynchronized(inventory);
+    }
+
     private static async Task<ActionResponsePayload> ExecuteBuyCardAsync(ActionRequest request)
     {
         var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
@@ -3156,7 +3168,7 @@ internal static class GameActionService
 
         var previousGold = inventory.Player.Gold;
         var previousCardId = entry.CreationResult?.Card.Id.Entry;
-        var success = await entry.OnTryPurchaseWrapper(inventory);
+        var success = await PurchaseMerchantEntryAsync(entry, inventory);
         if (!success)
         {
             throw new ApiException(409, "invalid_action", "Card purchase failed in the current state.", new
@@ -3229,7 +3241,7 @@ internal static class GameActionService
 
         var previousGold = inventory.Player.Gold;
         var previousRelicId = entry.Model?.Id.Entry;
-        var success = await entry.OnTryPurchaseWrapper(inventory);
+        var success = await PurchaseMerchantEntryAsync(entry, inventory);
         if (!success)
         {
             throw new ApiException(409, "invalid_action", "Relic purchase failed in the current state.", new
@@ -3302,7 +3314,7 @@ internal static class GameActionService
 
         var previousGold = inventory.Player.Gold;
         var previousPotionId = entry.Model?.Id.Entry;
-        var success = await entry.OnTryPurchaseWrapper(inventory);
+        var success = await PurchaseMerchantEntryAsync(entry, inventory);
         if (!success)
         {
             throw new ApiException(409, "invalid_action", "Potion purchase failed in the current state.", new
@@ -3353,7 +3365,7 @@ internal static class GameActionService
 
         // Fire-and-forget: merchant card removal opens deck selection and blocks
         // until the player confirms a card. Do not await the full task here.
-        ObserveBackgroundResult(entry.OnTryPurchaseWrapper(inventory), "remove_card_at_shop");
+        ObserveBackgroundResult(PurchaseMerchantEntryAsync(entry, inventory), "remove_card_at_shop");
         var stable = await WaitForShopCardRemovalTransitionAsync(TimeSpan.FromSeconds(10));
 
         return new ActionResponsePayload
@@ -3783,8 +3795,8 @@ internal static class GameActionService
         var netId = (ulong)global::System.Environment.ProcessId;
         var initializer = new ENetClientConnectionInitializer(netId, "127.0.0.1", 33771);
         var netService = new NetClientGameService(PeerVersionInfo.LocalDefault());
-        var joinFlow = new JoinFlow(netService);
-        var joinResult = await joinFlow.Begin(initializer, NGame.Instance?.GetTree());
+        var joinFlow = new JoinFlow(netService, initializer);
+        var joinResult = await joinFlow.Begin(NGame.Instance?.GetTree());
 
         if (joinResult.sessionState.GetValueOrDefault() == RunSessionState.InLobby && joinResult.joinResponse.HasValue)
         {

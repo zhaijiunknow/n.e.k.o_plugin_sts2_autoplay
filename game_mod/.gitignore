@@ -34,3 +34,6 @@ SimTests/bin/
 SimTests/obj/
 # Steam Workshop 上传器（第三方二进制 + 本地上传工作区，不入库）
 ModUploader/
+
+SolverSmoke/bin/
+SolverSmoke/obj/

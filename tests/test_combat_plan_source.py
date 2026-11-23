@@ -55,7 +55,7 @@ class CombatPlanSourceTests(unittest.TestCase):
             "score": 42.0,
             "state_fingerprint": "abc123",
             # ★ t45：准入门槛要求「搜索已算出结果」——合法值域见
-            #   loop_runner.SOLVER_SEARCH_STATUSES（依据 CombatSolverFacade.cs:409-412）。
+            #   loop_runner.SOLVER_SEARCH_STATUSES（依据 CombatSolverFacade.cs 的 MapStatus）。
             "search_status": "complete",
             "line": [{"turn": 1, "steps": [{"kind": "play_card", "card_index": 1, "card_id": "STRIKE", "target_index": 0}]}],
         }

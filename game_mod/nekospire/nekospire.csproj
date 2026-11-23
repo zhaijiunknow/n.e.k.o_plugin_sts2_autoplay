@@ -25,7 +25,7 @@
          one on its own; the game API version has to be named explicitly. -->
     <RitsuLibRoot Condition="'$(RitsuLibRoot)'=='' and '$(OS)'=='Windows_NT'">$(SteamRoot)/steamapps/workshop/content/2868840/3747602295</RitsuLibRoot>
     <RitsuLibRoot Condition="'$(RitsuLibRoot)'==''">$(HOME)/.local/share/Steam/steamapps/workshop/content/2868840/3747602295</RitsuLibRoot>
-    <RitsuLibReferenceTarget Condition="'$(RitsuLibReferenceTarget)'==''">0.111.0</RitsuLibReferenceTarget>
+    <RitsuLibReferenceTarget Condition="'$(RitsuLibReferenceTarget)'==''">0.113.0</RitsuLibReferenceTarget>
   </PropertyGroup>
 
   <Import Project="$(RitsuLibRoot)/RitsuLib.References.props" Condition="Exists('$(RitsuLibRoot)/RitsuLib.References.props')" />

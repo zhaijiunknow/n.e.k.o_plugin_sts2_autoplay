@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Offline smoke test for the vendored CombatSolver engine: a plain .NET 9 console (no Godot engine) that
+    boots the game's core layer from the real sts2.dll, builds a real combat, and then drives the BUILT
+    nekospire.dll through its real seam (NekoComm.Game.CombatSolverFacade.BuildPlanAsync) via reflection.
+    It exists because the engine reads private game members through GameRef reflection: a wrong member
+    name or type compiles fine and only fails in the game. This runs that code against live game objects.
+
+    The Godot bypasses and the main-loop pump are upstream's own OfflineSearchHarness sources, linked from
+    the upstream checkout (not copied). Those files use Krafs.Publicizer for sts2, which is fine for a dev
+    tool in a plain CLR process; nekospire.dll itself is referenced as built (no publicizer).
+
+    Usage: build the mod first (dotnet build ../nekospire/nekospire.csproj -c Release), then run this
+           project with the options listed at the bottom of Program.cs (character / encounter / relics /
+           cards / potions / turns).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>13.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SolverSmoke</AssemblyName>
+    <RootNamespace>SolverSmoke</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <NoWarn>$(NoWarn);CS0436</NoWarn>
+    <CombatSolverUpstream Condition="'$(CombatSolverUpstream)' == ''">D:/NekoClaw/CombatSolver</CombatSolverUpstream>
+    <HarnessDir>$(CombatSolverUpstream)/tools/search/OfflineSearchHarness</HarnessDir>
+    <SteamRoot Condition="'$(SteamRoot)' == '' and Exists('D:/Steam')">D:/Steam</SteamRoot>
+    <SteamRoot Condition="'$(SteamRoot)' == ''">$(MSBuildProgramFiles32)/Steam</SteamRoot>
+    <Sts2DataDir Condition="'$(Sts2DataDir)' == ''">$(SteamRoot)/steamapps/common/Slay the Spire 2/data_sts2_windows_x86_64</Sts2DataDir>
+    <RitsuWorkshopRoot Condition="'$(RitsuWorkshopRoot)' == ''">$(SteamRoot)/steamapps/workshop/content/2868840/3747602295</RitsuWorkshopRoot>
+    <RitsuLibReferenceTarget Condition="'$(RitsuLibReferenceTarget)' == ''">0.113.0</RitsuLibReferenceTarget>
+    <NekospireDll Condition="'$(NekospireDll)' == ''">$(MSBuildThisFileDirectory)../nekospire/bin/Release/net9.0/nekospire.dll</NekospireDll>
+  </PropertyGroup>
+
+  <Import Project="$(RitsuWorkshopRoot)/RitsuLib.References.props" Condition="Exists('$(RitsuWorkshopRoot)/RitsuLib.References.props')" />
+
+  <ItemGroup>
+    <PackageReference Include="Krafs.Publicizer" Version="2.3.0" PrivateAssets="all" />
+    <Publicize Include="sts2" IncludeVirtualMembers="false" IncludeCompilerGeneratedMembers="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2" HintPath="$(Sts2DataDir)/sts2.dll" Private="false" />
+    <Reference Include="GodotSharp" HintPath="$(Sts2DataDir)/GodotSharp.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(Sts2DataDir)/0Harmony.dll" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="$(HarnessDir)/AssemblyBootstrap.cs" Link="Upstream/AssemblyBootstrap.cs" />
+    <Compile Include="$(HarnessDir)/GameBootstrap.cs" Link="Upstream/GameBootstrap.cs" />
+    <Compile Include="$(HarnessDir)/MainLoopContext.cs" Link="Upstream/MainLoopContext.cs" />
+    <Compile Include="$(HarnessDir)/MemorySaveStore.cs" Link="Upstream/MemorySaveStore.cs" />
+    <Compile Include="$(HarnessDir)/OfflineCombat.cs" Link="Upstream/OfflineCombat.cs" />
+    <Compile Include="$(HarnessDir)/OfflineLocalization.cs" Link="Upstream/OfflineLocalization.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Read by upstream's AssemblyBootstrap (module initializer) to resolve sts2 / RitsuLib at runtime. -->
+    <RuntimeHostConfigurationOption Include="Sts2DataDir" Value="$(Sts2DataDir)" />
+    <RuntimeHostConfigurationOption Include="RitsuLibCompatDir" Value="$(RitsuWorkshopRoot)/compat/$(RitsuLibReferenceTarget)" />
+    <RuntimeHostConfigurationOption Include="RitsuLibSharedDir" Value="$(RitsuWorkshopRoot)/shared" />
+    <RuntimeHostConfigurationOption Include="NekospireDll" Value="$(NekospireDll)" />
+  </ItemGroup>
+
+  <Target Name="ValidateSmokeInputs" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(HarnessDir)/GameBootstrap.cs')" Text="Upstream CombatSolver checkout not found at $(CombatSolverUpstream). Pass -p:CombatSolverUpstream=path." />
+    <Error Condition="!Exists('$(Sts2DataDir)/sts2.dll')" Text="sts2.dll not found at $(Sts2DataDir)." />
+  </Target>
+</Project>

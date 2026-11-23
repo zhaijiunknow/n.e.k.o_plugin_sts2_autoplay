@@ -126,7 +126,7 @@ def _combat_context(*, solver_plan=None, hand=None, energy=2, block=0, enemies=N
 
 def _plan(*steps) -> dict:
     # ★ t45：`search_status` 是准入门槛的判据之一（合法值域见
-    #   loop_runner.SOLVER_SEARCH_STATUSES，依据 CombatSolverFacade.cs:409-412）。
+    #   loop_runner.SOLVER_SEARCH_STATUSES，依据 CombatSolverFacade.cs 的 MapStatus）。
     #   "complete" ⇔ SearchBoundaryReason.None（搜索自然穷尽）。
     return {
         "in_combat": True,

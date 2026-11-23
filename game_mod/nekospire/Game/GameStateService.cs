@@ -1821,7 +1821,7 @@ internal static class GameStateService
         return string.IsNullOrWhiteSpace(resolvedRulesText) ? rulesText : resolvedRulesText;
     }
 
-    private static AscensionEffectPayload[] BuildAscensionEffectPayloads(int ascensionLevel)
+    private static AscensionEffectPayload[] BuildAscensionEffectPayloads(int ascensionLevel, GameMode gameMode)
     {
         if (ascensionLevel <= 0)
         {
@@ -1832,8 +1832,8 @@ internal static class GameStateService
             .Select(level => new AscensionEffectPayload
             {
                 id = $"LEVEL_{level:D2}",
-                name = AscensionHelper.GetTitle(level).GetFormattedText(),
-                description = AscensionHelper.GetDescription(level).GetFormattedText()
+                name = AscensionHelper.GetTitle(level, gameMode).GetFormattedText(),
+                description = AscensionHelper.GetDescription(level, gameMode).GetFormattedText()
             })
             .ToArray();
     }
@@ -2644,7 +2644,7 @@ internal static class GameStateService
             character_id = player.Character.Id.Entry,
             character_name = player.Character.Title.GetFormattedText(),
             ascension = runState.AscensionLevel,
-            ascension_effects = BuildAscensionEffectPayloads(runState.AscensionLevel),
+            ascension_effects = BuildAscensionEffectPayloads(runState.AscensionLevel, runState.GameMode),
             floor = runState.TotalFloor,
             current_hp = player.Creature.CurrentHp,
             max_hp = player.Creature.MaxHp,
@@ -3782,7 +3782,7 @@ internal static class GameStateService
                 : 4,
             players = lobby?.Players
                 .OrderBy(player => player.slotId)
-                .Select(player => BuildCharacterSelectPlayerPayload(player, lobby.LocalPlayer.id))
+                .Select(player => BuildCharacterSelectPlayerPayload(player, lobby.LocalPlayer.id, lobby.GameMode))
                 .ToArray() ?? Array.Empty<CharacterSelectPlayerPayload>(),
             characters = GetMultiplayerLobbyCharacters()
                 .Select((character, index) => new CharacterSelectOptionPayload
@@ -3928,7 +3928,7 @@ internal static class GameStateService
                 modifier_ids = lobby.Modifiers.Select(modifier => modifier.Id.Entry).ToArray(),
                 players = lobby.Players
                     .OrderBy(player => player.slotId)
-                    .Select(player => BuildCharacterSelectPlayerPayload(player, localPlayer.id))
+                    .Select(player => BuildCharacterSelectPlayerPayload(player, localPlayer.id, lobby.GameMode))
                     .ToArray(),
                 characters = buttons.Select((button, index) => new CharacterSelectOptionPayload
                 {
@@ -5057,7 +5057,7 @@ internal static class GameStateService
         }
     }
 
-    private static CharacterSelectPlayerPayload BuildCharacterSelectPlayerPayload(StartRunLobbyPlayer player, ulong localPlayerId)
+    private static CharacterSelectPlayerPayload BuildCharacterSelectPlayerPayload(StartRunLobbyPlayer player, ulong localPlayerId, GameMode gameMode)
     {
         return new CharacterSelectPlayerPayload
         {
@@ -5067,7 +5067,11 @@ internal static class GameStateService
             character_id = player.character?.Id.Entry,
             character_name = player.character?.Title.GetFormattedText(),
             is_ready = player.isReady,
-            max_multiplayer_ascension_unlocked = player.maxMultiplayerAscensionUnlocked
+            // Game 0.113 split the per-player cap by mode; the lobby's shared cap uses the same pick
+            // (StartRunLobby.UpdateMaxSharedAscension).
+            max_multiplayer_ascension_unlocked = gameMode == GameMode.Blitz
+                ? player.maxBlitzAscension
+                : player.maxStandardAscension
         };
     }
 

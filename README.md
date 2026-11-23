@@ -298,9 +298,10 @@ scripts\Start-NekoCoop.ps1 -SkipHostLaunch -ClientAutoplays           # host 你
 
 ## 依赖与兼容性
 
-- 需要 **RitsuLib 0.5.18+**；当前适配《杀戮尖塔 2》0.111.0（net9.0 / C# 13）。
-- 搜索受 Short/Deep 时间预算与分支上限约束，展示的是预算内找到的最佳路线，不承诺数学意义全局最优；**不修改游戏 RNG**。
-- 卡效推断依赖 RitsuLib（消除 `unsupported` 卡模）；对游戏私有成员的访问用 **GameRef 反射**（不依赖编译期/运行时 publicize，无 Krafs.Publicizer）。
+- 需要 **RitsuLib 0.6.11+**；当前适配《杀戮尖塔 2》0.113.x（net9.0 / C# 13）。
+- 搜索受思考时间上限（`solver_budget_seconds`，默认 12 秒，仅难局会用到）与节点/分支上限约束，展示的是预算内找到的最佳路线，不承诺数学意义全局最优；**不修改游戏 RNG**。
+- 求解器只支持**原版内容**：局面里出现第三方模组的卡牌/遗物/怪物/角色时它会明确拒绝（`in_combat=false` + 原因），不会带着不认识的内容硬算。多人（co-op）战斗只为**本地玩家**规划：人数带来的敌方生命/格挡缩放会算进去，队友不建模（计划按“队友不再行动”推演，warnings 里带 `multiplayer:teammates_not_modeled`，`coverage.risk=true`）。
+- 对游戏私有成员的访问用 **GameRef 反射**（不依赖编译期/运行时 publicize，无 Krafs.Publicizer）；RitsuLib 仍是硬依赖（引擎读 `RitsuLibFramework.GetMaxHandSize`）。
 
 ## 性能说明
 
@@ -621,9 +622,9 @@ locales_dir = "i18n"
 | `/events/stream` | SSE 场景事件流 |
 | `/solver/plan` | 战斗求解决策（权威来源） |
 
-- **战斗求解器**（`Solver/`）：内嵌 **vendored CombatSolver 0.50.1 引擎**（基线 `v0.28.0`），卡效推断用 **RitsuLib**，私有成员用 **GameRef 反射**（已去掉 Krafs.Publicizer）。`Game/Sim/` 是一套独立重实现的确定性结算器，仅作回退。
-  - vendor 边界、适配规则、再同步流程与流水线脚本见 [`game_mod/nekospire/Solver/VENDORING.md`](game_mod/nekospire/Solver/VENDORING.md) 与 `game_mod/scripts/apply-vendor-sync.py`；只读同步报告：`game_mod\scripts\sync-vendor.ps1`。
-  - **行为验证状态**：本次同步只验证到"Release 编译零错误 + SimTests 全通过"。求解器在真实对局中的行为**尚未验证**，见 `VENDORING.md` 的"验证边界"一节。
+- **战斗求解器**（`Solver/`）：内嵌 **vendored CombatSolver 1.0.0 引擎**（上游 `main@1ca3d6ce`，HotKernel 纯值战斗内核 + HotSearch；另加 nekospire 自己的多人本地玩家补丁，不改上游），私有成员用 **GameRef 反射**（无 Krafs.Publicizer）。`Game/Sim/` 是一套独立重实现的确定性结算器，仅作回退（`SolverEnabled=false`）。
+  - vendor 边界、适配规则与再同步流程见 [`game_mod/nekospire/Solver/VENDORING.md`](game_mod/nekospire/Solver/VENDORING.md)；流水线脚本：`game_mod/scripts/vendor-combat-solver.py`（换入上游 + 私有访问改写）、`game_mod/scripts/build-errors.py`（编译错误汇总）、`game_mod/SolverSmoke/`（不启动游戏的离线冒烟）。
+  - **行为验证状态**：Release 编译零错误 + SimTests 全通过 + 离线冒烟（用真实 `sts2.dll` 建真实战斗，经 `/solver/plan` 背后的同一入口求解并把计划打到实机战斗上）通过。**游戏进程内**的行为（Godot 运行时、模组加载器、真实对局质量）尚未验证，见 `VENDORING.md` 的"验证边界"一节。
 
 ## 问题反馈
 

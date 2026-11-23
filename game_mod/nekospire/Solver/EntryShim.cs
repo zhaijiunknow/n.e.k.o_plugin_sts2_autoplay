@@ -1,8 +1,8 @@
-// Vendored-entry shim. CombatSolver's real Entry.cs (which `using Godot;` and runs the full mod
-// lifecycle) is NOT vendored; the vendored Engine/Search/Prediction closure references
-// `CombatSolver.Entry.Logger` and `CombatSolver.Entry.ModId`. A class with the SAME full name lets those
-// references resolve with zero edits to the vendored files. Logger is wired by CombatSolverRuntime.Install()
-// via RitsuLibFramework.CreateLogger (RitsuLib is a declared dependency of the vendored build).
+// Vendored-entry shim. CombatSolver's real Entry (upstream src/Runtime/Entry.cs: `using Godot;`, runs the
+// full standalone-mod lifecycle) is NOT vendored; the vendored closure references
+// `CombatSolver.Entry.Logger`. A class with the SAME full name lets those references resolve with zero
+// edits to the vendored files. Logger is wired by CombatSolverRuntime.Install() to a game Logger
+// (upstream's is its own CombatSolverLog; the vendored files only call Info/Debug/Warn/Error on it).
 using MegaCrit.Sts2.Core.Logging;
 
 namespace CombatSolver;

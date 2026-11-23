@@ -243,9 +243,10 @@ scripts\Start-NekoCoop.ps1 -SkipHostLaunch -ClientAutoplays           # host alr
 
 ## Dependencies and compatibility
 
-- Requires **RitsuLib 0.5.18+**; currently adapted to 《Killing the Spire 2》 0.111.0 (net9.0 / C# 13).
-- The search is bounded by Short/Deep time budgets and branch limits; what's shown is the best route found within the budget, not a mathematical global optimum; **it does not modify the game's RNG**.
-- Card-effect inference depends on RitsuLib (eliminating `unsupported` card models); private game members are accessed via **GameRef reflection** (no compile-time/runtime publicization, no Krafs.Publicizer).
+- Requires **RitsuLib 0.6.11+**; currently adapted to 《Killing the Spire 2》 0.113.x (net9.0 / C# 13).
+- The search is bounded by a think-time ceiling (`solver_budget_seconds`, default 12 s, only reached on hard fights) and node/branch limits; what's shown is the best route found within the budget, not a mathematical global optimum; **it does not modify the game's RNG**.
+- The solver supports **vanilla content only**: when the position contains a third-party mod's card/relic/monster/character it refuses explicitly (`in_combat=false` plus the reason) instead of guessing. In multiplayer (co-op) combat it plans for the **local player** only: the player-count scaling of enemy HP/block is modelled, teammates are not (the line assumes they do nothing further; the payload carries a `multiplayer:teammates_not_modeled` warning and `coverage.risk=true`).
+- Private game members are accessed via **GameRef reflection** (no compile-time/runtime publicization, no Krafs.Publicizer); RitsuLib remains a hard dependency (the engine reads `RitsuLibFramework.GetMaxHandSize`).
 
 ## Performance notes
 
@@ -268,8 +269,8 @@ scripts\Start-NekoCoop.ps1 -SkipHostLaunch -ClientAutoplays           # host alr
 | `/events/stream` | SSE scene-event stream |
 | `/solver/plan` | combat solver decision (authoritative source) |
 
-- **Combat solver** (`Solver/`): embeds the **vendored CombatSolver 0.28 engine**, card-effect inference via **RitsuLib**, private members via **GameRef reflection** (Krafs.Publicizer removed). `Game/Sim/` is an independently reimplemented deterministic simulator, used only as a fallback.
-  - Upstream is now at **0.50.1** (84 releases of fixes and new capability). The vendoring boundary, adaptation rules and re-sync procedure are documented in [`game_mod/nekospire/Solver/VENDORING.md`](game_mod/nekospire/Solver/VENDORING.md), with a version-gap assessment in [`VENDORING-GAP-REPORT.md`](game_mod/nekospire/Solver/VENDORING-GAP-REPORT.md); run `game_mod\scripts\sync-vendor.ps1` for a read-only report.
+- **Combat solver** (`Solver/`): embeds the **vendored CombatSolver 1.0.0 engine** (upstream `main@1ca3d6ce`: HotKernel pure-value combat kernel + HotSearch; plus nekospire's own local-player patch for multiplayer combat — upstream itself is untouched), private members via **GameRef reflection** (no Krafs.Publicizer). `Game/Sim/` is an independently reimplemented deterministic simulator, used only as a fallback (`SolverEnabled=false`).
+  - The vendoring boundary, adaptation rules and re-sync procedure are documented in [`game_mod/nekospire/Solver/VENDORING.md`](game_mod/nekospire/Solver/VENDORING.md). Pipeline: `game_mod/scripts/vendor-combat-solver.py` (take upstream + rewrite private access), `game_mod/scripts/build-errors.py` (compiler error summary), `game_mod/SolverSmoke/` (offline smoke test, no game process).
 
 ## Bug reporting
 
@@ -320,7 +321,7 @@ This Mod's danmaku module references:
 This Mod's combat solver depends on the third-party shared framework **[STS2-RitsuLib](https://steamcommunity.com/sharedfiles/filedetails/?id=3747602295)** (card-effect IL inference, etc.). Make sure:
 - The **STS2-RitsuLib** Workshop mod is subscribed (auto-downloaded to `steamapps/workshop/content/2868840/3747602295/`);
 - A resolvable `STS2-RitsuLib.dll` is present in the game's `mods/` directory (`build-mod.ps1` does not copy it; if missing, the mod fails with `ReflectionTypeLoadException`);
-- `mod_id.json` / `mod_manifest.json` `dependencies` use the **new object form** with a `min_version` (e.g. `[{"id":"STS2-RitsuLib","min_version":"0.5.18"}]`) to avoid the old-style dependency migration notice.
+- `mod_id.json` / `mod_manifest.json` `dependencies` use the **new object form** with a `min_version` (e.g. `[{"id":"STS2-RitsuLib","min_version":"0.6.11"}]`) to avoid the old-style dependency migration notice.
 
 ## Redeploying
 
