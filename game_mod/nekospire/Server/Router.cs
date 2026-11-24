@@ -110,6 +110,39 @@ internal static class Router
                 return;
             }
 
+            if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/policy/data")
+            {
+                // The vocabulary the policy encoder needs; sent by the client that owns the network.
+                var policyData = await JsonHelper.DeserializeAsync<NekoComm.Policy.PolicyDataRequest>(request.InputStream, cancellationToken);
+                var installed = await GameThread.InvokeAsync(() => NekoComm.Policy.PolicyService.InstallData(policyData?.files));
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = installed
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/policy/decision")
+            {
+                // AlphaDefect policy seam: the decision (candidates + observation frame) for the current screen.
+                // ?obs_format=N pins the frame format to the one the loaded network was trained on.
+                int? obsFormat = int.TryParse(request.QueryString["obs_format"], out var parsedFormat) ? parsedFormat : null;
+                var decision = await GameThread.InvokeAsync(() => NekoComm.Policy.PolicyService.BuildDecision(obsFormat));
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = decision
+                });
+                statusCode = 200;
+                return;
+            }
+
             if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath is string dataPath &&
                 dataPath.StartsWith("/data/", StringComparison.OrdinalIgnoreCase))

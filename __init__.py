@@ -248,6 +248,49 @@ class STS2AutoplayPlugin(NekoPluginBase):
     async def sts2_set_standby(self, standby: bool, **_: Any):
         return await self._run_entry(lambda: self._service.neko.set_standby(standby))
 
+    # ---- 策略网络的下载前端（static/policy.html）----------------------------------------------
+    # 这四个入口只给那张页面用：`agent_auto=False`，不进 LLM 的工具表，也不往聊天里推任何东西。
+
+    @plugin_entry(
+        id="sts2_policy_status",
+        name="策略网络：下载状态",
+        description="查看策略网络的运行环境与各角色模型是否已下载。",
+        input_schema={"type": "object", "properties": {}},
+        metadata={"agent_auto": False},
+    )
+    async def sts2_policy_status(self, **_: Any):
+        return await self._run_entry(self._service.policy_assets_status)
+
+    @plugin_entry(
+        id="sts2_policy_prepare_runtime",
+        name="策略网络：准备运行环境",
+        description="运行环境（Python 与 PyTorch）不在本机时开始下载。打开下载页面时调用。",
+        input_schema={"type": "object", "properties": {}},
+        metadata={"agent_auto": False},
+    )
+    async def sts2_policy_prepare_runtime(self, **_: Any):
+        return await self._run_entry(self._service.policy_prepare_runtime)
+
+    @plugin_entry(
+        id="sts2_policy_download_model",
+        name="策略网络：下载角色模型",
+        description="下载某个角色的模型文件。",
+        input_schema={"type": "object", "properties": {"character": {"type": "string"}}, "required": ["character"]},
+        metadata={"agent_auto": False},
+    )
+    async def sts2_policy_download_model(self, character: str = "", **_: Any):
+        return await self._run_entry(lambda: self._service.policy_download_model(character))
+
+    @plugin_entry(
+        id="sts2_policy_remove_model",
+        name="策略网络：删除角色模型",
+        description="删除某个角色已下载的模型文件。",
+        input_schema={"type": "object", "properties": {"character": {"type": "string"}}, "required": ["character"]},
+        metadata={"agent_auto": False},
+    )
+    async def sts2_policy_remove_model(self, character: str = "", **_: Any):
+        return await self._run_entry(lambda: self._service.policy_remove_model(character))
+
     @plugin_entry(
         id="sts2_start_autoplay",
         name=tr("entries.sts2_start_autoplay.name", default="让它自己玩起来"),

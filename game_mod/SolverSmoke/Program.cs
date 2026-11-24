@@ -81,6 +81,8 @@ internal static class SmokeRun
         foreach (string spec in options.Powers)
             loop.RunUntilCompleted(ApplyPowerAsync(combat, player, spec), TimeSpan.FromSeconds(30), $"apply power {spec}");
         Console.WriteLine($"[smoke] root: {OfflineCombat.DescribeRoot(combat)}");
+        if (options.PolicyUrl.Length > 0)
+            return PolicySmoke.Run(loop, combat, player, options, seam.AssemblyPath);
 
         int plans = 0;
         for (int turn = 1; turn <= options.Turns; turn++)
@@ -277,7 +279,7 @@ internal static class SmokeRun
         Console.WriteLine($"[smoke]   did {kind} {id}{(target != null ? " -> " + target.Monster?.Id.Entry : "")}");
     }
 
-    private static void EndTurn(MainLoopContext loop, CombatState combat, Player player)
+    internal static void EndTurn(MainLoopContext loop, CombatState combat, Player player)
     {
         int turnBefore = player.PlayerCombatState!.TurnNumber;
         CombatManager.Instance.OnEndedTurnLocally();
@@ -287,7 +289,7 @@ internal static class SmokeRun
 
     /// <summary>Pump until the action queue is idle and the combat is back at a stable Play-phase
     /// boundary (or over). Same stability condition as upstream RealCombatDriver.RunRealCombatAction.</summary>
-    private static void Settle(MainLoopContext loop, CombatState combat, Player player, int? turnBefore)
+    internal static void Settle(MainLoopContext loop, CombatState combat, Player player, int? turnBefore)
     {
         ActionExecutor executor = RunManager.Instance.ActionExecutor;
         DateTime deadline = DateTime.UtcNow.AddSeconds(60);
@@ -333,6 +335,89 @@ internal static class SmokeRun
         return matches.Length == 1
             ? matches[0]
             : throw new InvalidOperationException($"{kind} '{input}' matched {matches.Length} models");
+    }
+}
+
+/// <summary>
+/// --policy &lt;sidecar url&gt;: the AlphaDefect policy path instead of the solver. Every decision of the fight,
+/// the built nekospire.dll encodes the live combat (its own decision builder + vendored encoder), the
+/// inference sidecar scores the frame, and the picked candidate is carried out with the indices nekospire
+/// would send to its own /action handler. Fails when encoding throws, the network rejects the frame, the
+/// picked candidate has no action, or the game refuses it. With --teammates this is the only check of the
+/// multiplayer frame (the network was trained single-player; this says nothing about how well it plays).
+/// </summary>
+internal static class PolicySmoke
+{
+    public static int Run(MainLoopContext loop, CombatState combat, Player player, Options options, string nekospireDll)
+    {
+        Assembly assembly = AppDomain.CurrentDomain.GetAssemblies().First(a => a.Location == nekospireDll);
+        Type frame = assembly.GetType("NekoComm.Policy.PolicyFrame", throwOnError: true)!;
+        Type probe = assembly.GetType("NekoComm.Policy.PolicyFidelityProbe", throwOnError: true)!;
+        const BindingFlags Any = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+        string data = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(nekospireDll)!, "..", "..", "..", "Policy", "Data"));
+        if (!(bool)frame.GetMethod("LoadData", Any)!.Invoke(null, [data])!)
+            throw new InvalidOperationException($"policy data not found in {data} (run scripts/vendor-alphadefect.py --apply)");
+        probe.GetMethod("InstallHooks", Any)!.Invoke(null, null);
+        MethodInfo combatJson = probe.GetMethod("CombatJson", Any)!;
+        using HttpClient http = new(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(60) };
+
+        int decisions = 0;
+        for (int turn = 1; turn <= options.Turns && CombatManager.Instance.IsInProgress; turn++)
+        {
+            for (int step = 0; step < 40 && CombatManager.Instance.IsInProgress; step++)
+            {
+                JsonElement decision = JsonDocument.Parse((string)combatJson.Invoke(null, [(int?)options.ObsFormat])!).RootElement;
+                JsonElement[] candidates = decision.GetProperty("candidates").EnumerateArray().ToArray();
+                string body = JsonSerializer.Serialize(new { character = player.Character.Id.Entry, frame = decision.GetProperty("frame").GetString() });
+                using HttpResponseMessage reply = http.PostAsync(options.PolicyUrl + "/infer",
+                    new StringContent(body, System.Text.Encoding.UTF8, "application/json")).GetAwaiter().GetResult();
+                JsonElement scored = JsonDocument.Parse(reply.Content.ReadAsStringAsync().GetAwaiter().GetResult()).RootElement;
+                if (!scored.GetProperty("ok").GetBoolean())
+                    throw new InvalidOperationException("sidecar rejected the frame: " + scored.GetProperty("error"));
+                if (scored.GetProperty("num_candidates").GetInt32() != candidates.Length)
+                    throw new InvalidOperationException("sidecar and nekospire disagree on the number of candidates");
+                int choice = scored.GetProperty("choice").GetInt32();
+                JsonElement picked = candidates[choice];
+                decisions++;
+                Console.WriteLine($"[policy] turn {player.PlayerCombatState!.TurnNumber}: {picked.GetProperty("label").GetString()} " +
+                    $"(p={scored.GetProperty("probs")[choice].GetDouble():0.00}, {candidates.Length} candidates, value {scored.GetProperty("value").GetDouble():0.00})");
+                string action = picked.GetProperty("action").GetString()
+                    ?? throw new InvalidOperationException("the picked candidate has no nekospire action");
+                if (action == "end_turn")
+                {
+                    SmokeRun.EndTurn(loop, combat, player);
+                    break;
+                }
+                Creature? target = null;
+                if (picked.GetProperty("target_index").ValueKind == JsonValueKind.Number)
+                {
+                    int index = picked.GetProperty("target_index").GetInt32();
+                    target = combat.Enemies.ElementAtOrDefault(index)
+                        ?? throw new InvalidOperationException($"target_index {index} is outside combat.enemies[]");
+                }
+                if (action == "play_card")
+                {
+                    CardModel card = player.PlayerCombatState!.Hand.Cards[picked.GetProperty("card_index").GetInt32()];
+                    if (!card.TryManualPlay(target))
+                        throw new InvalidOperationException($"game rejected {picked.GetProperty("label").GetString()}");
+                }
+                else if (action == "use_potion")
+                {
+                    PotionModel potion = player.GetPotionAtSlotIndex(picked.GetProperty("option_index").GetInt32())
+                        ?? throw new InvalidOperationException("the picked potion slot is empty");
+                    potion.EnqueueManualUse(target);
+                }
+                else
+                {
+                    throw new InvalidOperationException($"unexpected combat action {action}");
+                }
+                SmokeRun.Settle(loop, combat, player, turnBefore: null);
+            }
+        }
+        Console.WriteLine($"[policy] players={combat.Players.Count} player_hp={player.Creature.CurrentHp} " +
+            $"enemies=[{string.Join(", ", combat.Enemies.Select(e => $"{e.Monster?.Id.Entry} {e.CurrentHp}/{e.MaxHp}"))}] in_progress={CombatManager.Instance.IsInProgress}");
+        Console.WriteLine($"SMOKE OK policy_decisions={decisions}");
+        return 0;
     }
 }
 
@@ -399,6 +484,8 @@ internal sealed record Options
     public string[] Teammates { get; init; } = [];
     public int Turns { get; init; } = 3;
     public double ThinkSeconds { get; init; } = 2;
+    public string PolicyUrl { get; init; } = "";
+    public int ObsFormat { get; init; } = 28;
     public bool Verbose { get; init; }
 
     public static Options Parse(string[] args)
@@ -422,6 +509,8 @@ internal sealed record Options
                 "--teammates" => options with { Teammates = List() },
                 "--turns" => options with { Turns = int.Parse(Next()) },
                 "--think" => options with { ThinkSeconds = double.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture) },
+                "--policy" => options with { PolicyUrl = Next().TrimEnd('/') },
+                "--obs-format" => options with { ObsFormat = int.Parse(Next()) },
                 "--verbose" => options with { Verbose = true },
                 _ => throw new ArgumentException($"unknown option {args[index]}"),
             };

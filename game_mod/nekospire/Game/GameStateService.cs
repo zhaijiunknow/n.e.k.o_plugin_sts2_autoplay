@@ -5354,7 +5354,7 @@ internal static class GameStateService
         };
     }
 
-    private static bool IsProceedButtonUsable(NProceedButton? button)
+    internal static bool IsProceedButtonUsable(NProceedButton? button)
     {
         return button != null &&
             GodotObject.IsInstanceValid(button) &&
@@ -5495,7 +5495,7 @@ internal static class GameStateService
         };
     }
 
-    private static NMerchantInventory? GetMerchantInventoryScreen(IScreenContext? currentScreen)
+    internal static NMerchantInventory? GetMerchantInventoryScreen(IScreenContext? currentScreen)
     {
         return currentScreen switch
         {
@@ -5960,7 +5960,7 @@ internal static class GameStateService
         return mapScreen.IsVisibleInTree() && mapScreen.IsOpen;
     }
 
-    private static List<T> FindDescendants<T>(Node root) where T : Node
+    internal static List<T> FindDescendants<T>(Node root) where T : Node
     {
         var found = new List<T>();
         FindDescendantsRecursive(root, found);

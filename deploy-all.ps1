@@ -14,14 +14,21 @@
   仓库根目录。默认取本脚本所在目录（脚本放仓库根时即本目录）。
 
 .PARAMETER NekoPluginDir
-  NEKO 插件目录。默认 D:/NekoClaw/N.E.K.O/plugin/plugins/sts2_autoplay。
+  NEKO 插件目录，可以给多个；存在的每一个都会部署。默认两个：
+    - %LOCALAPPDATA%/N.E.K.O/.neko-plugin-installations/plugins/sts2_autoplay
+      （安装版 NEKO 实际加载的目录：`GET /plugins/sts2_autoplay` 的 config_path 指向这里）
+    - D:/NekoClaw/N.E.K.O/plugin/plugins/sts2_autoplay（源码版 NEKO）
+  只部署到后者而 NEKO 是安装版时，磁盘上换了新文件、运行的仍是旧代码（2026-11-24 实测踩过）。
 
 .PARAMETER UploadContentDir
   ModUploader content 目录（留空不刷新上传内容）。默认指向仓库内 NEKOSpire/content。
 #>
 param(
     [string]$ProjectRoot = "",
-    [string]$NekoPluginDir = "D:/NekoClaw/N.E.K.O/plugin/plugins/sts2_autoplay",
+    [string[]]$NekoPluginDir = @(
+        (Join-Path $env:LOCALAPPDATA "N.E.K.O/.neko-plugin-installations/plugins/sts2_autoplay"),
+        "D:/NekoClaw/N.E.K.O/plugin/plugins/sts2_autoplay"
+    ),
     [string]$UploadContentDir = ""
 )
 $ErrorActionPreference = "Stop"
@@ -37,27 +44,28 @@ if ([string]::IsNullOrWhiteSpace($UploadContentDir) -and (Test-Path $wsContentDe
 }
 
 Write-Host "[deploy-all] ProjectRoot = $ProjectRoot"
-Write-Host "[deploy-all] NekoPlugin  = $NekoPluginDir"
+Write-Host "[deploy-all] NekoPlugin  = $($NekoPluginDir -join '; ')"
 
 # ---------- 1) 插件 -> NEKO 插件目录 ----------
 Write-Host "[deploy-all] === plugin -> N.E.K.O plugins ==="
-if (-not (Test-Path $NekoPluginDir)) {
-    Write-Warning "[deploy-all] 插件目录不存在，跳过：$NekoPluginDir"
-}
-else {
+foreach ($target in $NekoPluginDir) {
+    if (-not (Test-Path $target)) {
+        Write-Warning "[deploy-all] 插件目录不存在，跳过：$target"
+        continue
+    }
     # 拷贝仓库根部的插件文件（.py、plugin.toml 等）与子目录
-    Copy-Item -Force (Join-Path $ProjectRoot "*.py") $NekoPluginDir
-    foreach ($cfg in @("plugin.toml", "plugin.toml.lock", "config.example.toml", "ruff.toml", "pyproject.toml", "__init__.py", "README.md", "README.en.md")) {
+    Copy-Item -Force (Join-Path $ProjectRoot "*.py") $target
+    foreach ($cfg in @("plugin.toml", "plugin.toml.lock", "config.example.toml", "ruff.toml", "pyproject.toml", "policy_manifest.json", "README.md", "README.en.md")) {
         $p = Join-Path $ProjectRoot $cfg
-        if (Test-Path $p) { Copy-Item -Force $p $NekoPluginDir }
+        if (Test-Path $p) { Copy-Item -Force $p $target }
     }
-    foreach ($dir in @("static", "strategies", "i18n")) {
+    foreach ($dir in @("static", "strategies", "i18n", "policy_sidecar")) {
         $src = Join-Path $ProjectRoot $dir
-        if (Test-Path $src) { Copy-Item -Recurse -Force $src $NekoPluginDir }
+        if (Test-Path $src) { Copy-Item -Recurse -Force $src $target }
     }
-    $pycache = Join-Path $NekoPluginDir "__pycache__"
-    if (Test-Path $pycache) { Remove-Item -Recurse -Force $pycache -ErrorAction SilentlyContinue }
-    Write-Host "[deploy-all] plugin deployed -> $NekoPluginDir"
+    Get-ChildItem -Path $target -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "[deploy-all] plugin deployed -> $target"
 }
 
 # ---------- 2) Mod -> 游戏（创意工坊订阅文件夹）+ 刷新上传内容 ----------

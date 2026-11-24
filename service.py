@@ -41,6 +41,8 @@ from .snapshot_normalizer import normalize_actions, normalize_snapshot
 from .state_machine import STS2StateMachine, should_hold_for_orders
 from .strategy_repository import STS2StrategyRepository
 from .summary_context_builder import STS2SummaryContextBuilder
+from .history_view import static_dir
+from .policy_client import PolicyAdvisor, is_policy_operation
 from .transport_client import STS2ActionRejected, STS2TransportClient, STS2TransportError
 
 # 「当前游戏信息状态」面板：状态推送最小间隔（防刷爆 SSE 有界队列）/ 心跳间隔（空闲时也定期刷新）
@@ -144,6 +146,8 @@ class STS2AutoplayService:
         self._action_registry = STS2ActionRegistry()
         self._action_engine = STS2ActionEngine(self._i18n)
         self._loop_runner = STS2LoopRunner(self)
+        # AlphaDefect 策略网络（默认关）。开着时整步决策先问它，给不出才回落到求解器 / 启发式。
+        self._policy_advisor = PolicyAdvisor(logger)
         self.neko = STS2NekoInterface(self)
 
     def t(self, key: str, *, default: str = "", **params: Any) -> str:
@@ -159,6 +163,13 @@ class STS2AutoplayService:
         except Exception:
             pass
         self._cfg = dict(cfg)
+        self._policy_advisor.configure(self._cfg)
+        # 选人：有已下载模型的角色时只在它们里面选（见 heuristic_planner）；每次进选人界面现查，
+        # 所以对局之间新下载的模型不用重启插件就生效。
+        self._planner.configure_preferred_characters(self._policy_advisor.playable_characters)
+        # 下载前端读的进度文件。这里只写一份当前状态，**不触发任何下载**。
+        self._policy_advisor.assets.status_path = Path(static_dir()) / "policy_status.json"
+        self._policy_advisor.assets.publish()
         # 两个"跟本体说话"的开关（默认开）。关掉只影响速报/复盘这两路，不影响自动玩与记录。
         self._state.host_digest_enabled = bool(self._cfg.get("host_digest_enabled", True))
         self._state.run_reflection_enabled = bool(self._cfg.get("run_reflection_enabled", True))
@@ -253,6 +264,7 @@ class STS2AutoplayService:
 
     async def shutdown(self) -> None:
         await self._loop_runner.stop_background()
+        self._policy_advisor.shutdown()
         if self._client is not None:
             await self._client.close()
             self._client = None
@@ -668,7 +680,8 @@ class STS2AutoplayService:
         #   - 放在游玩模式扰动**之前**算 —— 捣蛋/笨蛋档也不许把"该喝药保命"扰掉（保命优先压过其它考虑）；
         #   - **不依赖规划器给出动作** —— 战斗里偶尔规划不出动作时，该保命还是要保命；
         #   - 只在这一步真的能派发 `use_potion`（动作在册 = 在战斗里且手里有能用的药水）时才会 override。
-        potion_operation = None if force else self._combat_potion_override(snapshot)
+        # 策略网络自己决定喝不喝药（药水是它的候选之一），这条硬规则只管求解器 / 启发式那条路。
+        potion_operation = None if force or is_policy_operation(operation) else self._combat_potion_override(snapshot)
         divine_operation = None if force else self._crystal_sphere_override(snapshot)
         if potion_operation is not None:
             operation = potion_operation
@@ -1489,6 +1502,29 @@ class STS2AutoplayService:
                 n += 1
         return n
 
+    # ---- 策略网络的下载前端（static/policy.html）用的四个入口 --------------------------------
+
+    def _policy_assets_payload(self, message: str) -> dict[str, Any]:
+        status = self._policy_advisor.assets.status()
+        return {"summary": message, "policy_enabled": self._policy_advisor.enabled, **status}
+
+    async def policy_assets_status(self) -> dict[str, Any]:
+        return self._policy_assets_payload("策略网络的下载状态。")
+
+    async def policy_prepare_runtime(self) -> dict[str, Any]:
+        """运行环境（Python + PyTorch）不在就开始后台下载。由前端打开页面时调用，不在插件启动时调用。"""
+        self._policy_advisor.assets.ensure_runtime()
+        ready = self._policy_advisor.assets.runtime_ready()
+        return self._policy_assets_payload("运行环境已就绪。" if ready else "正在下载运行环境。")
+
+    async def policy_download_model(self, character: str) -> dict[str, Any]:
+        self._policy_advisor.assets.download_model(character)
+        return self._policy_assets_payload(f"正在下载 {str(character).upper()} 的模型。")
+
+    async def policy_remove_model(self, character: str) -> dict[str, Any]:
+        self._policy_advisor.assets.remove_model(character)
+        return self._policy_assets_payload(f"已删除 {str(character).upper()} 的模型。")
+
     async def get_status(self) -> dict[str, Any]:
         snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
         classification = snapshot.get("classification") if isinstance(snapshot.get("classification"), dict) else {}
@@ -1563,6 +1599,7 @@ class STS2AutoplayService:
                 "catgirl_base_url": self._catgirl_base_url,
             },
             "solver": self.solver_status_payload(),
+            "policy": self._policy_advisor.status(),
             "map_policy": {
                 # wait = 彻底等玩家发话（不投票、也不跟票）；follow = 自动跟票；auto = 自己选。
                 "policy": self._map_policy,
@@ -3049,6 +3086,19 @@ class STS2AutoplayService:
             self.logger.exception("[sts2_gap] 六维缺口反思失败（不影响复盘主链路）")
             return [], attribution_out
 
+    @staticmethod
+    def _run_outcome(screen: str, raw_state: dict[str, Any]) -> str:
+        """这一局是通关还是失败。
+
+        mod 的结算屏名恒为 `GAME_OVER`（通关与阵亡同一屏），胜负写在 `game_over.is_victory`
+        （取自游戏的 RunHistory.Win）。只看屏名会把通关记成 defeat —— 通关后的剧情里玩家
+        会被"击杀"，血量归零不代表输。读不到 `is_victory` 时才退回按屏名判断。
+        """
+        game_over = raw_state.get("game_over") if isinstance(raw_state.get("game_over"), dict) else {}
+        if isinstance(game_over.get("is_victory"), bool):
+            return "victory" if game_over["is_victory"] else "defeat"
+        return "victory" if screen == "victory" else "defeat"
+
     def _maybe_record_run_memory(self, snapshot: dict[str, Any]) -> None:
         """run 结束（死亡/通关）时，把本局决策痕迹总结成教训/偏好写进猫娘记忆。
 
@@ -3066,8 +3116,8 @@ class STS2AutoplayService:
             if not run_id or run_id == self._state.last_memory_run_id:
                 return
             self._state.last_memory_run_id = run_id
-            outcome = "victory" if screen == "victory" else "defeat"
             raw_state = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
+            outcome = self._run_outcome(screen, raw_state)
             run = raw_state.get("run") if isinstance(raw_state.get("run"), dict) else {}
             character = str(snapshot.get("character") or raw_state.get("character_id") or run.get("character_id") or "")
             floor = int(snapshot.get("floor") or 0)

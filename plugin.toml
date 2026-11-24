@@ -82,6 +82,18 @@ map_vote_wait_seconds = 20
 # 注意：插件不做任何 LLM 决策，事件房也早已是纯启发式（原 event_llm_* 配置项已移除）。
 play_style = "serious"
 
+# ── AlphaDefect 策略网络（https://github.com/hmty-CHEN/AlphaDefect-Public，arXiv:2611.31076）──
+# 开着时，自动玩的**每一步**先问网络（战斗与非战斗都是）；它给不出的那一步（这一屏 mod 没有适配、
+# 本局角色没有下载模型……）回落到原有的 CombatSolver + 启发式，日志 `[sts2_policy]` 写明原因。
+# 没有任何路径要填：运行环境（Python + PyTorch）和各角色的模型在插件面板的「策略网络」页下载，
+# 下到 %LOCALAPPDATA%/N.E.K.O/sts2_autoplay/policy_runtime。插件启动时不下载任何东西；
+# 什么都没下载时行为与接入前相同。选人时只在已下载模型的角色里选，一个都没有则照旧随机。
+# 设 policy_enabled = false 即回到只用 CombatSolver + 启发式（与接入前逐字相同）。
+#   多人局也走网络，但网络只在单人局里训练过；地图投票仍按上面的 map_policy（非 auto 时不交给网络）。
+policy_enabled = true
+policy_sidecar_url = "http://127.0.0.1:18090"
+policy_timeout_seconds = 20
+
 # 「尖塔速报」开关：false = 不把局势悄悄交给本体，本体也就不会主动讲局势。
 # 只影响这一路；游戏内弹幕、自动游玩、历史记录都不受影响。运行时等价动作：sts2_set_host_digest。
 host_digest_enabled = true
@@ -154,6 +166,14 @@ permissions = ["state:read"]
 # ——plugin server 里没有任何 panels 处理逻辑。这条声明留着是给会用清单的消费者看的，
 # 别以为加了面板玩家的界面上就会冒出入口。index.html 要保持干净（只放跳转、不内联取数），
 # 页面一变重就会出现刷新延迟。
+[[plugin.ui.panel]]
+id = "policy"
+title = "策略网络"
+entry = "static/policy.html"
+permissions = [
+    "state:read",
+]
+
 [[plugin.ui.panel]]
 id = "history"
 title = "自动游玩历史"

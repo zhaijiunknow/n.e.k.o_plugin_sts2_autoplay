@@ -1,0 +1,89 @@
+{
+  "schema": "nekospire-alphadefect-vendoring/1",
+  "upstream": {
+    "repository": "https://github.com/hmty-CHEN/AlphaDefect-Public",
+    "commit": "068953d3f62278ab36cac62850b437f33a5ad3b3",
+    "game_version": "v0.113.1",
+    "license": "MIT (code); vocabulary and catalogs are game-derived and not covered",
+    "root": "engine/Sts2Headless"
+  },
+  "local_patches": [
+    {
+      "file": "Engine/Obs/Creatures.cs",
+      "old": "RunSession.State.Players[0]",
+      "new": "RunSession.Me",
+      "hits": 2,
+      "why": "multiplayer: the observer is the local player, not run slot 0"
+    },
+    {
+      "file": "Engine/Obs/Creatures29.cs",
+      "old": "RunSession.State.Players[0]",
+      "new": "RunSession.Me",
+      "hits": 3,
+      "why": "multiplayer: the observer is the local player, not run slot 0"
+    },
+    {
+      "file": "Engine/Obs/Events.cs",
+      "old": "RunSession.State.Players[0]",
+      "new": "RunSession.Me",
+      "hits": 2,
+      "why": "multiplayer: the observer is the local player, not run slot 0"
+    },
+    {
+      "file": "Engine/Observation.cs",
+      "old": "var me = s.Players[0];",
+      "new": "var me = RunSession.Me;",
+      "hits": 1,
+      "why": "multiplayer: the observer is the local player, not run slot 0"
+    }
+  ],
+  "files": {
+    "Engine/Compat/GameCompat.cs": "44dc6ac3a0d9ccb9fda02f7c26d72574868c0347bb0aebb2a056ad3f42a5aa66",
+    "Engine/Compat/RngCompat.cs": "3bf888941de02dee670f951ef8b9fe3e449e2e4b598c411ffd4e3e76ee026399",
+    "Engine/Decision.cs": "4b58ec2e183ecfe0a056f866489137f165a76638d7d6b1b50c1f592f6044702c",
+    "Engine/Obs/Access.cs": "eea8bd8166baf702137c44a2ad9b1244b1a4bc78a25007f1dbb721588fd4f9f3",
+    "Engine/Obs/Cand29.cs": "1a39f86039cb47915ac1535195f8eb6c86060fc18728f0d649718272fc9d83e9",
+    "Engine/Obs/Candidates.cs": "11c77a9451a10e6ffd2a439d887fe461d6aa6c0d85d9a1b8a454b20482254480",
+    "Engine/Obs/Cards.cs": "7d59960388dfd4c241ec060c9be1a32df84eec0389ac2ac80279d18b11357e22",
+    "Engine/Obs/Characters/Defect.cs": "38192caf355cfa0ad6c6313020cddd341248c1311502c0cae08924fd3fdf819f",
+    "Engine/Obs/Characters/Defect29.cs": "46817c564b829dbae28991a45a5a17eb0c6ed47956907c3f5831da12d87e6337",
+    "Engine/Obs/Characters/Fool.cs": "fda429ffe3c5d2225daf5ea84ad38aa2b713a21f172948ffa8498907ddf17307",
+    "Engine/Obs/Characters/Ironclad.cs": "27bf56f3f922897cc4515f8933df602adb35f5845012eca2260bc56867a58e7a",
+    "Engine/Obs/Characters/Necrobinder.cs": "98cd599be34daa58aeab056114da2b5ebf921037d50ff65db6c240be4a954c41",
+    "Engine/Obs/Characters/Regent.cs": "0760e6fb2f17df852b1a49e2249a0fe35cc969b8037a51c8a0c9527c19146b12",
+    "Engine/Obs/Characters/Silent.cs": "903aadaf99e6644a07cbb09706f42f7efb45157b726ea037aa8a12c5011092fb",
+    "Engine/Obs/Characters/Silent23.cs": "f24e968459f367c9ed123e65b941b6eb4f9c40ff28988cc597b9fe6c642df08c",
+    "Engine/Obs/Characters/Silent29.cs": "36425b7c8a3c18e78c5aee8300f07a4d699505f0fc47e6b2a62c0e6665ec30a7",
+    "Engine/Obs/CombatStats.cs": "d02a8f1742243dc47f1312314b57188e451b1e957398338fa88f405998e4d529",
+    "Engine/Obs/Creatures.cs": "b27d548a0da4c802aac950b93ffaf12f7e33dd4591c736625c6f39c7dc16a108",
+    "Engine/Obs/Creatures29.cs": "fc417d45d5b3dd36d63a5d4c7a37da7fef8c2d75775e37d8f81598a0a63f1d39",
+    "Engine/Obs/Damage.cs": "4ac9ba04bad9c105c27cc88df2bf43bb6e608cc60ce7478689ab6c545b6cfc3c",
+    "Engine/Obs/EndTurn.cs": "7611b170105683bf5a34e51a242ebf897e3c1bf8fe0ce9bb1ce6690f49529343",
+    "Engine/Obs/EndTurn29.cs": "86f147e4c681b318414fb7fbcd8aa0f23ebf00fb8060845f923c4749c102208d",
+    "Engine/Obs/Events.cs": "bdf1f4787f66faefbc9ab506016509c82db118bade6b45c830a912ee1fe02ffd",
+    "Engine/Obs/Format.cs": "3150d4c32f8d24eaecd84bded960cd8d16da506b506cd507665efd0a31459c7c",
+    "Engine/Obs/Gains26.cs": "0a37e3c528227acddb55d3f7f3099f47a4a94c02c56af2b89e44f3d83318fa27",
+    "Engine/Obs/Gains29.cs": "4e3cfb9b271080168648b979f294bc131a472277a7f905ae7fae2e54ff4222f3",
+    "Engine/Obs/Header.cs": "f077ff04145cba1748d1d91fac08d8dbbfc4b9b19529594afc8a01096a799644",
+    "Engine/Obs/Knap29.cs": "2700506c0d6326aa2c1b17b22bce9bd4176d83ab14e447b497cc435d5966a9ea",
+    "Engine/Obs/Map.cs": "a5b0952f518990a63a4d58d69f530bd94277277680c4321ec4fa5ee046891449",
+    "Engine/Obs/Memo.cs": "6c9c03d2b40066a02c27173d0779e8f5ba24a757eb06c8af7ee1fda1d7c59866",
+    "Engine/Obs/Powers.cs": "9dd1c397877dacd68f931d88997728aba5ca285ff2b5568329c3dfa36d5efbd7",
+    "Engine/Obs/Privileged.cs": "10f2810e429848273cc65d158bd6db0ffc4c5a9c8b7c85ca97021dbad71adc29",
+    "Engine/Obs/Relics.cs": "5068b4357a9c8a8cbc21c592b2e305c2099a7f8f6b9ee613811f8ee725cf9059",
+    "Engine/Obs/Riders113.cs": "67c560d4d42103a2536a658521f68ef2cf548abe1574af6b7946be9a04be3344",
+    "Engine/Obs/Riders22.cs": "cb53a3521091b2da353103808cfa23b44c52f52ce3af723533e79db78fe11800",
+    "Engine/Obs/Riders29.cs": "5a86035a78f3ff0e961c96a580c2d2d27f8586c12f7080d950e922ca3730d650",
+    "Engine/Obs/Run29.cs": "2e10e79090d0fe60e88528e383894d64ae7d82844019e81ace24b253b7dedda0",
+    "Engine/Obs/RunInfo.cs": "18eed0afa0b5d3f23c084e998f31de936b61ca7409c4ab7a48cadb10ef0efeb0",
+    "Engine/Obs/V29Common.cs": "58e9cc4a868aa3fd00dbf2ffe04b8e9bdcb24dfb1368f7e468e726bfc07b9063",
+    "Engine/Observation.cs": "3ee0226e1a482984f3aa73c6e30fd4e10cbcc37ca0905755faf0e2426e5a07b1",
+    "Engine/ObservationOracle.cs": "ab652b37619bf1136f44003595bca319c92d4b6f145c0fa42b264f10f72b000d",
+    "Engine/Vocab.cs": "50ed7df8b0c5c41b9b8e61042d43812d2a88da0224cdd13a7ddf9f9c4bb6c7f7"
+  },
+  "data": {
+    "aliases.txt": "0a9ff41a14e58b998901cae8d4157c4e8763892dbb1cec1e9dae2fae050ff85a",
+    "no_downside_relics.txt": "66a465343a09b5e48675816631a83e31320fa0193d992ffa9f198aead4339935",
+    "vocab.txt": "b9ba21326c3d90dc85284eb51bc6cd1b95739c56cabd458d502019dc7c6ab0a1"
+  }
+}

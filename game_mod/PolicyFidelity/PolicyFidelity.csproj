@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Offline fidelity check for the AlphaDefect policy path: are the observation frames nekospire encodes
+    the frames the network was trained on?
+
+    This is upstream's headless engine (its sources are linked from the upstream checkout, not copied) with
+    one addition: every time the engine encodes a frame for a decision, the BUILT nekospire.dll encodes the
+    same live game state through its own decision builders (Policy/PolicyDecisionBuilder.cs) and its vendored,
+    patched copy of the encoder, and the two frames are compared byte for byte.
+
+    It speaks upstream's pipe protocol, so upstream's Python tools can drive it with a real network:
+        dotnet build ../nekospire/nekospire.csproj -c Release
+        dotnet build PolicyFidelity.csproj -c Release
+        <AlphaDefect venv python> -I scripts/policy_fidelity_run.py (see that script)
+
+    It covers what the logic layer decides (which candidates, which game objects, which numbers). It cannot
+    cover how nekospire reads the live Godot screens: no screens exist here.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>PolicyFidelity</AssemblyName>
+    <RootNamespace>PolicyFidelity</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CS0162;CS0168;CS0219;CS0414;CS0649;CS1998</NoWarn>
+    <AlphaDefectUpstream Condition="'$(AlphaDefectUpstream)' == ''">D:/NekoClaw/_refs/AlphaDefect-Public</AlphaDefectUpstream>
+    <HeadlessDir>$(AlphaDefectUpstream)/engine/Sts2Headless</HeadlessDir>
+    <Sts2GameVersion Condition="'$(Sts2GameVersion)' == ''">v0.113.1</Sts2GameVersion>
+    <!-- Upstream's layout: a copy of the game's data directory plus the localization extracted from the pck. -->
+    <Sts2GameDir Condition="'$(Sts2GameDir)' == ''">$(USERPROFILE)/.local/share/sls2/game/$(Sts2GameVersion)</Sts2GameDir>
+    <NekospireDll Condition="'$(NekospireDll)' == ''">$(MSBuildThisFileDirectory)../nekospire/bin/Release/net9.0/nekospire.dll</NekospireDll>
+    <NekoPolicyData Condition="'$(NekoPolicyData)' == ''">$(MSBuildThisFileDirectory)../nekospire/Policy/Data</NekoPolicyData>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2"><HintPath>$(Sts2GameDir)/sts2.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GodotSharp"><HintPath>$(Sts2GameDir)/GodotSharp.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(Sts2GameDir)/0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <!-- Under an alias: nekospire carries its own copy of the encoder in the same namespace (Sts2Headless). -->
+    <Reference Include="nekospire"><HintPath>$(NekospireDll)</HintPath><Aliases>neko</Aliases><Private>true</Private></Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Everything but upstream's entry point (top-level statements); Program.cs here replaces it. -->
+    <Compile Include="$(HeadlessDir)/**/*.cs" Exclude="$(HeadlessDir)/Program.cs;$(HeadlessDir)/bin/**;$(HeadlessDir)/obj/**" LinkBase="Upstream" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="Sts2GameDir" Value="$(Sts2GameDir)" />
+    <RuntimeHostConfigurationOption Include="Sts2GameVersion" Value="$(Sts2GameVersion)" />
+    <RuntimeHostConfigurationOption Include="Sts2Vocab" Value="$(AlphaDefectUpstream)/engine/catalog/vocab.txt" />
+    <RuntimeHostConfigurationOption Include="Sts2NoDownsideRelics" Value="$(AlphaDefectUpstream)/engine/catalog/no_downside_relics.txt" />
+    <RuntimeHostConfigurationOption Include="NekoPolicyData" Value="$(NekoPolicyData)" />
+  </ItemGroup>
+
+  <Target Name="ValidateFidelityInputs" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(HeadlessDir)/Server.cs')" Text="AlphaDefect checkout not found at $(AlphaDefectUpstream). Pass -p:AlphaDefectUpstream=path." />
+    <Error Condition="!Exists('$(Sts2GameDir)/sts2.dll')" Text="Game assemblies not found at $(Sts2GameDir) (see upstream README, 'game files')." />
+    <Error Condition="!Exists('$(NekospireDll)')" Text="Build the mod first: dotnet build ../nekospire/nekospire.csproj -c Release" />
+    <Error Condition="!Exists('$(NekoPolicyData)/vocab.txt')" Text="Policy data missing: run python game_mod/scripts/vendor-alphadefect.py --apply" />
+  </Target>
+</Project>

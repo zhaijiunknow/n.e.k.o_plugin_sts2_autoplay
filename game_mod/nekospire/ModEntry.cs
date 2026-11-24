@@ -25,6 +25,7 @@ public static class ModEntry
         ScreenEventBridge.Install();
         HttpServer.Instance.Start();
         CombatSolver.CombatSolverRuntime.Install();
+        Policy.PolicyService.Initialize();
         NekoConfig.Load();
         NekoDanmakuDriver.Instance.Start();
         NekoAutoplayDriver.Instance.Start();

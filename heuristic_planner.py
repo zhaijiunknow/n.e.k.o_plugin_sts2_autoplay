@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import re
 import time
 from time import monotonic
@@ -546,6 +547,34 @@ class STS2HeuristicPlanner:
     _MAX_CAPSTONE_SWEEP = 8
     # 选牌屏：候选按遍后允许返回 None 的次数，超过就重置光标重按（防死锁，见 _next_selection_option）。
     _SELECTION_EXHAUSTED_RETRIES = 2
+
+    def configure_preferred_characters(self, provider: Any) -> None:
+        """选人界面只在这些角色里选。`provider()` 返回角色 id 列表（策略网络已下载模型的角色）；
+        返回空表 = 照旧用游戏自带的「随机」。每次进选人界面现查，所以新下载的模型不用重启就生效。
+        """
+        self._preferred_characters = provider
+
+    def _preferred_character_index(self, summary_context: dict[str, Any]) -> int | None:
+        """这次选人要选的角色的下标：在「有模型且没锁」的角色里随机定一个，定了就不变，直到离开选人界面。"""
+        provider = getattr(self, "_preferred_characters", None)
+        wanted = {str(c).upper() for c in (provider() if callable(provider) else [])}
+        indices: dict[str, int] = {}
+        for character in self._character_list(summary_context):
+            character_id = str(character.get("character_id") or "").upper()
+            index = self._safe_int(character.get("index"))
+            if character_id in wanted and index is not None and not bool(character.get("is_locked")):
+                indices[character_id] = index
+        if not indices:
+            self._character_pick_target = ""
+            return None
+        if getattr(self, "_character_pick_target", "") not in indices:
+            self._character_pick_target = getattr(self, "_character_rng", random).choice(sorted(indices))
+        return indices[self._character_pick_target]
+
+    def _preferred_character_selected(self, summary_context: dict[str, Any]) -> bool:
+        payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
+        target = getattr(self, "_character_pick_target", "")
+        return bool(target) and str(payload.get("selected_character_id") or "").upper() == target
 
     def configure_map_policy(self, *, policy: str, vote_wait_seconds: float) -> None:
         self._map_policy = normalize_map_policy(policy)
@@ -1097,6 +1126,11 @@ class STS2HeuristicPlanner:
         available_actions = snapshot.get("available_actions") if isinstance(snapshot.get("available_actions"), list) else []
         preferences = strategy_context.get("preferences") if isinstance(strategy_context.get("preferences"), dict) else {}
 
+        if state_name != "character_select":
+            # 离开选人界面就把这次的选人记账清掉：下一局重新定角色、重新按一次。
+            self._character_pick_target = ""
+            self._character_pick_done = False
+
         if state_name == "main_menu":
             # 主菜单优先级：**先「继续」**。原来 open_character_select 排在前面，而主菜单只要单人按钮可用
             # 就会广告 open_character_select（GameStateService.CanOpenCharacterSelect），于是插件会去点
@@ -1148,7 +1182,20 @@ class STS2HeuristicPlanner:
                 self._character_pick_done = False
             random_index = self._random_character_index(summary_context)
             already_random = self._selected_character_is_random(summary_context)
-            if action is not None and random_index is not None and not already_random and not self._character_pick_done:
+            # 一个网络只会打一个角色：有已下载的模型时，在那些角色里选，不用游戏的「随机」
+            # （见 configure_preferred_characters）；一个都没有时走下面的老路。
+            preferred_index = self._preferred_character_index(summary_context)
+            if preferred_index is not None:
+                if action is not None and not self._preferred_character_selected(summary_context) and not self._character_pick_done:
+                    self._log_character_choice("preferred", preferred_index)
+                    return PlannedOperation(
+                        action_type=action["type"],
+                        kwargs={"option_index": preferred_index},
+                        confidence=0.9,
+                        source="heuristic",
+                        reason="character_select_preferred",
+                    )
+            elif action is not None and random_index is not None and not already_random and not self._character_pick_done:
                 self._log_character_choice("random", random_index)
                 return PlannedOperation(
                     action_type=action["type"],

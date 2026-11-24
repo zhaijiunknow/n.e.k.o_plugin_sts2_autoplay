@@ -211,6 +211,17 @@ class STS2TransportClient:
         """
         return await self._request("GET", "/solver/plan", read_timeout=None)
 
+    async def get_policy_decision(self, obs_format: int) -> Dict[str, Any]:
+        """当前界面给 AlphaDefect 网络的决策：候选列表 + 观测帧（GET /policy/decision）。
+
+        `available=false` 时 `reason` 写明为什么不给（这一屏没有适配、不在出牌阶段……）。
+        """
+        return await self._request("GET", f"/policy/decision?obs_format={int(obs_format)}")
+
+    async def push_policy_data(self, files: Dict[str, str]) -> Dict[str, Any]:
+        """把策略网络的词表交给模组（POST /policy/data）。模组自己不带这份数据。"""
+        return await self._request("POST", "/policy/data", json={"files": dict(files)})
+
     async def execute_action(self, action: str, **kwargs: Any) -> Dict[str, Any]:
         return await self._request("POST", "/action", json=self._build_action_payload(action, **kwargs))
 

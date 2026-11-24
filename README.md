@@ -41,6 +41,37 @@
 - **偏好吸收**：`sts2_apply_user_override` 把用户自然语言指点转成结构化偏好 / override。
 - **跨局记忆**：见下节。
 
+## 策略网络（AlphaDefect）
+
+下载了某个角色的模型后，这个角色自动玩的**每一步**（出牌、选牌、路线、商店、事件、休息处）先交给
+[AlphaDefect](https://github.com/hmty-CHEN/AlphaDefect-Public) 的网络决定；它给不出的那一步回落到下面的
+CombatSolver + 启发式，日志 `[sts2_policy]` 写明选了什么、为什么回落。**没下载模型的角色整局照旧**
+（CombatSolver + 启发式）。
+
+### 怎么用：插件面板 →「策略网络」
+
+没有任何路径要填。打开插件面板里的「策略网络」页（`static/policy.html`）：
+
+- **运行环境**（Python 与 PyTorch）：打开页面时检查一次，本机没有就自动开始下载
+  （下载约 154 MB，装好约 600 MB）。**插件启动时不下载任何东西**。
+- **角色卡**：六个角色各一张。灰色 = 没下载，点一下开始下载（每个约 75 MB）；下载完变亮，
+  该角色就交给网络。可以删除，删了回到 CombatSolver + 启发式。
+- 文件放在 `%LOCALAPPDATA%\N.E.K.O\sts2_autoplay\policy_runtime`，每个文件按固定的大小与 SHA-256
+  校验，断了能续传，国内镜像优先。
+
+选人：有已下载模型的角色时，每局在这些角色里随机选；一个都没有时照旧用游戏的「随机」。
+
+### 它是怎么跑的
+
+- **三段路**：Mod `GET /policy/decision` 给出候选和观测帧 → 推理旁路 `policy_sidecar/alphadefect_server.py`
+  打分（独立进程，用上面下载的运行环境；由插件在第一次需要时自动拉起）→ Mod 执行被选中的候选（`policy_act`）。
+- **词表**不随 Mod 分发：它和运行环境一起下载，插件发现 Mod 没有（或不是同一份）时自动交给 Mod。
+- **多人局也走网络**，观测以本地玩家为准。网络只在单人局里训练过，多人局的表现没有数据；
+  地图投票仍听 `map_policy`（不是 `auto` 时不交给网络）。
+- **会回落的界面**：卡包三选一、水晶球、多张的牌组选牌、宝箱"跳过遗物"、选牌界面的取消，Mod 没有对应适配。
+- **反省不作用于网络**：跨局教训只影响回落时的启发式。网络权重是固定的，不会因为对局而变化。
+- `policy_enabled = false`（`plugin.toml`）可以整个关掉，回到只用 CombatSolver + 启发式。
+
 ## 猫娘记忆成长（跨局教训 → 决策）
 
 每局结束（死亡/通关，`state_machine` 判为 `screen_class=terminal`）时，插件把本局 `recent_decision_memory` 总结成「教训 + 偏好」，写入 `catgirl_memory.py` 的 `CatgirlMemoryStore`，持久化到 `<LOCALAPPDATA>/N.E.K.O/sts2_autoplay/catgirl_memory.json`。下一局 `strategy_repository.build_context()` 会把最近几局的教训并入 `strategy_directives.avoid`、偏好并入 `prefer`（软约束），从而影响选牌/路线/战斗决策。总结引擎为**启发式打底 + LLM 可选**（`service._catgirl_llm.available` 时才叠加，失败静默回退）。

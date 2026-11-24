@@ -9,6 +9,7 @@ from typing import Any
 
 from .decision_payload import DecisionPayload
 from .instructions import instruction_summary, normalize_strategy_instruction
+from .policy_client import POLICY_REGISTRY_ENTRY, PolicyAdvisor, is_policy_hold
 from .snapshot_normalizer import normalize_snapshot
 
 
@@ -256,7 +257,20 @@ class STS2LoopRunner:
         #   ⇒ 判 B 必须再加一条：**取回时的指纹与当前指纹相同**（即"看着最新局面取的计划
         #     现在仍然对得上，但首步还是做不了"才是真无解）。
         plan_fetch_signature = ""
-        in_combat_decision = classification.get("state_name") == "combat" and mode_info.get("allows_planner")
+        # ★ AlphaDefect 策略网络（policy_client）：开着且这一屏它能出决策时，**整步由它定**
+        #   —— 不取 /solver/plan、不跑启发式规划器。它给不出（返回 None，原因已写日志）时，
+        #   下面的流程逐字照旧，CombatSolver 与启发式就是它的后备。
+        policy_operation = await self._policy_operation(client, mode_info, snapshot)
+        # 「归网络管但现在动不了」（policy_hold）：这一 tick 不出任何动作，也不让后备接手。
+        policy_hold = is_policy_hold(policy_operation)
+        if policy_hold:
+            policy_operation = None
+        in_combat_decision = (
+            policy_operation is None
+            and not policy_hold
+            and classification.get("state_name") == "combat"
+            and mode_info.get("allows_planner")
+        )
         step_index = self._service._state.solver_step_index if isinstance(self._service._state.solver_step_index, int) else 0
         # ★★ D8 判别（t17，仅日志）：进入决策块的**真实**取值。
         #   与下面的 plan-call / plan-return 三行配对，即可彻底切开"没进块 / 进了块但返回 None /
@@ -369,7 +383,7 @@ class STS2LoopRunner:
                 if isinstance(step0, dict) and step0.get("choice_card_id"):
                     pending_choice = str(step0.get("choice_card_id"))
             self._service._state.pending_card_choice_id = pending_choice
-        candidate_actions = self._service._candidate_generator.generate(
+        candidate_actions = [] if policy_operation is not None or policy_hold else self._service._candidate_generator.generate(
             # ★★★ t37（D1 实机复现）结构修复：**两条 planner 调用路径必须读同一份上下文**。
             #
             # 缺陷（2026-10-20 07:44–07:54，run=C6CM8CZRR9KQ，实机）：
@@ -493,7 +507,11 @@ class STS2LoopRunner:
                 getattr(self._service._planner, "_solver_out_of_window_count", "?"),
             ),
         )
-        planned_operation = self._service._planner.plan(planning_context) if mode_info.get("allows_planner") else None
+        planned_operation = (
+            self._service._planner.plan(planning_context)
+            if mode_info.get("allows_planner") and policy_operation is None and not policy_hold
+            else None
+        )
         # ★★ D8 判别（t17，仅日志）：plan() **之后** —— 返回的是 None 还是真操作？
         #   与上面 plan-call 那行配对，即可判定：
         #     plan-call 有 + plan-return None    ⇒ 被调用但在某早退点返回 None
@@ -510,6 +528,11 @@ class STS2LoopRunner:
             ),
         )
         planned_operation_dict = planned_operation.as_dict() if planned_operation is not None else None
+        if policy_operation is not None:
+            planned_operation_dict = policy_operation
+            # `policy_act` 不在 mod 的 /actions/available 里（见 POLICY_REGISTRY_ENTRY 的说明），
+            # 校验与执行按注册表找动作，所以在这里补上。
+            action_registry = [*action_registry, dict(POLICY_REGISTRY_ENTRY)]
 
         agent_operation = planned_operation_dict
 
@@ -577,6 +600,20 @@ class STS2LoopRunner:
                 "polled_at": snapshot_with_context["polled_at"],
             },
         }
+
+    async def _policy_operation(self, client: Any, mode_info: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        """问 AlphaDefect 策略网络要这一步的操作；没开、不该它管或它给不出时返回 None。"""
+        advisor = getattr(self._service, "_policy_advisor", None)
+        if not isinstance(advisor, PolicyAdvisor) or not advisor.enabled or not mode_info.get("allows_planner"):
+            return None
+        # 只在自动玩真的在跑时接管。陪玩 / 轮询的 tick 照旧取 /solver/plan —— 出牌建议弹幕读的是那份计划。
+        if getattr(self._service._state, "autoplay_state", "") != "running" or getattr(self._service._state, "standby", False):
+            return None
+        return await advisor.decide(
+            client,
+            character=str(snapshot.get("character") or ""),
+            map_policy=str(getattr(self._service, "_map_policy", "auto") or "auto"),
+        )
 
     def start_background(self) -> None:
         self._shutdown = False

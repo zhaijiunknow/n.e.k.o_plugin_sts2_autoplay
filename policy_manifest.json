@@ -1,0 +1,237 @@
+{
+ "schema": 1,
+ "runtime_version": "py3.12.9-torch2.15.0-cpu-1",
+ "upstream": {
+  "repository": "https://github.com/hmty-CHEN/AlphaDefect-Public",
+  "commit": "068953d3f62278ab36cac62850b437f33a5ad3b3",
+  "game_version": "v0.113.1"
+ },
+ "runtime": [
+  {
+   "name": "python-3.12.9-embed-amd64.zip",
+   "kind": "python",
+   "size": 11098289,
+   "sha256": "615861fb801e8b04c847598db4e1e46e4b046295017caa37cb5486dde72b5865",
+   "urls": [
+    "https://registry.npmmirror.com/-/binary/python/3.12.9/python-3.12.9-embed-amd64.zip",
+    "https://www.python.org/ftp/python/3.12.9/python-3.12.9-embed-amd64.zip"
+   ]
+  },
+  {
+   "name": "torch-2.15.0+cpu-cp312-cp312-win_amd64.whl",
+   "kind": "wheel",
+   "size": 126627285,
+   "sha256": "5af9fb357790db09e62484b12032304f046c22c4b1895ca88c4cf5987ea369ca",
+   "urls": [
+    "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.15.0%2Bcpu-cp312-cp312-win_amd64.whl",
+    "https://download.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-win_amd64.whl"
+   ]
+  },
+  {
+   "name": "numpy-2.5.5-cp312-cp312-win_amd64.whl",
+   "kind": "wheel",
+   "size": 12580189,
+   "sha256": "919eb420662b0b4ba34889df503f3d5329775b0c1d5f7e5f5af4fba8315b1e30",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/d1/71/b1ce51834c21020d189332979d38ba7350eb6cd7ca8c8ec424a663b0ca6f/numpy-2.5.5-cp312-cp312-win_amd64.whl",
+    "https://files.pythonhosted.org/packages/d1/71/b1ce51834c21020d189332979d38ba7350eb6cd7ca8c8ec424a663b0ca6f/numpy-2.5.5-cp312-cp312-win_amd64.whl"
+   ]
+  },
+  {
+   "name": "typing_extensions-4.16.0-py3-none-any.whl",
+   "kind": "wheel",
+   "size": 45571,
+   "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl"
+   ]
+  },
+  {
+   "name": "filelock-4.3.1-py3-none-any.whl",
+   "kind": "wheel",
+   "size": 244559,
+   "sha256": "79e43df8e9fe509cd83a3899a7c186c8077cbbe4d200a1ed3705c2f3bb6bc487",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/53/7b/678c8fbd372ff96375ac0bbdd20b78f20ef8ba6ca5966c49548fa5886557/filelock-4.3.1-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/53/7b/678c8fbd372ff96375ac0bbdd20b78f20ef8ba6ca5966c49548fa5886557/filelock-4.3.1-py3-none-any.whl"
+   ]
+  },
+  {
+   "name": "fsspec-2026.9.0-py3-none-any.whl",
+   "kind": "wheel",
+   "size": 221738,
+   "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/6c/c0/a98505f18594f1bce828bb159cec0fcf9860562f1a2c85913409fc8f3d9e/fsspec-2026.9.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/6c/c0/a98505f18594f1bce828bb159cec0fcf9860562f1a2c85913409fc8f3d9e/fsspec-2026.9.0-py3-none-any.whl"
+   ]
+  },
+  {
+   "name": "jinja2-3.1.6-py3-none-any.whl",
+   "kind": "wheel",
+   "size": 134899,
+   "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl"
+   ]
+  },
+  {
+   "name": "markupsafe-3.0.4-cp312-cp312-win_amd64.whl",
+   "kind": "wheel",
+   "size": 14303,
+   "sha256": "11935df9bf455ed0c04eb87bcd720f02b1fe5e02128a9430f23aed6f93336fc7",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/3f/bf/62495e180b7000aaf30000fff849e933f74264638057176cf46852500adc/markupsafe-3.0.4-cp312-cp312-win_amd64.whl",
+    "https://files.pythonhosted.org/packages/3f/bf/62495e180b7000aaf30000fff849e933f74264638057176cf46852500adc/markupsafe-3.0.4-cp312-cp312-win_amd64.whl"
+   ]
+  },
+  {
+   "name": "mpmath-1.3.0-py3-none-any.whl",
+   "kind": "wheel",
+   "size": 536198,
+   "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl"
+   ]
+  },
+  {
+   "name": "networkx-3.7-py3-none-any.whl",
+   "kind": "wheel",
+   "size": 2142205,
+   "sha256": "e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/7e/cd/fe58041e9011f307c490e3e17dd48cc516448f7c698a3f2d9d9d65d7e6a8/networkx-3.7-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/7e/cd/fe58041e9011f307c490e3e17dd48cc516448f7c698a3f2d9d9d65d7e6a8/networkx-3.7-py3-none-any.whl"
+   ]
+  },
+  {
+   "name": "sympy-1.14.0-py3-none-any.whl",
+   "kind": "wheel",
+   "size": 6299353,
+   "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl"
+   ]
+  },
+  {
+   "name": "setuptools-84.2.1-py3-none-any.whl",
+   "kind": "wheel",
+   "size": 876263,
+   "sha256": "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2",
+   "urls": [
+    "https://pypi.tuna.tsinghua.edu.cn/packages/ef/55/6dc6d6bb953bdfc52519a0059592c52b6e3b8ad51cf8256dffceb55b0610/setuptools-84.2.1-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/ef/55/6dc6d6bb953bdfc52519a0059592c52b6e3b8ad51cf8256dffceb55b0610/setuptools-84.2.1-py3-none-any.whl"
+   ]
+  },
+  {
+   "name": "engine__catalog__vocab.txt",
+   "kind": "catalog",
+   "dest": "engine/catalog/vocab.txt",
+   "size": 64831,
+   "sha256": "b9ba21326c3d90dc85284eb51bc6cd1b95739c56cabd458d502019dc7c6ab0a1",
+   "urls": [
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/vocab.txt",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/vocab.txt"
+   ]
+  },
+  {
+   "name": "engine__catalog__v0.113.1__catalog.json",
+   "kind": "catalog",
+   "dest": "engine/catalog/v0.113.1/catalog.json",
+   "size": 658101,
+   "sha256": "e6f949f74d79cf1507e96dcf3b1c10ba7952a2707d5cf09fadbc80330915cc91",
+   "urls": [
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/v0.113.1/catalog.json",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/v0.113.1/catalog.json"
+   ]
+  },
+  {
+   "name": "engine__catalog__aliases.txt",
+   "kind": "catalog",
+   "dest": "engine/catalog/aliases.txt",
+   "size": 1521,
+   "sha256": "0a9ff41a14e58b998901cae8d4157c4e8763892dbb1cec1e9dae2fae050ff85a",
+   "urls": [
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/aliases.txt",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/aliases.txt"
+   ]
+  },
+  {
+   "name": "engine__catalog__no_downside_relics.txt",
+   "kind": "catalog",
+   "dest": "engine/catalog/no_downside_relics.txt",
+   "size": 1754,
+   "sha256": "66a465343a09b5e48675816631a83e31320fa0193d992ffa9f198aead4339935",
+   "urls": [
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/no_downside_relics.txt",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/no_downside_relics.txt"
+   ]
+  }
+ ],
+ "models": {
+  "IRONCLAD": {
+   "file": "ironclad_ema_v24782.pt",
+   "size": 78429905,
+   "sha256": "78ba58312335b1a49823fdaf6aa263ee46f9dae46b5d4753bc609eb671588f20",
+   "label": "铁甲战士",
+   "urls": [
+    "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v6/ironclad_ema_v24782.pt",
+    "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v6/ironclad_ema_v24782.pt"
+   ]
+  },
+  "SILENT": {
+   "file": "silent_ema_v26428.pt",
+   "size": 77698355,
+   "sha256": "800b8cc293d834661c890deb72fc7940ed85766e767e58a84cdd5495b6d85d82",
+   "label": "静默猎手",
+   "urls": [
+    "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v4/silent_ema_v26428.pt",
+    "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v4/silent_ema_v26428.pt"
+   ]
+  },
+  "DEFECT": {
+   "file": "student_e_v165018.pt",
+   "size": 77695155,
+   "sha256": "f51545673c578e0d2970a3cf1fd5cb47fd894bc4bbbdcfe962c2b472828ac44e",
+   "label": "故障机器人",
+   "urls": [
+    "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v1/student_e_v165018.pt",
+    "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v1/student_e_v165018.pt"
+   ]
+  },
+  "REGENT": {
+   "file": "regent_student_e8.pt",
+   "size": 77698675,
+   "sha256": "744256ed7049691f0e25c61d58f892d244cecc92ad34ec864c81dd21776c478d",
+   "label": "储君",
+   "urls": [
+    "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v2/regent_student_e8.pt",
+    "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v2/regent_student_e8.pt"
+   ]
+  },
+  "NECROBINDER": {
+   "file": "necrobinder_raw_v25875.pt",
+   "size": 78400958,
+   "sha256": "587be7c75b4b19ecc2c8694894e12dc122d5db0da0a0738f94a07749a9d8d674",
+   "label": "亡灵契约师",
+   "urls": [
+    "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v6/necrobinder_raw_v25875.pt",
+    "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v6/necrobinder_raw_v25875.pt"
+   ]
+  },
+  "FOOL": {
+   "file": "fool_ema_v24181.pt",
+   "size": 78399301,
+   "sha256": "6ea4fdc5fbb49cb61558f45269a3b2194b54b9dce5969662bc64745a0e99241d",
+   "label": "愚者",
+   "urls": [
+    "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v5/fool_ema_v24181.pt",
+    "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v5/fool_ema_v24181.pt"
+   ]
+  }
+ }
+}

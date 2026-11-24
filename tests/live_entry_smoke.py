@@ -164,6 +164,11 @@ SPECIAL_ARGS: dict[str, list[dict[str, Any]]] = {
     "sts2_set_control_mode": [{"mode": "advise"}],
     "sts2_set_play_style": [{"style": "serious"}, {"style": "silly"}],
     "sts2_set_instance": [{"instance": "host"}, {"instance": "catgirl"}],
+    # 策略网络的下载入口有本机副作用（下几百 MB、删模型文件），冒烟不调用它们：参数组为空表。
+    # 只读的 sts2_policy_status 照常调用。
+    "sts2_policy_prepare_runtime": [],
+    "sts2_policy_download_model": [],
+    "sts2_policy_remove_model": [],
 }
 
 

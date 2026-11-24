@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>尖塔2陪玩 · 策略网络</title>
+<style>
+/* token 与 index.html / history.html 同一套（本体 ui-kit/styles.css） */
+:root{
+  color-scheme:light dark;
+  --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+  --radius-md:12px;--radius-lg:16px;
+  --bg:#f7f9fc;--surface:rgba(255,255,255,.84);--surface-strong:rgba(255,255,255,.96);
+  --text:#1f2937;--muted:#667085;--border:rgba(148,163,184,.36);
+  --primary:#409eff;--success:#67c23a;--danger:#f56c6c;
+  --primary-bg:rgba(64,158,255,.12);--primary-border:rgba(64,158,255,.38);
+  --danger-bg:rgba(245,108,108,.10);--danger-border:rgba(245,108,108,.38);
+  --subtle:rgba(148,163,184,.14);--focus:#40c5f1;
+  --page-max:720px;--page-pad:18px;--gap:12px;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0f172a;--surface:rgba(15,23,42,.78);--surface-strong:rgba(17,24,39,.94);
+  --text:#e5e7eb;--muted:#94a3b8;--border:rgba(148,163,184,.22);
+}}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--font);font-size:14px;line-height:1.65;background:var(--bg);color:var(--text);padding:var(--page-pad) var(--page-pad) 40px;-webkit-font-smoothing:antialiased}
+.wrap{width:100%;max-width:var(--page-max);margin:0 auto}
+.top{margin-bottom:var(--gap)}
+.back-btn{display:inline-flex;align-items:center;min-height:32px;padding:6px 12px;background:var(--surface-strong);color:var(--muted);border:1px solid var(--border);border-radius:999px;font-size:12px;cursor:pointer;text-decoration:none}
+.back-btn:hover{color:var(--primary);border-color:var(--primary-border)}
+h1{font-size:22px;font-weight:760;letter-spacing:.3px;line-height:1.35;margin:0 0 4px}
+.sub{color:var(--muted);font-size:12px;line-height:1.6;margin:0 0 18px}
+button:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:12px 14px 14px;margin-bottom:var(--gap)}
+.panel h3{font-size:15px;font-weight:720;margin:0 0 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:650;border:1px solid var(--border);color:var(--muted)}
+.badge.ok{color:var(--success);border-color:rgba(103,194,58,.38);background:rgba(103,194,58,.10)}
+.badge.run{color:var(--primary);border-color:var(--primary-border);background:var(--primary-bg)}
+.badge.bad{color:var(--danger);border-color:var(--danger-border);background:var(--danger-bg)}
+.line{font-size:12px;color:var(--muted)}
+.err{font-size:12px;color:var(--danger);word-break:break-all;margin-top:6px}
+.bar{height:6px;border-radius:999px;background:var(--subtle);overflow:hidden;margin-top:8px}
+.bar>i{display:block;height:100%;width:0;background:var(--primary);border-radius:999px;transition:width .3s}
+.btn{display:inline-flex;align-items:center;min-height:28px;padding:4px 12px;border-radius:999px;border:1px solid var(--primary-border);background:var(--primary-bg);color:var(--primary);font-size:12px;font-weight:650;cursor:pointer}
+.btn.ghost{border-color:var(--border);background:transparent;color:var(--muted)}
+.btn.ghost:hover{color:var(--danger);border-color:var(--danger-border)}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:var(--gap)}
+.char{position:relative;display:grid;gap:6px;padding:14px;text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);cursor:pointer;transition:transform .16s ease,border-color .16s ease;font:inherit;color:inherit;width:100%}
+.char:hover{transform:translateY(-1px);border-color:var(--primary)}
+.char .face{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;font-size:20px;font-weight:780;color:#fff;background:var(--tone,#64748b)}
+.char .name{font-size:15px;font-weight:720}
+.char .meta{font-size:12px;color:var(--muted)}
+/* 未下载：整张卡置灰 */
+.char.missing .face{background:#94a3b8}
+.char.missing{filter:grayscale(1);opacity:.62}
+.char.missing:hover{opacity:.9}
+.char.ready{border-color:rgba(103,194,58,.45);cursor:default}
+.char.ready:hover{transform:none}
+.char .remove{position:absolute;top:10px;right:10px}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><a class="back-btn" href="index.html">← 返回</a></div>
+  <h1>策略网络</h1>
+  <p class="sub">每个角色一个模型，下载后该角色的整局决策交给网络；没下载的角色照旧用求解器加启发式。<br>文件下载到本机 <span id="root"></span></p>
+
+  <div class="panel" id="runtime">
+    <h3>运行环境（Python 与 PyTorch）<span class="badge" id="rt-badge">检查中</span></h3>
+    <div class="line" id="rt-line">打开本页时检查一次，本机没有就自动开始下载。</div>
+    <div class="bar" id="rt-bar" hidden><i></i></div>
+    <div class="err" id="rt-err" hidden></div>
+    <div style="margin-top:8px" id="rt-retry" hidden><button class="btn" onclick="prepareRuntime()">重试</button></div>
+  </div>
+
+  <div class="cards" id="cards"></div>
+  <div class="err" id="page-err" hidden style="margin-top:12px"></div>
+</div>
+
+<script>
+const PLUGIN_ID = 'sts2_autoplay';
+const TONES = { IRONCLAD:'#dc2626', SILENT:'#16a34a', DEFECT:'#2563eb', REGENT:'#d97706', NECROBINDER:'#7c3aed', FOOL:'#db2777' };
+const $ = (id) => document.getElementById(id);
+const mb = (bytes) => (bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0) + ' MB';
+let status = null;
+
+/* 调插件入口：POST /runs → 轮询 /runs/{id} → 取导出结果（与 sts2.html 的 runEntry 同一条路）。 */
+async function runEntry(entryId, args) {
+  const create = await fetch('/runs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ plugin_id: PLUGIN_ID, entry_id: entryId, args: args || {} }),
+  });
+  const created = await create.json();
+  if (!created.run_id) throw new Error('入口调用失败：' + JSON.stringify(created).slice(0, 200));
+  for (let i = 0; i < 40; i++) {
+    const d = await (await fetch(`/runs/${created.run_id}`, { cache: 'no-store' })).json();
+    if (d.status === 'failed') throw new Error(JSON.stringify(d.error || {}).slice(0, 300));
+    if (d.stage === 'done' || d.status === 'succeeded') {
+      const exp = await (await fetch(`/runs/${created.run_id}/export`, { cache: 'no-store' })).json();
+      const json = ((exp.items || [])[0] || {}).json || {};
+      return json.data || json;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error('入口调用超时');
+}
+
+function pageError(err) {
+  $('page-err').hidden = !err;
+  $('page-err').textContent = err ? String(err) : '';
+}
+
+async function act(entryId, args) {
+  try { pageError(''); apply(await runEntry(entryId, args)); }
+  catch (err) { pageError(err); }
+}
+
+const prepareRuntime = () => act('sts2_policy_prepare_runtime');
+
+function apply(data) {
+  if (!data || !data.runtime || !Array.isArray(data.models)) return;
+  status = data;
+  $('root').textContent = data.root || '';
+  renderRuntime(data.runtime);
+  renderCards(data.models);
+}
+
+function renderRuntime(rt) {
+  const badge = $('rt-badge'), bar = $('rt-bar'), err = $('rt-err');
+  const running = rt.state === 'running', failed = rt.state === 'failed' && !rt.ready;
+  badge.className = 'badge ' + (rt.ready ? 'ok' : running ? 'run' : failed ? 'bad' : '');
+  badge.textContent = rt.ready ? '已就绪' : running ? '下载中' : failed ? '下载失败' : '未下载';
+  bar.hidden = !running;
+  if (running) {
+    const pct = rt.total_bytes ? Math.min(100, 100 * rt.done_bytes / rt.total_bytes) : 0;
+    bar.firstElementChild.style.width = pct.toFixed(1) + '%';
+    $('rt-line').textContent = `${mb(rt.done_bytes)} / ${mb(rt.total_bytes || rt.download_bytes)}　${rt.current || ''}`;
+  } else {
+    $('rt-line').textContent = rt.ready
+      ? '网络推理用的环境已在本机，不需要再下载。'
+      : `需要下载约 ${mb(rt.download_bytes)}，装好后占用约 600 MB。`;
+  }
+  err.hidden = !failed; err.textContent = failed ? rt.error : '';
+  $('rt-retry').hidden = !failed;
+}
+
+function renderCards(models) {
+  const box = $('cards');
+  box.innerHTML = '';
+  for (const m of models) {
+    const running = m.state === 'running', failed = m.state === 'failed' && !m.ready;
+    const card = document.createElement(m.ready ? 'div' : 'button');
+    card.className = 'char ' + (m.ready ? 'ready' : running ? 'loading' : 'missing');
+    card.style.setProperty('--tone', TONES[m.character] || '#64748b');
+    const pct = running && m.total_bytes ? Math.min(100, 100 * m.done_bytes / m.total_bytes) : 0;
+    const meta = m.ready ? '已下载 · 该角色交给网络'
+      : running ? `下载中 ${mb(m.done_bytes)} / ${mb(m.total_bytes || m.size)}`
+      : failed ? '下载失败，点击重试'
+      : `未下载 · 点击下载（${mb(m.size)}）`;
+    card.innerHTML =
+      `<div class="face"></div><div class="name"></div><div class="meta"></div>` +
+      (running ? `<div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>` : '') +
+      (failed ? `<div class="err"></div>` : '');
+    card.querySelector('.face').textContent = (m.label || m.character).slice(0, 1);
+    card.querySelector('.name').textContent = m.label || m.character;
+    card.querySelector('.meta').textContent = meta;
+    if (failed) card.querySelector('.err').textContent = m.error;
+    if (m.ready) {
+      const remove = document.createElement('button');
+      remove.className = 'btn ghost remove'; remove.textContent = '删除';
+      remove.onclick = () => { if (confirm(`删除 ${m.label} 的模型文件？之后该角色回到求解器加启发式。`)) act('sts2_policy_remove_model', { character: m.character }); };
+      card.appendChild(remove);
+    } else if (!running) {
+      card.onclick = () => act('sts2_policy_download_model', { character: m.character });
+    }
+    box.appendChild(card);
+  }
+}
+
+/* 进度：插件把状态落成 static/policy_status.json，这里直接读文件，不为每次刷新都走一遍入口。 */
+async function poll() {
+  let delay = 4000;
+  try {
+    const res = await fetch('policy_status.json?t=' + Date.now(), { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      apply(data);
+      if (data.runtime.state === 'running' || data.models.some((m) => m.state === 'running')) delay = 1000;
+    }
+  } catch (err) { /* 文件还没写出来：下一轮再读 */ }
+  setTimeout(poll, delay);
+}
+
+/* 打开页面时检查一次运行环境；本机没有就由这次调用开始下载。 */
+prepareRuntime().then(poll);
+</script>
+</body>
+</html>

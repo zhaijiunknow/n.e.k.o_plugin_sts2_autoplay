@@ -67,8 +67,15 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
     entries = collect_entries()
     entry_ids = {entry_id for entry_id, _ in entries}
 
-    assert len(entries) == 22
+    assert len(entries) == 26
+    # 有本机副作用的下载入口不进实机冒烟（参数组为空表 = 一次都不调用）。
+    assert [SPECIAL_ARGS[e] for e in ("sts2_policy_prepare_runtime", "sts2_policy_download_model", "sts2_policy_remove_model")] == [[], [], []]
     assert entry_ids == {
+        # 策略网络的下载前端（static/policy.html）用的四个入口。
+        "sts2_policy_status",
+        "sts2_policy_prepare_runtime",
+        "sts2_policy_download_model",
+        "sts2_policy_remove_model",
         "sts2_health_check",
         "sts2_read_state",
         "sts2_get_status",

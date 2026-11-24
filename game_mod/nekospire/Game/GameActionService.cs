@@ -97,6 +97,7 @@ internal static class GameActionService
 
         return actionName switch
         {
+            Policy.PolicyService.ActionName => Policy.PolicyService.ExecuteAsync(request),
             "resolve_rewards" => ExecuteResolveRewardsAsync(request),
             "end_turn" => ExecuteEndTurnAsync(request),
             "coop_end_turn" => ExecuteEndTurnAsync(request),
