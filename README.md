@@ -2,7 +2,16 @@
 
 **目录**：仓库根目录（Python 包），`plugin.toml` 声明入口 `STS2AutoplayPlugin`。
 
-本插件负责**决策与表达**：给尖塔2的猫娘陪玩提供自动出牌/走图、局势点评、事件房 LLM 打分、游戏内弹幕，以及跨局记忆沉淀。它通过 Mod 的 HTTP API（`/state`、`/events/stream`、`/action`、`/solver/plan`、`/danmaku`）与游戏交互，自身**不读取** `strategies/` md——那是策略内容，交给 `strategy_repository` 解析。
+本插件负责**决策与表达**：给尖塔2的猫娘陪玩提供自动出牌/走图、局势点评、游戏内弹幕，以及跨局记忆沉淀。它通过 Mod 的 HTTP API（`/state`、`/events/stream`、`/action`、`/solver/plan`、`/policy/decision`、`/danmaku`）与游戏交互，自身**不读取** `strategies/` md——那是策略内容，交给 `strategy_repository` 解析。
+
+自动玩有两套决策来源，按**本局角色**自动选，不需要配置：
+
+| 本局角色 | 谁来决定 |
+|---|---|
+| 已下载模型 | **策略网络**（AlphaDefect）决定每一步；它给不出的那一步回落到下一行 |
+| 没下载模型 | 战斗用 **CombatSolver**（`/solver/plan`），其余用**启发式** |
+
+模型在插件面板的「策略网络」页按角色下载，见下文[策略网络](#策略网络alphadefect)一节。
 
 ## 入口 actions（`__init__.py`）
 
@@ -14,6 +23,7 @@
 - **co-op**：`sts2_open_coop_room`
 - **策略**：`sts2_apply_user_override`
 - **规划**：`sts2_get_planned_operation`、`sts2_execute_planned_operation`
+- **策略网络下载页**：`sts2_policy_status`、`sts2_policy_prepare_runtime`、`sts2_policy_download_model`、`sts2_policy_remove_model`（只给 `static/policy.html` 用，不进 LLM 的工具表）
 
 ## 核心模块（按职责）
 
@@ -24,6 +34,9 @@
 | `transport_client.py` | Mod HTTP 客户端（`/state`、`/action`、`/solver/plan`、`/danmaku`、SSE） |
 | `neko_interface.py` | NEKO SDK 接口（只读/控制 SD 工具入口） |
 | `heuristic_planner.py` / `companion_evaluator.py` | 决策：局面评估、出牌/选牌/路线启发式 + 点评触发器 |
+| `policy_client.py` | 策略网络的接线：问 Mod 要候选与观测帧 → 问推理旁路打分 → 让 Mod 执行；给不出就返回空，上面的启发式照旧接手 |
+| `policy_assets.py` / `policy_manifest.json` | 策略网络的本机资产：运行环境与各角色模型的下载、校验、安装（清单里钉死每个文件的大小与 SHA-256） |
+| `policy_sidecar/` | 推理旁路进程（`alphadefect_server.py`）与上游推理代码的子集（`upstream/`，MIT） |
 | `catgirl_llm.py` | LLM 生成：`CatgirlCommentGenerator`（弹幕/点评**文案**）。只有文案，没有决策 |
 | `play_style.py` | 游玩模式（认真/捣蛋/笨蛋）的档位常量、别名与"从有序候选里挑一个"的纯函数 |
 | `catgirl_memory.py` | 跨局记忆沉淀（见下节） |
@@ -32,7 +45,7 @@
 
 ## 决策与表达
 
-- **决策**：地图/奖励/卡组/事件全部由**启发式**决定——插件不靠 LLM 做任何决策（事件房原本的 LLM 评分融合已于 2026-10 摘除）；战斗出牌由 `/solver/plan` 权威决定，回退启发式。
+- **决策**：本局角色有已下载的模型时，每一步由**策略网络**决定（见下节）。否则——以及网络给不出的那一步——地图/奖励/卡组/事件由**启发式**决定，战斗出牌由 `/solver/plan` 权威决定、回退启发式。插件不靠 LLM 做任何决策（事件房原本的 LLM 评分融合已于 2026-10 摘除）。本节以下几条说的都是启发式这条路。
 - **多张选牌**：选牌屏需要选 2 张以上时，插件与猫娘驱动都按「这一屏**没按过**的下一张」推进（记住已按过的 option_index 集合，换屏即重置），能确认就优先 `confirm_selection`。以前两边都恒发 `option_index=0`，第二张永远选不上、`max_select` 到不了，界面就卡在那里。
 - **其它非战斗选择**：`bundle_selection`（先选后确认）、`capstone_selection`（逐项扫，不重复按同一按钮，index 0 可能是返回键）、`cards_view`（关闭）、`modal`（先 dismiss 再 confirm）、`game_over`（回主菜单）都已覆盖，不再落进 `unknown` 后静默卡住。
 - **奖励**：卡牌奖励屏优先**拿牌**（以前 `resolve_rewards` 排在前面，等于把每张奖励卡都白白 drain 掉）。
@@ -71,6 +84,14 @@ CombatSolver + 启发式，日志 `[sts2_policy]` 写明选了什么、为什么
 - **会回落的界面**：卡包三选一、水晶球、多张的牌组选牌、宝箱"跳过遗物"、选牌界面的取消，Mod 没有对应适配。
 - **反省不作用于网络**：跨局教训只影响回落时的启发式。网络权重是固定的，不会因为对局而变化。
 - `policy_enabled = false`（`plugin.toml`）可以整个关掉，回到只用 CombatSolver + 启发式。
+
+### 实测到什么程度
+
+- **编码一致性**：Mod 产出的观测帧与上游无头引擎逐字节比对（`game_mod/PolicyFidelity`，网络驱动的整局），
+  战斗、选牌、奖励、事件、休息处、商店、地图各类决策均一致；水晶球小游戏与"商店里有购买失败记录"的帧没有比对。
+- **实机（2026-11-24，进阶 10，单人）**：铁甲战士 4 局 3 通关；亡灵契约师 2 局 1 通关（另一局打到第三幕 Boss 阵亡）。
+  局数很少，只说明链路是通的，**不是胜率**。上游论文报告的进阶 10 贪心胜率是 62%–77%（因角色而异）。
+- **没在实机跑过**：静默猎手、故障机器人、储君、愚者的模型；真实联机。
 
 ## 猫娘记忆成长（跨局教训 → 决策）
 
@@ -224,7 +245,9 @@ CombatSolver + 启发式，日志 `[sts2_policy]` 写明选了什么、为什么
 游戏战斗/场景变化
   → Mod (C#) 采集状态、推送 /events/stream
   → 插件 loop_runner 消费
-  → heuristic_planner / companion_evaluator 出决策
+  → 出决策：本局角色有模型 → policy_client（Mod /policy/decision → 推理旁路 → policy_act）
+            否则或网络给不出 → heuristic_planner（战斗读 Mod /solver/plan）
+  → companion_evaluator 触发点评
   → （可选）catgirl_llm 生成弹幕/点评
   → Mod /action 执行动作 → /danmaku 渲染弹幕
   → （run 结束）catgirl_memory 总结教训/偏好 → 落盘 → 下一局注入 strategy_directives
@@ -241,6 +264,14 @@ CombatSolver + 启发式，日志 `[sts2_policy]` 写明选了什么、为什么
 
 1. 在 NEKO 里启用猫爪 + 本插件。插件连接时会通过 `POST /config` 关掉 Mod 自己的 LLM/弹幕，把解说交给 NEKO 侧猫娘。
 2. 用插件的 `sts2_start_autoplay` 等入口控制自动玩，`sts2_open_coop_room` 打开 co-op 房间。
+
+### 启用策略网络（可选）
+
+1. 打开插件面板 →「策略网络」。页面会检查运行环境（Python 与 PyTorch），本机没有就自动开始下载（约 154 MB，只需一次）。
+2. 点想用的角色卡下载模型（每个约 75 MB）。灰色的卡是还没下载的。
+3. 照常启动自动玩。选人时会在已下载模型的角色里随机；日志里 `[sts2_policy]` 开头的行写明网络每一步选了什么。
+
+不做这一步也能用：所有角色都走 CombatSolver + 启发式，与之前相同。
 
 ### 更新/安装插件失败："plugin package cannot be installed safely"（v0.7.11 起）
 
@@ -294,6 +325,8 @@ delete_plugin: failed to update install source for plugin_dir=...\resources\bin\
 
 **游戏内弹幕 overlay（`POST /danmaku`）**：猫娘解说直接在游戏内渲染（内置 Godot 节点 + `ProcessFrame` 信号，非 `_Process`），可配置字号与头像；弹幕与决策 LLM 解耦，`danmaku_enabled` 独立开关。所有来源都收口在 `DanmakuService.PushAsync`，由 `danmaku_push_enabled` 运行时门控（本地任何调用者推的弹幕都受控），`POST /danmaku/clear` 负责清屏。
 
+**策略网络接口（`GET /policy/decision`、`policy_act`）**：把当前界面变成 AlphaDefect 网络要的输入——候选动作列表加一帧二进制观测——并执行网络选中的候选。观测编码器直接用上游源码（`Policy/Vendor`），所以编码与网络训练时逐字节相同；Mod 自己写的部分是"从真实游戏界面读出候选"和"把候选翻译成游戏动作"。网络本身不在 Mod 里：推理由 NEKO 插件一侧完成，Mod 不带模型、也不带词表（词表由插件经 `POST /policy/data` 交给 Mod）。没有装插件时这组接口只是不可用，不影响其他功能。
+
 **HTTP 状态桥（`/state`、`/events/stream`）**：一次性导出完整局面快照；屏幕切换 + 战斗状态变化经 SSE 实时推送，由真实游戏切换驱动，而非纯轮询。
 
 ## 独立运行：co-op 启动流程
@@ -330,6 +363,7 @@ scripts\Start-NekoCoop.ps1 -SkipHostLaunch -ClientAutoplays           # host 你
 ## 依赖与兼容性
 
 - 需要 **RitsuLib 0.6.11+**；当前适配《杀戮尖塔 2》0.113.x（net9.0 / C# 13）。
+- 策略网络的词表与模型钉在上游为游戏 **v0.113.1** 发布的那一版。游戏更新后新增的卡牌/遗物会被编码成"未知"，网络仍能跑但对它们没有认识；要跟进需要上游发布新版本后更新 `policy_manifest.json` 并重新 vendor 编码器。
 - 搜索受思考时间上限（`solver_budget_seconds`，默认 12 秒，仅难局会用到）与节点/分支上限约束，展示的是预算内找到的最佳路线，不承诺数学意义全局最优；**不修改游戏 RNG**。
 - 求解器只支持**原版内容**：局面里出现第三方模组的卡牌/遗物/怪物/角色时它会明确拒绝（`in_combat=false` + 原因），不会带着不认识的内容硬算。多人（co-op）战斗只为**本地玩家**规划：人数带来的敌方生命/格挡缩放会算进去，队友不建模（计划按“队友不再行动”推演，warnings 里带 `multiplayer:teammates_not_modeled`，`coverage.risk=true`）。
 - 对游戏私有成员的访问用 **GameRef 反射**（不依赖编译期/运行时 publicize，无 Krafs.Publicizer）；RitsuLib 仍是硬依赖（引擎读 `RitsuLibFramework.GetMaxHandSize`）。
@@ -467,6 +501,9 @@ mod 下发的 `node_type` 是**游戏枚举名**（`Point.PointType.ToString()`�
 
 每局结束（阵亡/通关）做一次结构化总结，而不是只在终端屏上写一行计数：
 
+- **胜负**读 Mod 的 `game_over.is_victory`，不看界面名、也不看血量：Mod 的结算屏不分胜负都叫
+  `GAME_OVER`，而通关后的剧情会把血量打到 0 —— 只看这两样会把通关记成阵亡，还会生成"第 49 层被打死"的错误教训。
+
 - **损血归因**：每次刷新记一条生命采样（`hp_trail`，换局自动清零），局末算出总损血、
   单次掉血最多的三处（带界面/层级/血量前后）、最低血与结束血量 —— 就是"看看哪些地方损血导致失败"。
 - **战报**（`_run_summary_digest`）：结局 + 角色 + 层级 + 损血归因 + 最近决策 + 已知教训，
@@ -542,6 +579,10 @@ mod 下发的 `node_type` 是**游戏枚举名**（`Point.PointType.ToString()`�
 选人界面改走**游戏自带的「随机」候选**（`is_random`），而不是插件自己摇 —— 随机语义交给游戏，
 开局后再从 `run` 里读出实际角色，播报一次（`[sts2_character] 本局角色=…`）并告诉本体。
 「随机」只按一次（按键由**执行**推动，见上文那条通用护栏），按过就转入 `embark`。
+
+**有已下载的策略网络模型时**不用游戏的「随机」：一个网络只会打一个角色，所以改成在
+「已下载模型且已解锁」的角色里随机定一个（`[sts2_character_select] decision=preferred`）。
+每次进选人界面现查，所以对局之间新下载或删除模型不用重启插件。一个模型都没有时照旧走上面的「随机」。
 
 ## 自动游玩历史页（v0.6.1 起）
 
@@ -652,10 +693,18 @@ locales_dir = "i18n"
 | `/danmaku/clear` | 清空屏幕上的弹幕并卸掉 overlay（关弹幕时用） |
 | `/events/stream` | SSE 场景事件流 |
 | `/solver/plan` | 战斗求解决策（权威来源） |
+| `/policy/decision` | 策略网络：当前界面的候选列表 + 观测帧（`?obs_format=N` 指定帧格式）；不该它管或还没轮到时写明原因 |
+| `/policy/data` | 策略网络：接收插件交来的词表（存到 `user://NekoSpire/policy`） |
+
+`/action` 里与策略网络配套的动作是 `policy_act`：带上 `/policy/decision` 返回的 `decision_id` 与候选下标，Mod 核对界面没变之后才执行。
 
 - **战斗求解器**（`Solver/`）：内嵌 **vendored CombatSolver 1.0.0 引擎**（上游 `main@1ca3d6ce`，HotKernel 纯值战斗内核 + HotSearch；另加 nekospire 自己的多人本地玩家补丁，不改上游），私有成员用 **GameRef 反射**（无 Krafs.Publicizer）。`Game/Sim/` 是一套独立重实现的确定性结算器，仅作回退（`SolverEnabled=false`）。
   - vendor 边界、适配规则与再同步流程见 [`game_mod/nekospire/Solver/VENDORING.md`](game_mod/nekospire/Solver/VENDORING.md)；流水线脚本：`game_mod/scripts/vendor-combat-solver.py`（换入上游 + 私有访问改写）、`game_mod/scripts/build-errors.py`（编译错误汇总）、`game_mod/SolverSmoke/`（不启动游戏的离线冒烟）。
-  - **行为验证状态**：Release 编译零错误 + SimTests 全通过 + 离线冒烟（用真实 `sts2.dll` 建真实战斗，经 `/solver/plan` 背后的同一入口求解并把计划打到实机战斗上）通过。**游戏进程内**的行为（Godot 运行时、模组加载器、真实对局质量）尚未验证，见 `VENDORING.md` 的"验证边界"一节。
+  - **行为验证状态**：Release 编译零错误 + SimTests 全通过 + 离线冒烟（用真实 `sts2.dll` 建真实战斗，经 `/solver/plan` 背后的同一入口求解并把计划打到实机战斗上）通过。游戏进程内：0.113.1 上模组正常加载，求解器 + 启发式在单人局里跑过一局（2026-11-24，打到第 33 层阵亡）。**真实联机**下的表现仍未验证，见 `VENDORING.md` 的"验证边界"一节。
+- **策略网络接口**（`Policy/`）：
+  - `Policy/Vendor/` 是上游 AlphaDefect 的观测编码器源码（MIT），由 `game_mod/scripts/vendor-alphadefect.py` 从上游检出重新生成，**不要手改**；nekospire 的改动（观察者 = 本地玩家，等）写在那个脚本里重放。
+  - `PolicyDecisionBuilder.cs` 照上游无头引擎的规则组装各类决策的候选（纯逻辑）；`PolicyService.cs` 读真实的 Godot 界面、把候选对应到 nekospire 已有的动作；`PolicyHooks.cs` 是编码器需要的几处只读钩子。
+  - 离线核对：`game_mod/PolicyFidelity/` 把上游无头引擎和构建出的 `nekospire.dll` 放进同一个进程，网络每做一个决策，两边各编码一次并逐字节比较（`game_mod/scripts/policy_fidelity_run.py`）。它核对的是逻辑层；`PolicyService.cs` 读界面的那一层离线没有界面可读，只能在游戏里验证。
 
 ## 问题反馈
 

@@ -2,7 +2,16 @@
 
 **Location**: repository root (Python package); `plugin.toml` declares the `STS2AutoplayPlugin` entry point.
 
-This plugin handles **decision & expression**: it gives the Slay-the-Spire-2 catgirl companion autoplay (card plays / map movement), situation commentary, a LLM score for event rooms, in-game danmaku, and cross-run memory. It talks to the game through the Mod's HTTP API (`/state`, `/events/stream`, `/action`, `/solver/plan`, `/danmaku`) and does **not** read `strategies/` md itself — that's strategy content, left to `strategy_repository`.
+This plugin handles **decision & expression**: it gives the Slay-the-Spire-2 catgirl companion autoplay (card plays / map movement), situation commentary, in-game danmaku, and cross-run memory. It talks to the game through the Mod's HTTP API (`/state`, `/events/stream`, `/action`, `/solver/plan`, `/policy/decision`, `/danmaku`) and does **not** read `strategies/` md itself — that's strategy content, left to `strategy_repository`.
+
+Autoplay has two decision sources, chosen automatically by **the character of the current run** (nothing to configure):
+
+| Character of the run | Who decides |
+|---|---|
+| model downloaded | the **policy network** (AlphaDefect) decides every step; a step it cannot produce falls back to the next row |
+| no model downloaded | combat by **CombatSolver** (`/solver/plan`), everything else by **heuristics** |
+
+Models are downloaded per character on the plugin panel's "策略网络" (policy network) page; see [Policy network](#policy-network-alphadefect) below.
 
 ## Entry actions (`__init__.py`)
 
@@ -14,6 +23,7 @@ This plugin handles **decision & expression**: it gives the Slay-the-Spire-2 cat
 - **Co-op**: `sts2_open_coop_room`
 - **Strategy**: `sts2_apply_user_override`
 - **Planning**: `sts2_get_planned_operation`, `sts2_execute_planned_operation`
+- **Policy-network download page**: `sts2_policy_status`, `sts2_policy_prepare_runtime`, `sts2_policy_download_model`, `sts2_policy_remove_model` (used only by `static/policy.html`; not exposed to the LLM as tools)
 
 ## Core modules (by responsibility)
 
@@ -24,6 +34,9 @@ This plugin handles **decision & expression**: it gives the Slay-the-Spire-2 cat
 | `transport_client.py` | Mod HTTP client (`/state`, `/action`, `/solver/plan`, `/danmaku`, SSE) |
 | `neko_interface.py` | NEKO SDK interface (read-only / control tool entry points) |
 | `heuristic_planner.py` / `companion_evaluator.py` | Decision: situation evaluation, play/card/route heuristics + commentary trigger |
+| `policy_client.py` | Policy-network wiring: ask the Mod for candidates + observation frame → ask the inference sidecar to score → have the Mod execute; returns nothing when it cannot decide, and the heuristics above take over |
+| `policy_assets.py` / `policy_manifest.json` | Local assets of the policy network: download, verification and installation of the runtime and per-character models (the manifest pins every file's size and SHA-256) |
+| `policy_sidecar/` | The inference sidecar process (`alphadefect_server.py`) and the inference subset of upstream's Python (`upstream/`, MIT) |
 | `catgirl_llm.py` | LLM generation: `CatgirlCommentGenerator` (danmaku / commentary **text**). Text only — no decisions |
 | `play_style.py` | Play styles (serious / mischievous / silly): constants, aliases, and the pure "pick one from an ordered candidate list" function |
 | `catgirl_memory.py` | Cross-run memory accumulation (see next section) |
@@ -32,7 +45,7 @@ This plugin handles **decision & expression**: it gives the Slay-the-Spire-2 cat
 
 ## Decision & Expression
 
-- **Decision**: map / reward / deck / event are decided entirely by **heuristics** — the plugin makes no LLM-driven decisions (the event-room LLM-score fusion was removed in 2026-10); combat card plays are decided authoritatively by `/solver/plan`, falling back to heuristics.
+- **Decision**: when the character of the run has a downloaded model, every step is decided by the **policy network** (next section). Otherwise — and for any step the network cannot produce — map / reward / deck / event are decided by **heuristics**, and combat card plays are decided authoritatively by `/solver/plan`, falling back to heuristics. The plugin makes no LLM-driven decisions (the event-room LLM-score fusion was removed in 2026-10). The remaining bullets of this section describe the heuristic path.
 - **Multi-card selection**: on a chooser that wants 2+ cards, both the plugin and the catgirl driver advance to the next card they have **not** pressed yet on this screen (the pressed `option_index` set is remembered and reset when the screen's candidate set changes), and prefer `confirm_selection` when the game says it can confirm. Both used to send `option_index=0` forever, so the second card was never picked, `max_select` was never reached and the screen hung.
 - **Other out-of-combat choosers**: `bundle_selection` (choose then confirm), `capstone_selection` (sweep options, never re-press the same button — index 0 may be Back), `cards_view` (close), `modal` (dismiss before confirm), `game_over` (back to main menu) are all covered now instead of falling into `unknown` and stalling silently.
 - **Rewards**: the card-reward chooser now takes a card first (`resolve_rewards` used to be checked first, silently draining every card reward).
@@ -40,6 +53,35 @@ This plugin handles **decision & expression**: it gives the Slay-the-Spire-2 cat
 - **Expression**: catgirl commentary + in-game danmaku.
 - **Preference capture**: `sts2_apply_user_override` turns the user's natural-language guidance into structured preferences / overrides.
 - **Cross-run memory**: see next section.
+
+## Policy network (AlphaDefect)
+
+Once a character's model is downloaded, **every step** of that character's autoplay (card plays, card picks, route, shop, events, rest sites) is first handed to the [AlphaDefect](https://github.com/hmty-CHEN/AlphaDefect-Public) network; a step it cannot produce falls back to CombatSolver + heuristics, and `[sts2_policy]` log lines say what was chosen and why a step fell back. **Characters without a downloaded model play exactly as before** (CombatSolver + heuristics).
+
+### How to use it: plugin panel → "策略网络"
+
+There are no paths to configure. Open the "策略网络" page of the plugin panel (`static/policy.html`):
+
+- **Runtime** (Python and PyTorch): checked once when the page opens; if it is not on this machine the download starts automatically (about 154 MB to download, about 600 MB installed). **Nothing is downloaded when the plugin starts.**
+- **Character cards**: one per character. Grey = not downloaded; click to download (about 75 MB each). A downloaded card lights up and that character is handed to the network. A model can be removed, which returns the character to CombatSolver + heuristics.
+- Files live in `%LOCALAPPDATA%\N.E.K.O\sts2_autoplay\policy_runtime`. Every file is checked against a pinned size and SHA-256, downloads resume after an interruption, and mirrors reachable from mainland China are tried first.
+
+Character select: when some characters have a downloaded model, each run picks at random among them; when none has, the game's own "random" entry is used as before.
+
+### How it runs
+
+- **Three hops**: the Mod's `GET /policy/decision` returns the candidates and an observation frame → the inference sidecar `policy_sidecar/alphadefect_server.py` scores them (its own process, using the downloaded runtime; started by the plugin the first time it is needed) → the Mod executes the chosen candidate (`policy_act`).
+- **The vocabulary is not shipped with the Mod**: it is downloaded together with the runtime, and the plugin hands it to the Mod when the Mod has none (or a different one).
+- **Multiplayer runs also use the network**, observing from the local player. The network was trained on single-player runs only; there is no data on how it plays in multiplayer. Map votes still follow `map_policy` (not handed to the network unless it is `auto`).
+- **Screens that fall back**: card bundles, the Crystal Sphere minigame, multi-card deck selections, "skip the relic" at a chest, and cancelling a card selection have no adapter in the Mod.
+- **Reflection does not act on the network**: cross-run lessons only influence the heuristics used on fallback. The network's weights are fixed and do not change with play.
+- `policy_enabled = false` (`plugin.toml`) turns the whole thing off.
+
+### How far it has been tested
+
+- **Encoding fidelity**: the frames the Mod produces are compared byte for byte with upstream's headless engine over whole network-driven runs (`game_mod/PolicyFidelity`). Combat, card selection, rewards, events, rest sites, shops and map decisions all match; Crystal Sphere frames and shop frames with a recorded failed purchase are not compared.
+- **In the game (2026-11-24, Ascension 10, single player)**: Ironclad won 3 of 4 runs; Necrobinder won 1 of 2 (the other died at the Act 3 boss). That is far too few runs to be a win rate — it shows the pipeline works. The upstream paper reports Ascension-10 greedy win rates of 62%–77% depending on the character.
+- **Not run in the game**: the Silent, Defect, Regent and Fool models; real multiplayer.
 
 ## Catgirl Memory Growth (cross-run lessons → decision)
 
@@ -175,7 +217,9 @@ Note `coop_client_port` in `GET /config` is a read-only field that only exists f
 Game combat / scene changes
   → Mod (C#) samples state, pushes /events/stream
   → plugin loop_runner consumes
-  → heuristic_planner / companion_evaluator make decisions
+  → decide: character has a model → policy_client (Mod /policy/decision → inference sidecar → policy_act)
+            otherwise, or the network cannot decide → heuristic_planner (combat reads Mod /solver/plan)
+  → companion_evaluator triggers commentary
   → (optionally) catgirl_llm generates danmaku / commentary
   → Mod /action executes → /danmaku renders danmaku
   → (run end) catgirl_memory summarizes lessons / preferences → persisted → next run injects into strategy_directives
@@ -193,6 +237,14 @@ Game combat / scene changes
 1. In NEKO, enable Paw (猫爪) + this plugin. On connect the plugin sends `POST /config` to turn off the Mod's own LLM/danmaku, handing commentary over to the NEKO-side catgirl.
 2. Use the plugin's `sts2_start_autoplay` etc. to control autoplay, and `sts2_open_coop_room` to open a co-op room.
 
+### Enable the policy network (optional)
+
+1. Open the plugin panel → "策略网络". The page checks the runtime (Python and PyTorch) and starts downloading it if it is missing (about 154 MB, once).
+2. Click the card of each character you want to download its model (about 75 MB each). Grey cards are not downloaded yet.
+3. Start autoplay as usual. Character select picks at random among the characters with a model; `[sts2_policy]` log lines say what the network chose at each step.
+
+Skipping this is fine: every character then plays with CombatSolver + heuristics, as before.
+
 
 # Mod Part (C# · in-game Godot Mod)
 
@@ -209,6 +261,8 @@ This Mod (NekoSpire) is the catgirl companion bridge for StS2: it embeds the **C
 **In-game danmaku overlay (`POST /danmaku`)**: the catgirl commentary renders directly in-game (built-in Godot nodes + `ProcessFrame` signal, not `_Process`), with configurable font size and avatar; danmaku is decoupled from the decision LLM, with its own `danmaku_enabled` toggle. Every producer funnels through `DanmakuService.PushAsync`, which is runtime-gated by `danmaku_push_enabled` (so anything a local caller pushes is controllable too), and `POST /danmaku/clear` clears the screen.
 
 **HTTP state bridge (`/state`, `/events/stream`)**: exports a complete snapshot on demand; screen transitions + combat state changes are pushed in real time over SSE, driven by actual game transitions rather than pure polling.
+
+**Policy-network endpoints (`GET /policy/decision`, `policy_act`)**: turn the current screen into the input the AlphaDefect network expects — a list of candidate actions plus one binary observation frame — and execute the candidate the network picks. The observation encoder is upstream's own source (`Policy/Vendor`), so the encoding is byte-identical to what the network was trained on; what the Mod adds is reading the candidates off the live game screens and translating a candidate into a game action. The network itself is not in the Mod: inference runs on the NEKO plugin's side, and the Mod ships neither models nor the vocabulary (the plugin sends the vocabulary with `POST /policy/data`). Without the plugin these endpoints are simply unavailable; nothing else is affected.
 
 ## Standalone run: co-op startup flow
 
@@ -244,6 +298,7 @@ scripts\Start-NekoCoop.ps1 -SkipHostLaunch -ClientAutoplays           # host alr
 ## Dependencies and compatibility
 
 - Requires **RitsuLib 0.6.11+**; currently adapted to 《Killing the Spire 2》 0.113.x (net9.0 / C# 13).
+- The policy network's vocabulary and models are pinned to the version upstream released for game **v0.113.1**. Cards or relics added by a later game update are encoded as "unknown": the network still runs but knows nothing about them. Following a game update requires a new upstream release, an updated `policy_manifest.json` and a re-vendored encoder.
 - The search is bounded by a think-time ceiling (`solver_budget_seconds`, default 12 s, only reached on hard fights) and node/branch limits; what's shown is the best route found within the budget, not a mathematical global optimum; **it does not modify the game's RNG**.
 - The solver supports **vanilla content only**: when the position contains a third-party mod's card/relic/monster/character it refuses explicitly (`in_combat=false` plus the reason) instead of guessing. In multiplayer (co-op) combat it plans for the **local player** only: the player-count scaling of enemy HP/block is modelled, teammates are not (the line assumes they do nothing further; the payload carries a `multiplayer:teammates_not_modeled` warning and `coverage.risk=true`).
 - Private game members are accessed via **GameRef reflection** (no compile-time/runtime publicization, no Krafs.Publicizer); RitsuLib remains a hard dependency (the engine reads `RitsuLibFramework.GetMaxHandSize`).
@@ -268,9 +323,17 @@ scripts\Start-NekoCoop.ps1 -SkipHostLaunch -ClientAutoplays           # host alr
 | `/danmaku/clear` | clear on-screen danmaku and detach the overlay |
 | `/events/stream` | SSE scene-event stream |
 | `/solver/plan` | combat solver decision (authoritative source) |
+| `/policy/decision` | policy network: candidates + observation frame for the current screen (`?obs_format=N` selects the frame format); says why when it is not its turn or not its screen |
+| `/policy/data` | policy network: receives the vocabulary from the plugin (stored in `user://NekoSpire/policy`) |
+
+The `/action` that goes with the policy network is `policy_act`: it carries the `decision_id` returned by `/policy/decision` and a candidate index, and the Mod executes it only after checking that the screen has not changed.
 
 - **Combat solver** (`Solver/`): embeds the **vendored CombatSolver 1.0.0 engine** (upstream `main@1ca3d6ce`: HotKernel pure-value combat kernel + HotSearch; plus nekospire's own local-player patch for multiplayer combat — upstream itself is untouched), private members via **GameRef reflection** (no Krafs.Publicizer). `Game/Sim/` is an independently reimplemented deterministic simulator, used only as a fallback (`SolverEnabled=false`).
   - The vendoring boundary, adaptation rules and re-sync procedure are documented in [`game_mod/nekospire/Solver/VENDORING.md`](game_mod/nekospire/Solver/VENDORING.md). Pipeline: `game_mod/scripts/vendor-combat-solver.py` (take upstream + rewrite private access), `game_mod/scripts/build-errors.py` (compiler error summary), `game_mod/SolverSmoke/` (offline smoke test, no game process).
+- **Policy-network endpoints** (`Policy/`):
+  - `Policy/Vendor/` is upstream AlphaDefect's observation encoder source (MIT), regenerated from an upstream checkout by `game_mod/scripts/vendor-alphadefect.py` — **do not hand-edit**; nekospire's changes (observer = local player, etc.) are replayed by that script.
+  - `PolicyDecisionBuilder.cs` assembles the candidates of each decision kind by the rules of upstream's headless engine (logic only); `PolicyService.cs` reads the live Godot screens and maps candidates to existing nekospire actions; `PolicyHooks.cs` holds the few read-only hooks the encoder needs.
+  - Offline check: `game_mod/PolicyFidelity/` hosts upstream's headless engine and the built `nekospire.dll` in one process; for every decision the network makes, both encode it and the frames are compared byte for byte (`game_mod/scripts/policy_fidelity_run.py`). It checks the logic layer; the screen-reading layer in `PolicyService.cs` has no screens to read offline and can only be verified in the game.
 
 ## Bug reporting
 
