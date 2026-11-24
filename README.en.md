@@ -36,7 +36,7 @@ Models are downloaded per character on the plugin panel's "策略网络" (policy
 | `heuristic_planner.py` / `companion_evaluator.py` | Decision: situation evaluation, play/card/route heuristics + commentary trigger |
 | `policy_client.py` | Policy-network wiring: ask the Mod for candidates + observation frame → ask the inference sidecar to score → have the Mod execute; returns nothing when it cannot decide, and the heuristics above take over |
 | `policy_assets.py` / `policy_manifest.json` | Local assets of the policy network: download, verification and installation of the runtime and per-character models (the manifest pins every file's size and SHA-256) |
-| `policy_sidecar/` | The inference sidecar process (`alphadefect_server.py`) and the inference subset of upstream's Python (`upstream/`, MIT) |
+| `policy_sidecar/` | The inference sidecar process (`alphadefect_server.py`) and the inference subset of upstream's Python (`vendor/`, MIT) |
 | `catgirl_llm.py` | LLM generation: `CatgirlCommentGenerator` (danmaku / commentary **text**). Text only — no decisions |
 | `play_style.py` | Play styles (serious / mischievous / silly): constants, aliases, and the pure "pick one from an ordered candidate list" function |
 | `catgirl_memory.py` | Cross-run memory accumulation (see next section) |
@@ -371,7 +371,7 @@ The **policy network** used by this Mod and plugin comes from:
 
 - **[AlphaDefect](https://github.com/hmty-CHEN/AlphaDefect-Public)** (author: **Qiyue Chen / hmty-CHEN**) — paper [arXiv:2611.31076](https://arxiv.org/abs/2611.31076). One network per character makes every decision of a run. This project uses three parts of it, all under the **MIT License** (`Copyright (c) 2026 Qiyue Chen`):
   - the **observation encoder** (C#), embedded in the Mod (`game_mod/nekospire/Policy/Vendor`, licence text included); the only change is that the observer is the local player instead of the first player;
-  - the **inference code** (Python: frame parser, batch builder, network), shipped with the plugin (`policy_sidecar/upstream`, licence text included);
+  - the **inference code** (Python: frame parser, batch builder, network), shipped with the plugin (`policy_sidecar/vendor`, licence text included);
   - the **per-character network weights**, which are not redistributed here: the plugin's "策略网络" page downloads them from upstream's GitHub Releases and verifies them.
 
   The vocabulary and content catalog are game-derived data outside upstream's MIT grant; they are not redistributed here either and are fetched from a pinned upstream commit by the download page.

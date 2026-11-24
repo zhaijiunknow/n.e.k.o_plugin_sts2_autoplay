@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 import sys
@@ -35,7 +36,10 @@ if not (NEKO / "plugin" / "plugins").is_dir():
 if str(NEKO) not in sys.path:
     sys.path.insert(0, str(NEKO))
 
-import plugin.plugins  # noqa: E402  宿主的包：提供 plugin.core / plugin.sdk
+# 宿主的包：提供 plugin.core / plugin.sdk。必须在上面把 NEKO 放进 sys.path 之后才能导入，
+# 所以用 import_module 而不是 import 语句（Market 的 CI 以 --ignore-noqa 跑 ruff，E402 压不掉）。
+plugin = importlib.import_module("plugin")
+importlib.import_module("plugin.plugins")
 
 _spec = importlib.util.spec_from_file_location(
     NAME, REPO / "__init__.py", submodule_search_locations=[str(REPO)]

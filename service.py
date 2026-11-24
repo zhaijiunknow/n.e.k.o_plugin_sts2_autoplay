@@ -23,7 +23,7 @@ from .heuristic_planner import (
     STS2HeuristicPlanner,
     normalize_map_policy,
 )
-from .history_view import write_history_view
+from .history_view import static_dir, write_history_view
 from .instructions import normalize_guidance_instruction
 from .loop_runner import STS2LoopRunner, _combat_plan_signature, _current_turn_steps
 from .mode_controller import STS2ModeController
@@ -33,6 +33,7 @@ from .play_style import (
     choose_candidate,
     normalize_play_style,
 )
+from .policy_client import PolicyAdvisor, is_policy_operation
 from .preference_extractors import STS2PreferenceExtractor
 from .preference_store import STS2PreferenceStore
 from .runtime_state import STS2RuntimeState
@@ -41,8 +42,6 @@ from .snapshot_normalizer import normalize_actions, normalize_snapshot
 from .state_machine import STS2StateMachine, should_hold_for_orders
 from .strategy_repository import STS2StrategyRepository
 from .summary_context_builder import STS2SummaryContextBuilder
-from .history_view import static_dir
-from .policy_client import PolicyAdvisor, is_policy_operation
 from .transport_client import STS2ActionRejected, STS2TransportClient, STS2TransportError
 
 # 「当前游戏信息状态」面板：状态推送最小间隔（防刷爆 SSE 有界队列）/ 心跳间隔（空闲时也定期刷新）

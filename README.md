@@ -36,7 +36,7 @@
 | `heuristic_planner.py` / `companion_evaluator.py` | 决策：局面评估、出牌/选牌/路线启发式 + 点评触发器 |
 | `policy_client.py` | 策略网络的接线：问 Mod 要候选与观测帧 → 问推理旁路打分 → 让 Mod 执行；给不出就返回空，上面的启发式照旧接手 |
 | `policy_assets.py` / `policy_manifest.json` | 策略网络的本机资产：运行环境与各角色模型的下载、校验、安装（清单里钉死每个文件的大小与 SHA-256） |
-| `policy_sidecar/` | 推理旁路进程（`alphadefect_server.py`）与上游推理代码的子集（`upstream/`，MIT） |
+| `policy_sidecar/` | 推理旁路进程（`alphadefect_server.py`）与上游推理代码的子集（`vendor/`，MIT） |
 | `catgirl_llm.py` | LLM 生成：`CatgirlCommentGenerator`（弹幕/点评**文案**）。只有文案，没有决策 |
 | `play_style.py` | 游玩模式（认真/捣蛋/笨蛋）的档位常量、别名与"从有序候选里挑一个"的纯函数 |
 | `catgirl_memory.py` | 跨局记忆沉淀（见下节） |
@@ -737,7 +737,7 @@ mod默认监听端口为18080，虽然是冷门端口，但依然可能会被占
 
 - **[AlphaDefect](https://github.com/hmty-CHEN/AlphaDefect-Public)**（作者：**Qiyue Chen / hmty-CHEN**）—— 论文 [arXiv:2611.31076](https://arxiv.org/abs/2611.31076)。每个角色一个网络，包办整局决策。本项目用到它的三样东西，均为 **MIT 许可证**（`Copyright (c) 2026 Qiyue Chen`）：
   - **观测编码器**（C#）：内嵌进 Mod（`game_mod/nekospire/Policy/Vendor`，许可证全文随附），只把观察者从"第一个玩家"改成本地玩家；
-  - **推理代码**（Python，帧解析 / 组批 / 网络结构）：随插件分发（`policy_sidecar/upstream`，许可证全文随附）；
+  - **推理代码**（Python，帧解析 / 组批 / 网络结构）：随插件分发（`policy_sidecar/vendor`，许可证全文随附）；
   - **各角色的网络权重**：不随本项目分发，由插件的「策略网络」页从上游的 GitHub Release 直接下载并校验。
   
   词表与内容目录是游戏衍生数据，不在上游的 MIT 范围内，本项目同样不分发，由下载页从上游仓库的固定提交获取。

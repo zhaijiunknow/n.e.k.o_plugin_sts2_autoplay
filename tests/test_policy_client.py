@@ -19,7 +19,6 @@ import random
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.action_engine import STS2ActionEngine
 from plugin.plugins.sts2_autoplay.action_registry import STS2ActionRegistry
 from plugin.plugins.sts2_autoplay.heuristic_planner import STS2HeuristicPlanner
@@ -30,7 +29,6 @@ from plugin.plugins.sts2_autoplay.policy_client import (
     is_policy_hold,
     is_policy_operation,
 )
-
 from test_d10_main_menu_recovery import _FakeClient, _make_runner
 
 DATA_ID = "b9ba21326c3d90dc"

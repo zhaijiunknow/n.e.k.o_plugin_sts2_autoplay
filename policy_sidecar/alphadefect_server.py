@@ -11,7 +11,7 @@ runtime (policy_assets.PolicyAssets) and needs nothing else on the machine:
   <root>/engine    vocabulary and content catalog
   <root>/models    one checkpoint per character; loaded on first use, so a model downloaded while
                    this process runs is picked up without a restart
-  ./upstream       the inference subset of upstream's Python (frame parser, batch builder, network)
+  ./vendor         the inference subset of upstream's Python (frame parser, batch builder, network)
 
     GET  /health  -> {"ok": true, "characters": {"IRONCLAD": {"obs_format": 28, ...}, ...}}
     POST /infer   {"character": "IRONCLAD", "frame": "<base64 frame from the mod's GET /policy/decision>"}
@@ -39,7 +39,7 @@ class Policies:
         self.root, self.manifest = root, manifest
         os.environ["STS2_POLICY_ROOT"] = str(root)
         os.environ["STS2_POLICY_GAME_VERSION"] = str(manifest["upstream"]["game_version"])
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "upstream"))
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "vendor"))
         import numpy as np
         import torch
         from sts2env.protocol import parse

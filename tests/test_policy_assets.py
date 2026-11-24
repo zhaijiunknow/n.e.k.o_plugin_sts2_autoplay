@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.policy_assets import MANIFEST_PATH, PolicyAssets
 
 
@@ -118,8 +117,12 @@ def _wait(assets: PolicyAssets, pick: Any, timeout: float = 20.0) -> dict[str, A
     raise AssertionError("下载任务没有结束")
 
 
-_runtime = lambda status: status["runtime"]  # noqa: E731
-_model = lambda status: status["models"][0]  # noqa: E731
+def _runtime(status: dict[str, Any]) -> dict[str, Any]:
+    return status["runtime"]
+
+
+def _model(status: dict[str, Any]) -> dict[str, Any]:
+    return status["models"][0]
 
 
 @pytest.mark.unit

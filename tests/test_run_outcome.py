@@ -7,7 +7,6 @@ mod 的结算屏名恒为 GAME_OVER，旧实现只在屏名等于 victory 时才
 from __future__ import annotations
 
 import pytest
-
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 
 

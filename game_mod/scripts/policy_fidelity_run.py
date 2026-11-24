@@ -45,8 +45,8 @@ def main() -> int:
     upstream = Path(a.upstream)
     sys.path.insert(0, str(upstream / "python"))
     import numpy as np
-    import torch
     import sts2env.env as envmod
+    import torch
 
     envmod.DOTNET = Path(a.dotnet)      # upstream hard-codes ~/.dotnet/dotnet
     from sts2env.env import Sts2Env

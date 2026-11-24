@@ -9,6 +9,8 @@ vendor/
 # `vendor/` 是插件的 Python 依赖目录。Windows 上 git 不分大小写，它会连带吞掉模组里
 # AlphaDefect 编码器的源码目录 Policy/Vendor/ —— 那是要入库的（没有它模组编译不过）。
 !game_mod/nekospire/Policy/Vendor/
+# 同理：策略网络推理旁路随包带的上游 Python 代码（MIT），也是要入库、要进插件包的。
+!policy_sidecar/vendor/
 dist/
 build/
 *.egg-info/

@@ -81,8 +81,9 @@ Distribution (no paths to configure, nothing downloaded at plugin start):
   `%LOCALAPPDATA%/N.E.K.O/sts2_autoplay/policy_runtime` only when the download page asks.
 - `static/policy.html` is that page: it calls the `sts2_policy_*` entries (`__init__.py`) and reads progress
   from `static/policy_status.json`, which `policy_assets` rewrites while a download runs.
-- `policy_sidecar/upstream/` is the inference subset of upstream's Python (MIT; see its README for the two
-  path-only changes). The sidecar is started by the plugin with the downloaded Python.
+- `policy_sidecar/vendor/` is the inference subset of upstream's Python (MIT; see its README for the two
+  path-only changes). It is named `vendor` on purpose: the Market CI lints the whole repo with ruff and
+  excludes only directories called `vendor`, and upstream's style does not pass that lint. The sidecar is started by the plugin with the downloaded Python.
 - The mod ships no vocabulary (game-derived, not MIT). The plugin sends its copy with `POST /policy/data`
   when the mod's `data_id` differs; the mod keeps it in `user://NekoSpire/policy`.
 - NEKO loads the plugin from `%LOCALAPPDATA%/N.E.K.O/.neko-plugin-installations/plugins/sts2_autoplay`
