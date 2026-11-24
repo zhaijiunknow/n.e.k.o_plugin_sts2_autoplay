@@ -684,6 +684,16 @@ mod默认监听端口为18080，虽然是冷门端口，但依然可能会被占
 > 相关来源与同步机制见 [`game_mod/nekospire/Solver/VENDORING.md`](game_mod/nekospire/Solver/VENDORING.md)。
 > 上述第三方来源代码不受本仓库 AGPL-3.0-only 自动覆盖，各自遵循原作者的 MIT 条款。
 
+本 Mod 与插件的**策略网络**来自：
+
+- **[AlphaDefect](https://github.com/hmty-CHEN/AlphaDefect-Public)**（作者：**Qiyue Chen / hmty-CHEN**）—— 论文 [arXiv:2611.31076](https://arxiv.org/abs/2611.31076)。每个角色一个网络，包办整局决策。本项目用到它的三样东西，均为 **MIT 许可证**（`Copyright (c) 2026 Qiyue Chen`）：
+  - **观测编码器**（C#）：内嵌进 Mod（`game_mod/nekospire/Policy/Vendor`，许可证全文随附），只把观察者从"第一个玩家"改成本地玩家；
+  - **推理代码**（Python，帧解析 / 组批 / 网络结构）：随插件分发（`policy_sidecar/upstream`，许可证全文随附）；
+  - **各角色的网络权重**：不随本项目分发，由插件的「策略网络」页从上游的 GitHub Release 直接下载并校验。
+  
+  词表与内容目录是游戏衍生数据，不在上游的 MIT 范围内，本项目同样不分发，由下载页从上游仓库的固定提交获取。
+  实机桥接（把编码器接到真实游戏界面、把网络的选择变成游戏动作）是本项目自己写的；上游的无头引擎用于离线逐帧核对。
+
 本 Mod 的MCP模块参考：
 
 - **[STS2-Agent](https://github.com/CharTyr/STS2-Agent)**（作者：**杉茶 / CharTyr**）—— AI Agent Mod。在可视化窗口里配置模型端点、对话、按模型调整思考强度、让模型自动游玩。其具体数据来源本 MOD 并未过多修改。

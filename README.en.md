@@ -304,6 +304,16 @@ This Mod vendors and adapts the combat-solver core of the following third-party 
 > The above is not automatically covered by this repository's AGPL-3.0-only; those portions follow the
 > original authors' MIT terms.
 
+The **policy network** used by this Mod and plugin comes from:
+
+- **[AlphaDefect](https://github.com/hmty-CHEN/AlphaDefect-Public)** (author: **Qiyue Chen / hmty-CHEN**) — paper [arXiv:2611.31076](https://arxiv.org/abs/2611.31076). One network per character makes every decision of a run. This project uses three parts of it, all under the **MIT License** (`Copyright (c) 2026 Qiyue Chen`):
+  - the **observation encoder** (C#), embedded in the Mod (`game_mod/nekospire/Policy/Vendor`, licence text included); the only change is that the observer is the local player instead of the first player;
+  - the **inference code** (Python: frame parser, batch builder, network), shipped with the plugin (`policy_sidecar/upstream`, licence text included);
+  - the **per-character network weights**, which are not redistributed here: the plugin's "策略网络" page downloads them from upstream's GitHub Releases and verifies them.
+
+  The vocabulary and content catalog are game-derived data outside upstream's MIT grant; they are not redistributed here either and are fetched from a pinned upstream commit by the download page.
+  The live bridge (connecting the encoder to the real game screens and turning the network's choice into game actions) is this project's own code; upstream's headless engine is used for the offline frame-by-frame check.
+
 This Mod's MCP module reference:
 
 - **[STS2-Agent](https://github.com/CharTyr/STS2-Agent)** (author: **杉茶 / CharTyr**) — an AI Agent Mod. Configure model endpoints in a visual window, chat, adjust thinking strength per model, and let the model play automatically. This MOD didn't heavily modify the specific data source.
