@@ -54,10 +54,15 @@ internal static class PolicyFrame
 internal static class PolicyFidelityProbe
 {
     public static int LastCandidates { get; private set; }
+    /// <summary>The candidates of the last decision built here, as GET /policy/decision would list them.</summary>
+    public static List<(string Kind, string Label, int? TargetIndex)>? LastChoices { get; private set; }
+
+    public static void ResetLast() => LastChoices = null;
 
     static byte[]? Frame(PolicyDecision? d)
     {
         LastCandidates = d?.Decision.Choices.Count ?? -1;
+        LastChoices = d?.Decision.Choices.Select((c, i) => (c.Kind.ToString(), c.Label, d.Actions[i]?.TargetIndex)).ToList();
         return d == null ? null : PolicyFrame.Encode(d).Serialize();
     }
 

@@ -26,6 +26,7 @@ public static class ModEntry
         HttpServer.Instance.Start();
         CombatSolver.CombatSolverRuntime.Install();
         Policy.PolicyService.Initialize();
+        PlayerChoiceLog.Install();
         NekoConfig.Load();
         NekoDanmakuDriver.Instance.Start();
         NekoAutoplayDriver.Instance.Start();

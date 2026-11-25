@@ -15,6 +15,7 @@ using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using Sts2Headless;
+using NekoChoices = neko::NekoComm.Game.PlayerChoiceLog;
 using NekoFrame = neko::NekoComm.Policy.PolicyFrame;
 using Probe = neko::NekoComm.Policy.PolicyFidelityProbe;
 
@@ -65,10 +66,52 @@ internal static class Fidelity
         Probe.InstallHooks();
         harmony.Patch(typeof(Observation).GetMethod(nameof(Observation.Build))!,
             postfix: new HarmonyMethod(typeof(Fidelity).GetMethod(nameof(AfterBuild), BindingFlags.NonPublic | BindingFlags.Static)));
+        // Second check: after every step, nekospire's player-choice log (GET /choices, the end-of-run review
+        // reads it) must name the candidate the run actually took. Written as JSONL; the runner judges it
+        // with the plugin's own matcher.
+        _choicePath = Environment.GetEnvironmentVariable("POLICY_CHOICE_LOG") ?? "";
+        if (_choicePath.Length == 0) return;
+        NekoChoices.LocalPlayer = run => run?.Players[0];
+        NekoChoices.Install();
+        harmony.Patch(typeof(RunSession).GetMethod(nameof(RunSession.Choose))!,
+            prefix: new HarmonyMethod(typeof(Fidelity).GetMethod(nameof(BeforeChoose), BindingFlags.NonPublic | BindingFlags.Static)));
+    }
+
+    private static string _choicePath = "";
+    private static long _choiceSeq;
+    private static object? _taken;
+
+    private static void BeforeChoose(Decision d, int index)
+    {
+        FlushChoices();     // also lets the log take its baseline before the first step of a run
+        // nekospire's own candidates for this decision (what GET /policy/decision lists), not upstream's:
+        // the labels differ, and the plugin matches against nekospire's. Null: this decision was not encoded.
+        var mine = Probe.LastChoices;
+        if (mine == null || mine.Count != d.Choices.Count) { _taken = null; return; }
+        _taken = new
+        {
+            kind = d.Kind.ToString(),
+            index,
+            floor = RunSession.State.TotalFloor,
+            candidates = mine.Select(c => new { kind = c.Kind, label = c.Label, target_index = c.TargetIndex }).ToList(),
+        };
+    }
+
+    private static void FlushChoices()
+    {
+        if (_choicePath.Length == 0) return;
+        var read = NekoChoices.Read(_choiceSeq);
+        _choiceSeq = read.latest_seq;
+        if (_taken == null) return;
+        File.AppendAllText(_choicePath, JsonSerializer.Serialize(new { step = _taken, records = read.choices },
+            new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }) + "\n");
+        _taken = null;
     }
 
     private static void AfterBuild(RunSession run, Decision d, Observation __result)
     {
+        FlushChoices();
+        Probe.ResetLast();
         if (d.Kind is DecisionKind.GameOver or DecisionKind.Stuck || Observation.Privileged) return;
         var tally = Tallies.TryGetValue(d.Kind.ToString(), out var t) ? t : Tallies[d.Kind.ToString()] = new Tally();
         tally.Frames++;

@@ -127,6 +127,22 @@ internal static class Router
             }
 
             if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/choices")
+            {
+                // What the local player chose since ?since=<seq> (see PlayerChoiceLog).
+                long since = long.TryParse(request.QueryString["since"], out var parsedSince) ? parsedSince : 0;
+                var choices = await GameThread.InvokeAsync(() => PlayerChoiceLog.Read(since));
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = choices
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath == "/policy/decision")
             {
                 // AlphaDefect policy seam: the decision (candidates + observation frame) for the current screen.

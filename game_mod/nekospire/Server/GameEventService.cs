@@ -189,7 +189,8 @@ internal sealed class GameEventService
         {
             try
             {
-                var state = await GameThread.InvokeAsync(GameStateService.BuildStatePayload);
+                // Choices are read on the same beat, so one made right before a room change is not lost.
+                var state = await GameThread.InvokeAsync(() => { PlayerChoiceLog.Collect(); return GameStateService.BuildStatePayload(); });
                 ProcessState(state);
             }
             catch (Exception ex) when (ex is not OperationCanceledException && ex is not TaskCanceledException)
