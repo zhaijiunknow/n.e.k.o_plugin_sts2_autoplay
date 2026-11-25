@@ -2618,7 +2618,7 @@ class STS2HeuristicPlanner:
         """事件选项按启发式分数**从好到坏**排序（返回选项下标）。
 
         与 ``_preferred_event_option`` 的评分口径完全一致，唯一差别是不取最高分而是保留整条顺序，
-        供游玩模式的扰动层挑选次优/最差——`. 0` 就是原来的最优。
+        第 0 个就是原来的最优。
         """
         payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
         event_options = payload.get("event_options") if isinstance(payload.get("event_options"), list) else []
@@ -3766,7 +3766,7 @@ class STS2HeuristicPlanner:
     # 规格 docs/shop_scoring.md。三个老入口（_preferred_shop_relic_index / _preferred_shop_potion_index
     # / _shop_best_card_index）在这里**收敛成一个** `_shop_preferred_purchase()`：卡 / 遗物 / 药水 /
     # 删牌进同一个池子比总分，取最高分；全部低于门槛就一分不花。
-    # `_shop_best_card_index` 仍然保留（选牌屏/扰动排序还在用它），但商店采购不再走它。
+    # `_shop_best_card_index` 仍然保留（选牌屏/候选排序还在用它），但商店采购不再走它。
 
     def _shop_preferred_purchase(
         self,
@@ -4613,7 +4613,7 @@ class STS2HeuristicPlanner:
         return removal
 
     def _shop_best_card_index(self, summary_context: dict[str, Any], preferences: dict[str, Any], min_score: int) -> int | None:
-        """按 `_score_reward_card` 原始分取最好的卡（选牌屏/扰动排序仍在用）。
+        """按 `_score_reward_card` 原始分取最好的卡（选牌屏/候选排序仍在用）。
 
         商店采购**不再**走这个方法：那边走统一评分池 `_shop_preferred_purchase`。
         """
@@ -6166,20 +6166,12 @@ class STS2HeuristicPlanner:
         except Exception:
             return None
 
-    # ---- 游玩模式（扰动）用的候选排序 ------------------------------------------------------
+    # ---- 各屏候选的排序（按既有评分，从好到坏）----------------------------------------------
     #
-    # 这里只做两件事：把"该屏有哪些**合法**下标"枚举出来，以及"按**既有评分**把这些下标排好序"。
     # 评分一律复用各屏原来的 _score_* 函数，不另写一套口径——排序的第 0 个必须就是规划器原本会选的
-    # 那一个，否则"不扰动"就不等于改动前的行为。
-    #
-    # 扰动层（service.run_autoplay_step）只在非 serious 档才调用这些方法：serious 档连排序都不算，
-    # 保证默认档零影响。
+    # 那一个。现在的使用者是 `lesson_trace`（教训层的度量）；原先的另一个使用者「游玩模式」已删除。
 
-    #: 下标键：只有 play_card 用 card_index，其余选项类动作都是 option_index。
-    _INDEX_KEY_BY_ACTION = {"play_card": "card_index"}
-    _DEFAULT_INDEX_KEY = "option_index"
-
-    #: 任一为 False 就认为该项不可选（宁可少给候选，也不能扰动出一个非法动作）。
+    #: 任一为 False 就认为该项不可选。
     _UNSELECTABLE_FLAGS = ("playable", "enabled", "is_enabled", "affordable", "can_afford")
 
     def _score_upgrade_card(self, card: dict[str, Any]) -> int:
@@ -6259,26 +6251,8 @@ class STS2HeuristicPlanner:
     _REMOVE_SELECTION_SCREENS = {"card_selection_remove", "card_selection_delet"}
 
     @classmethod
-    def index_key_for(cls, action_type: Any) -> str:
-        """该动作类型用哪个 kwargs 键承载"选第几个"。"""
-        return cls._INDEX_KEY_BY_ACTION.get(str(action_type or "").strip().lower(), cls._DEFAULT_INDEX_KEY)
-
-    @classmethod
     def _item_blocked(cls, item: dict[str, Any]) -> bool:
         return any(flag in item and item.get(flag) is False for flag in cls._UNSELECTABLE_FLAGS)
-
-    @classmethod
-    def _item_indices(cls, items: Any) -> list[int]:
-        """一列选项 dict → 下标列表（优先用 item['index']，缺省按位置）。不可选的排除掉。"""
-        result: list[int] = []
-        if not isinstance(items, list):
-            return result
-        for position, item in enumerate(items):
-            if not isinstance(item, dict) or cls._item_blocked(item):
-                continue
-            raw = item.get("index")
-            result.append(int(raw) if isinstance(raw, int) and not isinstance(raw, bool) else position)
-        return result
 
     @staticmethod
     def _operation_dict(operation: Any) -> dict[str, Any]:
@@ -6297,60 +6271,6 @@ class STS2HeuristicPlanner:
         strategy_context = context.get("strategy_context") if isinstance(context.get("strategy_context"), dict) else {}
         snapshot = context.get("snapshot") if isinstance(context.get("snapshot"), dict) else {}
         return summary_context, strategy_context, snapshot
-
-    def legal_option_indices(self, context: dict[str, Any], operation: Any) -> list[int]:
-        """当前操作所在屏的**合法**下标集合；枚举不出就返回空列表（= 不扰动）。"""
-        action_type = str(self._operation_dict(operation).get("action_type") or "").strip().lower()
-        summary_context, _strategy_context, snapshot = self._context_parts(context)
-        payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
-        raw_state = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
-
-        if action_type == "choose_event_option":
-            return self._item_indices(payload.get("event_options"))
-        if action_type == "choose_map_node":
-            nodes = payload.get("travelable_nodes")
-            if not isinstance(nodes, list) or not nodes:
-                nodes = payload.get("available_nodes")
-            return self._item_indices(nodes)
-        if action_type == "choose_reward_card":
-            return self._item_indices(self._reward_candidates(summary_context))
-        if action_type == "select_deck_card":
-            return self._item_indices(payload.get("selection_cards"))
-        if action_type == "choose_rest_option":
-            return self._item_indices(payload.get("rest_options"))
-        if action_type == "buy_card":
-            return self._item_indices(payload.get("shop_cards"))
-        if action_type == "buy_relic":
-            return self._item_indices(payload.get("shop_relics"))
-        if action_type == "buy_potion":
-            return self._item_indices(payload.get("shop_potions"))
-        if action_type == "play_card":
-            return [index for index, _card in self._playable_hand(context)]
-        if action_type == "choose_treasure_relic":
-            chest = raw_state.get("chest") if isinstance(raw_state.get("chest"), dict) else {}
-            return self._item_indices(chest.get("relic_options"))
-        if action_type == "choose_bundle":
-            return self._item_indices(raw_state.get("bundles"))
-        if action_type == "choose_capstone_option":
-            # capstone 选项在 payload 里没有列表，只有按钮。规划器自己的游标正是扫
-            # 0.._MAX_CAPSTONE_SWEEP-1（见 _next_capstone_option），所以这个范围就是它会去碰的下标集合。
-            return list(range(self._MAX_CAPSTONE_SWEEP))
-        # claim_reward / proceed / confirm_* / end_turn 等没有"选第几个"，不扰动。
-        return []
-
-    def _playable_hand(self, context: dict[str, Any]) -> list[tuple[int, dict[str, Any]]]:
-        _summary_context, _strategy_context, snapshot = self._context_parts(context)
-        raw_state = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
-        combat = raw_state.get("combat") if isinstance(raw_state.get("combat"), dict) else {}
-        hand = combat.get("hand") if isinstance(combat.get("hand"), list) else []
-        result: list[tuple[int, dict[str, Any]]] = []
-        for position, card in enumerate(hand):
-            if not isinstance(card, dict) or not bool(card.get("playable")):
-                continue
-            raw = card.get("index")
-            index = int(raw) if isinstance(raw, int) and not isinstance(raw, bool) else position
-            result.append((index, card))
-        return result
 
     def _ranked_option_indices(self, context: dict[str, Any], operation: Any) -> list[int]:
         """按各屏**既有评分**给出的"从好到坏"顺序；没有评分可用的屏返回空列表。
@@ -6396,7 +6316,7 @@ class STS2HeuristicPlanner:
     #:
     #: 背景（t10 基线实测）：`_indices_worth_penalizing` 对 `play_card` 返回空集，
     #: 而 32/43 的死亡发生在 COMBAT。但**天真的补法（给 play_card 加降权分支）是错的**：
-    #:   * `_apply_run_lessons` 只被 `ordered_candidates`（**扰动候选池**）调用，
+    #:   * `_apply_run_lessons` 只被 `_ranked_option_indices`（候选排序，不是 `plan()` 的决策）调用，
     #:     `plan()` 的战斗路径在 solver 命中时于 :1049 直接 return，从不经过它
     #:     ⇒ 只改 `_indices_worth_penalizing` 对真实战斗决策的位移为 **0**（t1 N1，已复现）。
     #:   * `avoid` 语义是「哪张牌别出」，而战斗教训的真实语义是「**先垫格挡再输出**」——
@@ -7027,67 +6947,6 @@ class STS2HeuristicPlanner:
         # 分数**高**者在前，同分时下标**小**者在前。
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [index for _score, index in scored]
-
-    def ordered_candidates(self, context: dict[str, Any], operation: Any) -> list[int]:
-        """给扰动层的候选列表，**最优在前**。
-
-        * 第 0 个一定就是操作自己选的那个下标——所以"不扰动"== 取第 0 个 == 改动前的行为；
-        * 其余候选一律取自该屏的**合法**下标集合；
-        * 拿不到任何合法替代时只返回 ``[最优]``，扰动层据此放弃（永远退得回最优）；
-        * 操作本身不带下标（claim_reward / proceed 之类）时返回空列表。
-        """
-        planned = self._operation_dict(operation)
-        action_type = str(planned.get("action_type") or "").strip().lower()
-        kwargs = planned.get("kwargs") if isinstance(planned.get("kwargs"), dict) else {}
-        best = self._safe_int(kwargs.get(self.index_key_for(action_type)))
-        if best is None:
-            return []
-
-        legal = self.legal_option_indices(context, operation)
-        ranked = self._ranked_option_indices(context, operation)
-        if ranked and legal:
-            legal_set = set(legal)
-            pool = [index for index in ranked if index in legal_set]
-        else:
-            pool = list(ranked) if ranked else list(legal)
-        return [best] + [index for index in pool if index != best]
-
-    def build_perturbed_operation(self, context: dict[str, Any], operation: Any, candidate: int) -> dict[str, Any] | None:
-        """把操作的下标换成 ``candidate``，并补齐随之变化的附属参数。
-
-        战斗卡牌的目标**必须跟着新卡走**：沿用旧卡的目标可能超出新卡的 ``valid_target_indices``，
-        那就是一个非法动作。换不出合法操作时返回 ``None``，调用方放弃扰动、退回最优。
-        """
-        planned = self._operation_dict(operation)
-        action_type = str(planned.get("action_type") or "").strip().lower()
-        kwargs = planned.get("kwargs") if isinstance(planned.get("kwargs"), dict) else {}
-        key = self.index_key_for(action_type)
-        best = self._safe_int(kwargs.get(key))
-        if best is None or candidate == best:
-            return None
-
-        new_kwargs = dict(kwargs)
-        new_kwargs[key] = candidate
-        if action_type == "play_card":
-            _summary_context, _strategy_context, snapshot = self._context_parts(context)
-            raw_state = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
-            combat = raw_state.get("combat") if isinstance(raw_state.get("combat"), dict) else {}
-            hand = combat.get("hand") if isinstance(combat.get("hand"), list) else []
-            enemies = combat.get("enemies") if isinstance(combat.get("enemies"), list) else []
-            card = next(
-                (item for item in hand if isinstance(item, dict) and self._safe_int(item.get("index")) == candidate),
-                None,
-            )
-            if card is None or not bool(card.get("playable")):
-                return None
-            new_kwargs.pop("target_index", None)
-            target_index = self._preferred_target_for_card(card, enemies)
-            if target_index is not None:
-                new_kwargs["target_index"] = target_index
-
-        perturbed = dict(planned)
-        perturbed["kwargs"] = new_kwargs
-        return perturbed
 
 
 __all__ = ["STS2HeuristicPlanner"]

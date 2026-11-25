@@ -14,10 +14,16 @@ Run it with the AlphaDefect venv's Python (it needs numpy + torch and upstream's
 
 `-I` matters: it keeps the script's directory and the user site off sys.path.
 Exit code 1 when any compared frame differs.
+
+It also checks the player-choice log (mod `GET /choices`, read by the end-of-run review): after every step
+of these runs, what the log reports must be matched by the plugin's `choice_review.match_candidate` to the
+candidate that was actually taken. A step the log names as a different candidate is an error; a step it does
+not report at all (leaving a room, confirming, claiming gold ...) is only counted.
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -70,6 +76,8 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="policy_fidelity_"))
     summary_path = work / "summary.jsonl"
     os.environ["POLICY_FIDELITY_LOG"] = str(summary_path)
+    choice_path = work / "choices.jsonl"
+    os.environ["POLICY_CHOICE_LOG"] = str(choice_path)
     print(f"network v{blob['version']} obs_format={obs_format}; engine log: {work / 'engine.log'}", flush=True)
     with open(work / "engine.log", "ab") as log:
         for seed in seeds:
@@ -106,7 +114,53 @@ def main() -> int:
     for kind, row in sorted(total.items()):
         for sample in row["samples"][:6]:
             print("  " + sample)
+    bad += check_choices(choice_path)
     return 1 if bad else 0
+
+
+def check_choices(path: Path) -> int:
+    """Judge the player-choice log with the plugin's own review code; returns the number of wrongly named steps.
+
+    Every step is hung as a recommendation whose "recommended" candidate is the one the run took, then the
+    records the log produced are fed to `ChoiceReview.resolve` exactly as the plugin does. A step answered
+    with another candidate is wrong; a step never answered is silent.
+    """
+    if not path.exists():
+        print("no choice log written", file=sys.stderr)
+        return 1
+    spec = importlib.util.spec_from_file_location("choice_review", GAME_MOD.parent / "choice_review.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    review = module.ChoiceReview()
+    tally: dict[str, dict] = {}
+    samples: list[str] = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+        row = json.loads(line)
+        step, records = row["step"], row["records"]
+        candidates, taken = step["candidates"], step["index"]
+        key = f"{step['kind']}/{candidates[taken]['kind']}"
+        tally.setdefault(key, {"steps": 0, "named": 0, "wrong": 0})["steps"] += 1
+        decision = "".join("_" + ch if ch.isupper() and i else ch for i, ch in enumerate(step["kind"])).upper()
+        review.capture_network(
+            {"decision_id": str(number), "kind": decision, "candidates": candidates,
+             "probs": [1.0 / len(candidates)] * len(candidates), "choice": taken},
+            context={"room": key, "floor": step["floor"]},
+        )
+        for answered in review.resolve(records):
+            agg = tally[answered["room"]]
+            if answered["same"]:
+                agg["named"] += 1
+            else:
+                agg["wrong"] += 1
+                if len(samples) < 12:
+                    samples.append(f"floor {answered['floor']} {answered['room']}: took {answered['recommended']!r}, "
+                                   f"log says {answered['chosen']!r}")
+    print(f"\n{'choice log: decision/taken':<34}{'steps':>7}{'named':>7}{'silent':>8}{'wrong':>7}")
+    for key, agg in sorted(tally.items()):
+        print(f"{key:<34}{agg['steps']:>7}{agg['named']:>7}{agg['steps'] - agg['named'] - agg['wrong']:>8}{agg['wrong']:>7}")
+    for sample in samples:
+        print("  " + sample)
+    return sum(agg["wrong"] for agg in tally.values())
 
 
 if __name__ == "__main__":

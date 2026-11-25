@@ -77,10 +77,7 @@ danmaku_enabled = true
 # 旧的布尔配置 map_follow_player 仍被识别（true -> follow，false -> auto），但建议改用本项。
 map_policy = "wait"
 map_vote_wait_seconds = 20
-# 游玩模式：serious（默认，认真打，与之前逐字相同）/ mischievous（20% 概率换成次优）/
-# silly（60% 概率换成最差）。运行时等价动作：sts2_set_play_style。
 # 注意：插件不做任何 LLM 决策，事件房也早已是纯启发式（原 event_llm_* 配置项已移除）。
-play_style = "serious"
 
 # ── AlphaDefect 策略网络（https://github.com/hmty-CHEN/AlphaDefect-Public，arXiv:2611.31076）──
 # 开着时，自动玩的**每一步**先问网络（战斗与非战斗都是）；它给不出的那一步（这一屏 mod 没有适配、
@@ -97,7 +94,8 @@ policy_timeout_seconds = 20
 # 「尖塔速报」开关：false = 不把局势悄悄交给本体，本体也就不会主动讲局势。
 # 只影响这一路；游戏内弹幕、自动游玩、历史记录都不受影响。运行时等价动作：sts2_set_host_digest。
 host_digest_enabled = true
-# 「尖塔复盘」开关：false = 局末不生成反思、不推给本体；结构化记录（损血归因/路线图/历史页）照旧。
+# 「尖塔复盘」开关：false = 局末不请模型讲解对照复盘、不推给本体；结构化记录（损血归因/路线图/对照/历史页）照旧。
+# 对照复盘只对玩家亲手打的步（陪玩、停手、听安排等你发话时）；纯自动玩的局本来就没有。
 # 运行时等价动作：sts2_set_run_reflection。
 run_reflection_enabled = true
 

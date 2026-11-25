@@ -167,6 +167,28 @@ function renderRoute(run) {
     rows + "</tbody></table></div>";
 }
 
+function renderReview(run) {
+  const review = run.review;
+  if (!review || !review.compared) return "";
+  const pct = function (p) { return p == null ? "" : "（" + Math.round(p * 100) + "%）"; };
+  const rows = (review.steps || []).map(function (step) {
+    const where = "第" + esc(step.floor) + "层" + (step.round ? " 第" + esc(step.round) + "回合" : "") +
+      (step.room ? "<br><span class=\"muted\">" + esc(step.room) + "</span>" : "");
+    return "<tr><td>" + where + "</td><td>" + esc(step.chosen) + esc(pct(step.p_chosen)) + "</td><td>" +
+      esc(step.recommended) + esc(pct(step.p_recommended)) + "</td><td>" +
+      (step.source === "network" ? "策略网络" : "求解器 / 启发式") + "</td></tr>";
+  }).join("");
+  return '<div class="reflect"><div class="k muted">对照复盘：你亲手打的 ' + esc(review.compared) + " 步里，" +
+    esc(review.agreed) + " 步与推荐相同</div>" +
+    (review.explanation ? "<div>" + esc(review.explanation) + "</div>" : "") +
+    (rows
+      ? "<details><summary>差得最多的 " + (review.steps || []).length + " 步</summary>" +
+        "<table><thead><tr><th>位置</th><th>你选的</th><th>推荐</th><th>推荐来自</th></tr></thead><tbody>" +
+        rows + "</tbody></table></details>"
+      : "") +
+    "</div>";
+}
+
 function renderRun(run) {
   const hp = run.hp || {};
   const heaviest = (run.heaviest || []).map(function (item) {
@@ -195,7 +217,8 @@ function renderRun(run) {
       '<div class="box"><div class="k">最痛的几处</div>' + (heaviest ? "<ul>" + heaviest + "</ul>" : '<span class="muted">无记录</span>') + "</div>" +
       '<div class="box"><div class="k">教训</div>' + (lessons ? "<ul>" + lessons + "</ul>" : '<span class="muted">无</span>') + "</div>" +
     "</div>" +
-    (run.reflection ? '<div class="reflect"><div class="k muted">复盘反思</div>' + esc(run.reflection) + "</div>" : "") +
+    renderReview(run) +
+    (run.reflection ? '<div class="reflect"><div class="k muted">复盘反思（旧版本记录）</div>' + esc(run.reflection) + "</div>" : "") +
     renderRoute(run) +
     (decisions
       ? "<details><summary>做出的选择（" + (run.decisions || []).length + " 步）</summary>" +

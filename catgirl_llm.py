@@ -236,21 +236,20 @@ class CatgirlCommentGenerator(_ChatLLMBase):
     def _build_messages(self, *, summary_text: str, summary_kind: str, payload: dict[str, Any]) -> list[dict[str, str]]:
         scene = str(summary_kind or "general")
         context = str(summary_text or "").strip()[:_MAX_PROMPT_CHARS]
-        if scene in {"run_summary", "memory_summary"}:
-            # 局末复盘：战报已压成一行（结局/角色/层级/损血归因/关键决策）。要它**具体指出哪几处
-            # 损血最要命、下次怎么改** —— 这段文字还会作为"教训"注入下一局的 strategy_directives，
-            # 所以必须可执行，不能只卖萌。
+        if scene == "run_review":
+            # 局末复盘：玩家亲手打的步里，和插件当时的推荐差得最多的几步（见 choice_review.review_digest）。
+            # 要它逐步讲"为什么会那样推荐"，是讨论不是批评；它只是讲解，不会变成教训影响后面的决策。
             base = (
-                "下面是一局《杀戮尖塔 2》的战报，用 2~3 句、猫娘口吻做个复盘："
-                "先点出这局最要命的损失（哪一层、哪个界面、掉了多少血），"
-                "再说下次具体该怎么改（例如「血少时先垫格挡再输出」「看到精英绕开先补血」这类）。"
-                "要求：提到战报里的具体层级与数字，给出可执行的做法；不要只卖萌，也不要复述整段战报。"
+                "下面是玩家亲手打的一局《杀戮尖塔 2》里，他的选择和你当时的推荐差得最多的几步。"
+                "逐步讲讲：你为什么会那样推荐、他那样选可能付出了什么代价，或者他的选法有什么道理。"
+                "要求：每步一两句，点出层数和具体的牌名或选项；语气是一起复盘，不是批评；"
+                "推荐只是参考，没有把握就直说没把握；不要复述整段材料，也不要编材料里没有的信息。"
             )
             persona = self._persona_system()
             system = persona + "\n\n" + base if persona else "你是《杀戮尖塔 2》的直播间陪玩猫娘。\n" + base
             return [
                 {"role": "system", "content": system},
-                {"role": "user", "content": f"战报：{context}"},
+                {"role": "user", "content": f"对照：{context}"},
             ]
         if scene == "combat":
             # 战斗：prompt 里已带"本轮: 打<卡>→N；结束回合"这类出牌建议（line），要 LLM 用猫娘口吻

@@ -8,13 +8,6 @@ auto_start = false
 # 不要再指望 catgirl_llm_enabled=false 来关弹幕——那只是把 LLM 点评降级成启发式文本，弹幕照旧。
 danmaku_enabled = true
 
-# 游玩模式：
-#   "serious"（默认）= 认真打，行为与改动前逐字相同；
-#   "mischievous"    = 20% 概率把最优操作换成次优合法选择；
-#   "silly"          = 60% 概率把最优操作换成评分最差的合法选择。
-# 运行时等价动作：sts2_set_play_style(style=...)。
-play_style = "serious"
-
 # AlphaDefect 策略网络。开着时自动玩的每一步先问网络，给不出的那一步回落到求解器 + 启发式。
 # 没有路径要填：运行环境和各角色的模型在插件面板的「策略网络」页下载；没下载的角色照旧走求解器 + 启发式。
 policy_enabled = true

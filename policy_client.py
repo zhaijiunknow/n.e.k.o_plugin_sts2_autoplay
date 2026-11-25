@@ -119,20 +119,73 @@ class PolicyAdvisor:
 
         `character` 是本局的角色（来自 /state）；空串 = 不在对局里（主菜单、选人），不归网络管。
         """
+        scored = await self._score(client, character=character, map_policy=map_policy, fail=self._fallback)
+        if scored is None or scored.get("policy_hold"):
+            return scored
+        kind, candidates, choice = scored["kind"], scored["candidates"], scored["choice"]
+        probability, forced = scored["probability"], scored["forced"]
+        picked = candidates[choice]
+        label = f"{kind}: {picked.get('label')}"
+        if not picked.get("executable"):
+            return self._fallback(f"网络选了「{label}」，但 mod 没有对应的动作")
+
+        self.decisions += 1
+        self.last_decision = {
+            "kind": kind, "label": str(picked.get("label") or ""), "choice": choice, "candidates": len(candidates),
+            "probability": probability, "value": scored["value"], "forced": forced,
+            "multiplayer": scored["multiplayer"], "action": picked.get("action"), "character": scored["character"],
+        }
+        self._note(
+            "选择 %s（候选 %d 个%s%s）" % (
+                label, len(candidates),
+                "" if probability is None else "，概率 %.2f" % probability,
+                "，无需网络" if forced else "",
+            ),
+            key=f"{scored['decision_id']}:{choice}",
+        )
+        return {
+            "action_type": POLICY_ACTION_TYPE,
+            "kwargs": {"option_index": choice, "command": scored["decision_id"]},
+            "confidence": 1.0 if probability is None else probability,
+            "source": POLICY_SOURCE,
+            "reason": label,
+            "action_id": POLICY_ACTION_TYPE,
+            "category": "policy",
+            "candidate_actions": [str(c.get("label") or "") for c in candidates if isinstance(c, dict)][:12],
+            "policy": dict(self.last_decision),
+        }
+
+    async def recommend(self, client: Any, *, character: str, known_id: str = "") -> dict[str, Any] | None:
+        """玩家自己打的这一步，网络会怎么选：只打分，不执行、不计数（局末复盘用，见 choice_review）。
+
+        返回 `_score` 的结果（含每个候选的概率）；这一屏网络给不出、或只有一个候选时返回 None。
+        `known_id` 是上次已经打过分的决策：界面没变时返回 ``{"decision_id":…, "unchanged": True}``，不重复推理。
+        """
+        scored = await self._score(client, character=character, map_policy="auto", fail=lambda why: None, known_id=known_id)
+        if scored is None or scored.get("policy_hold") or scored.get("forced"):
+            return None
+        return scored
+
+    async def _score(self, client: Any, *, character: str, map_policy: str, fail: Any, known_id: str = "") -> dict[str, Any] | None:
+        """问 mod 要当前界面的决策，再让网络给每个候选打分。
+
+        返回 ``{decision_id, kind, candidates, choice, probs, probability, value, forced, multiplayer, character}``，
+        或 ``{"policy_hold": True}``（归网络管但现在动不了），或 ``fail(原因)`` 的返回值（给不出）。
+        """
         character = str(character or "").upper()
         if not self.enabled or not character:
             return None
         if not self.assets.runtime_ready():
-            return self._fallback("策略网络的运行环境还没下载（在插件面板的「策略网络」页下载）")
+            return fail("策略网络的运行环境还没下载（在插件面板的「策略网络」页下载）")
         if not self.assets.model_ready(character):
-            return self._fallback(f"没有下载 {character} 的模型")
+            return fail(f"没有下载 {character} 的模型")
         obs_format = await self._obs_format(character)
         if obs_format is None:
             return None
         try:
             decision = await client.get_policy_decision(obs_format)
         except Exception as exc:  # noqa: BLE001 —— 取不到决策就回落，原因写进日志
-            return self._fallback(f"mod /policy/decision 失败：{type(exc).__name__}: {exc}")
+            return fail(f"mod /policy/decision 失败：{type(exc).__name__}: {exc}")
         if isinstance(decision, dict) and decision.get("data_id") != self.assets.mod_data_id():
             # 模组没有词表，或它的词表与网络的不是同一份（编号对不上）：把本机这份交给它，下一轮再问。
             return await self._push_mod_data(client, decision.get("data_id"))
@@ -142,67 +195,46 @@ class PolicyAdvisor:
                 # 不是"没有适配"，是"还没轮到"：此刻让求解器 / 启发式接手，等于替网络出了这一步。
                 self._note(f"等待：{reason}", key=f"wait:{reason}")
                 return {"policy_hold": True, "reason": str(reason or "")}
-            return self._fallback(f"mod 不给这一屏出决策：{reason}")
+            return fail(f"mod 不给这一屏出决策：{reason}")
         kind = str(decision.get("decision_kind") or "")
+        decision_id = str(decision.get("decision_id") or "")
         candidates = decision.get("candidates") if isinstance(decision.get("candidates"), list) else []
         if str(decision.get("character") or "").upper() != character:
-            return self._fallback(f"/state 说这一局是 {character}，mod 的决策是 {decision.get('character')} 的")
+            return fail(f"/state 说这一局是 {character}，mod 的决策是 {decision.get('character')} 的")
         # 多人局的路线归玩家：map_policy 不是 auto 时地图照旧走原有的等待 / 跟票逻辑。
         if kind == "MAP" and decision.get("multiplayer") and map_policy != "auto":
-            return self._fallback(f"多人局地图按 map_policy={map_policy} 处理，不交给网络")
+            return fail(f"多人局地图按 map_policy={map_policy} 处理，不交给网络")
+        if known_id and decision_id == known_id:
+            return {"decision_id": decision_id, "unchanged": True}
 
         forced = decision.get("forced_index")
         probability: float | None = None
         value: float | None = None
+        probs: list[float] = []
         if isinstance(forced, int):
             choice = forced
         else:
             frame = decision.get("frame")
             if not isinstance(frame, str) or not frame:
-                return self._fallback("mod 的决策里没有观测帧")
+                return fail("mod 的决策里没有观测帧")
             try:
                 scored = await self._sidecar_infer(character, frame)
             except Exception as exc:  # noqa: BLE001
                 self._formats = {}
                 self._next_probe_at = monotonic() + self.SIDECAR_RETRY_SECONDS
-                return self._fallback(f"推理旁路失败：{type(exc).__name__}: {exc}")
+                return fail(f"推理旁路失败：{type(exc).__name__}: {exc}")
             if not scored.get("ok") or int(scored.get("num_candidates", -1)) != len(candidates):
-                return self._fallback(f"推理旁路没有给出可用结果：{scored.get('error') or scored}")
+                return fail(f"推理旁路没有给出可用结果：{scored.get('error') or scored}")
             choice = int(scored["choice"])
-            probs = scored.get("probs") if isinstance(scored.get("probs"), list) else []
-            probability = float(probs[choice]) if 0 <= choice < len(probs) else None
+            probs = [float(p) for p in scored.get("probs")] if isinstance(scored.get("probs"), list) else []
+            probability = probs[choice] if 0 <= choice < len(probs) else None
             value = float(scored["value"]) if isinstance(scored.get("value"), (int, float)) else None
         if not 0 <= choice < len(candidates) or not isinstance(candidates[choice], dict):
-            return self._fallback(f"选中的候选下标 {choice} 不在候选列表里（共 {len(candidates)} 个）")
-        picked = candidates[choice]
-        label = f"{kind}: {picked.get('label')}"
-        if not picked.get("executable"):
-            return self._fallback(f"网络选了「{label}」，但 mod 没有对应的动作")
-
-        self.decisions += 1
-        self.last_decision = {
-            "kind": kind, "label": str(picked.get("label") or ""), "choice": choice, "candidates": len(candidates),
-            "probability": probability, "value": value, "forced": isinstance(forced, int),
-            "multiplayer": bool(decision.get("multiplayer")), "action": picked.get("action"), "character": character,
-        }
-        self._note(
-            "选择 %s（候选 %d 个%s%s）" % (
-                label, len(candidates),
-                "" if probability is None else "，概率 %.2f" % probability,
-                "，无需网络" if isinstance(forced, int) else "",
-            ),
-            key=f"{decision.get('decision_id')}:{choice}",
-        )
+            return fail(f"选中的候选下标 {choice} 不在候选列表里（共 {len(candidates)} 个）")
         return {
-            "action_type": POLICY_ACTION_TYPE,
-            "kwargs": {"option_index": choice, "command": str(decision.get("decision_id") or "")},
-            "confidence": 1.0 if probability is None else probability,
-            "source": POLICY_SOURCE,
-            "reason": label,
-            "action_id": POLICY_ACTION_TYPE,
-            "category": "policy",
-            "candidate_actions": [str(c.get("label") or "") for c in candidates if isinstance(c, dict)][:12],
-            "policy": dict(self.last_decision),
+            "decision_id": decision_id, "kind": kind, "candidates": candidates, "choice": choice, "probs": probs,
+            "probability": probability, "value": value, "forced": isinstance(forced, int),
+            "multiplayer": bool(decision.get("multiplayer")), "character": character,
         }
 
     def _fallback(self, why: str) -> None:

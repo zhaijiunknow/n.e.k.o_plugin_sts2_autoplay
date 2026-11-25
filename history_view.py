@@ -21,6 +21,8 @@ _MAX_RUNS = 50
 _MAX_DECISIONS = 60
 # 每局最多列多少个房间（路线图）
 _MAX_ROUTE_ROOMS = 80
+# 每局最多列多少步对照复盘
+_MAX_REVIEW_STEPS = 10
 
 
 def build_history_payload(runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -59,7 +61,10 @@ def build_history_payload(runs: list[dict[str, Any]]) -> dict[str, Any]:
                 ],
                 "lessons": [str(item) for item in (run.get("lessons") or []) if str(item).strip()],
                 "preferences": [str(item) for item in (run.get("preferences") or []) if str(item).strip()],
+                # 旧版本的 LLM 反思（v0.8.1 及以前的记录里才有）。
                 "reflection": str(run.get("reflection") or ""),
+                # 对照复盘：玩家亲手打的步里，和当时的推荐差得最多的几步，以及模型的讲解。
+                "review": _review_view(run.get("review")),
                 # 逐房间的路线图：每个房间的损血与收获（顺序即本局的走法）。
                 "route": [
                     {
@@ -98,6 +103,33 @@ def build_history_payload(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "total_hp_lost": sum(int((run["hp"].get("total_lost") or 0)) for run in out),
     }
     return {"summary": summary, "runs": out}
+
+
+def _review_view(review: Any) -> dict[str, Any] | None:
+    if not isinstance(review, dict) or not review.get("compared"):
+        return None
+    return {
+        "compared": review.get("compared"),
+        "agreed": review.get("agreed"),
+        "network_steps": review.get("network_steps"),
+        "planner_steps": review.get("planner_steps"),
+        "explanation": str(review.get("explanation") or ""),
+        "steps": [
+            {
+                "source": str(step.get("source") or ""),
+                "floor": step.get("floor"),
+                "round": step.get("round"),
+                "room": str(step.get("room") or ""),
+                "situation": str(step.get("situation") or ""),
+                "chosen": str(step.get("chosen") or ""),
+                "recommended": str(step.get("recommended") or ""),
+                "p_chosen": step.get("p_chosen"),
+                "p_recommended": step.get("p_recommended"),
+            }
+            for step in (review.get("steps") or [])[:_MAX_REVIEW_STEPS]
+            if isinstance(step, dict)
+        ],
+    }
 
 
 def static_dir() -> str:

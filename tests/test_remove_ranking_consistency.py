@@ -51,8 +51,8 @@ def test_rank_order_is_by_removal_priority() -> None:
     assert ranked == [0, 1, 3, 2], f"顺序应为 诅咒→打击→防御→能量，实际 {ranked}"
 
 
-def test_perturbation_candidate_is_second_best_not_worst() -> None:
-    """★扰动候选（items[1]）应是**次该删**的，而不是最不该删的。"""
+def test_runner_up_is_second_best_not_worst() -> None:
+    """★排序第二位应是**次该删**的，而不是最不该删的。"""
     planner = STS2HeuristicPlanner()
     ranked = planner._rank_remove_options(_ctx([CURSE, STRIKE, ENERGY]))
     assert ranked[1] == 1, f"次位应为打击(次该删)，实际 {ranked}"

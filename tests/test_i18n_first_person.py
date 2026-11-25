@@ -581,12 +581,9 @@ def test_newly_filled_c_layer_keys_stay_third_person() -> None:
         "entries.sts2_set_danmaku.description",
         "entries.sts2_set_instance.name",
         "entries.sts2_set_instance.description",
-        "entries.sts2_set_play_style.name",
-        "entries.sts2_set_play_style.description",
         "entries.sts2_set_route.name",
         "entries.sts2_set_route.description",
         "tools.sts2_set_control_mode.description",
-        "tools.sts2_set_play_style.description",
         "tools.sts2_set_route.description",
     )
     #: C 层**开头不该**是第一人称（句中出现的"我"可能是引用玩家原话，如

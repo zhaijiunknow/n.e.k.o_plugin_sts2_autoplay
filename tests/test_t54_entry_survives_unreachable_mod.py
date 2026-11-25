@@ -20,7 +20,7 @@ STS2ActionRejected: Route not found. (code=not_found)
 
 也就是说：**"我来陪你玩"这个开关在游戏没开（或 mod 版本不匹配、`/actions/available`
 返回 404）时会抛异常**，一路冒到 `_run_entry` 的兜底，变成一条 `Unexpected ... failure`。
-而同一个文件里 `set_control_mode` / `set_play_style` / `set_instance` 早就走
+而同一个文件里 `set_control_mode` / `set_instance` 早就走
 `_refresh_if_connected()`（吞掉连接错误、用 `refreshed` 如实回报）——两套口径不一致，
 真正被玩到的偏偏是不一致的那一侧。
 
@@ -32,7 +32,7 @@ STS2ActionRejected: Route not found. (code=not_found)
    玩家日志里根本看不见，只能看到界面不刷新然后自己猜）。
 3. mod 可达时 `refreshed is True`（不能为了"别炸"把成功也报成失败）。
 
-运行方式（cwd 必须是 NEKO 仓库根，见 tests/test_play_style_neko_integration.py 的说明）::
+运行方式（cwd 必须是 NEKO 仓库根，见 AGENTS.md 的「Plugin tests」）::
 
     cd D:\\NekoClaw\\N.E.K.O
     $env:PYTHONPATH="D:\\NekoClaw\\N.E.K.O\\plugin\\plugins\\sts2_autoplay"

@@ -38,8 +38,8 @@ Models are downloaded per character on the plugin panel's "策略网络" (policy
 | `policy_assets.py` / `policy_manifest.json` | Local assets of the policy network: download, verification and installation of the runtime and per-character models (the manifest pins every file's size and SHA-256) |
 | `policy_sidecar/` | The inference sidecar process (`alphadefect_server.py`) and the inference subset of upstream's Python (`vendor/`, MIT) |
 | `catgirl_llm.py` | LLM generation: `CatgirlCommentGenerator` (danmaku / commentary **text**). Text only — no decisions |
-| `play_style.py` | Play styles (serious / mischievous / silly): constants, aliases, and the pure "pick one from an ordered candidate list" function |
 | `catgirl_memory.py` | Cross-run memory accumulation (see next section) |
+| `choice_review.py` | Data layer of the end-of-run review: every step the player made by hand against what the plugin would have recommended (see "End-of-run review") |
 | `strategy_repository.py` / `strategy_parser.py` | Strategy loading: `strategies/` parsing + `strategy_directives` assembly |
 | `dispatcher.py` | NEKO output boundary for status feedback / companion notifications |
 
@@ -74,7 +74,8 @@ Character select: when some characters have a downloaded model, each run picks a
 - **The vocabulary is not shipped with the Mod**: it is downloaded together with the runtime, and the plugin hands it to the Mod when the Mod has none (or a different one).
 - **Multiplayer runs also use the network**, observing from the local player. The network was trained on single-player runs only; there is no data on how it plays in multiplayer. Map votes still follow `map_policy` (not handed to the network unless it is `auto`).
 - **Screens that fall back**: card bundles, the Crystal Sphere minigame, multi-card deck selections, "skip the relic" at a chest, and cancelling a card selection have no adapter in the Mod.
-- **Reflection does not act on the network**: cross-run lessons only influence the heuristics used on fallback. The network's weights are fixed and do not change with play.
+- **Cross-run lessons do not act on the network**: they only influence the heuristics used on fallback. The network's weights are fixed and do not change with play.
+- **The network also watches while you play**: in companion mode, standby, or while "listen" mode waits for you, it scores the candidates without acting; the scores feed the end-of-run review (see "End-of-run review").
 - `policy_enabled = false` (`plugin.toml`) turns the whole thing off.
 
 ### How far it has been tested
@@ -82,10 +83,23 @@ Character select: when some characters have a downloaded model, each run picks a
 - **Encoding fidelity**: the frames the Mod produces are compared byte for byte with upstream's headless engine over whole network-driven runs (`game_mod/PolicyFidelity`). Combat, card selection, rewards, events, rest sites, shops and map decisions all match; Crystal Sphere frames and shop frames with a recorded failed purchase are not compared.
 - **In the game (2026-11-24, Ascension 10, single player)**: Ironclad won 3 of 4 runs; Necrobinder won 1 of 2 (the other died at the Act 3 boss). That is far too few runs to be a win rate — it shows the pipeline works. The upstream paper reports Ascension-10 greedy win rates of 62%–77% depending on the character.
 - **Not run in the game**: the Silent, Defect, Regent and Fool models; real multiplayer.
+- **End-of-run review**: the Mod's `/choices` and the plugin's matcher are checked in the same offline run (whole network-driven runs; the candidate each step actually took against the one `/choices` reports and the plugin recognises). Card plays, end turn, in-combat potions, map moves, card rewards and rest-site options are all recognised, with 0 steps named wrongly; a few event options, card selections and purchases are not reported at all (they just stay out of the review). **The path with a human at the controls has not been run in the game** — the offline check has no screens and no person.
 
 ## Catgirl Memory Growth (cross-run lessons → decision)
 
 When a run ends (death / clear — the `state_machine` classifies it as `screen_class=terminal`), the plugin summarizes the run's `recent_decision_memory` into "lessons + preferences", writes them via `CatgirlMemoryStore` in `catgirl_memory.py`, and persists to `<LOCALAPPDATA>/N.E.K.O/sts2_autoplay/catgirl_memory.json`. On the next run, `strategy_repository.build_context()` merges the recent runs' lessons into `strategy_directives.avoid` and preferences into `prefer` (soft constraints), thereby influencing card / route / combat decisions. The summarizer is **heuristic-first with optional LLM** (added only when `service._catgirl_llm.available`; silently falls back to heuristics on failure).
+
+## End-of-run review: your choices vs the recommendation
+
+At the end of a run the plugin no longer asks the model for a general "why did this run fail" reflection (the LLM reflection that became a lesson, and the pause of autoplay while it ran, were removed after v0.8.1). It does one concrete thing instead: it compares **every step you made by hand** with **what the plugin would have chosen at that moment**, picks the few that differ most, and asks the companion to explain why.
+
+- **Only steps you made by hand.** A step the plugin made itself is its own recommendation, so there is nothing to compare; a fully automatic run keeps its structured record and gets no review. "By hand" means: companion mode on while autoplay is not running, autoplay paused, standby, and the screens where "listen" mode waits for you. With neither companion mode nor autoplay on, the plugin does not poll and nothing is compared.
+- **Where the recommendation comes from**: with a policy-network model downloaded for the run's character, the network's probability for every candidate; without one, the step the solver / heuristics planned at that moment. The latter can only say "same / different", with no size of difference.
+- **What you chose**: the Mod's `GET /choices` reads the game's own records — the combat history (which card, at whom, which potion, end turn) and the map-point history (card and relic choices, event options, rest-site options, purchases, removed and upgraded cards). It is not guessed from before/after screens.
+- **"Differs most"**: with the network, the largest "probability of the recommendation − probability of your choice" (differences under 0.15 do not count); with the old strategy only, the steps taken at the lowest HP come first. At most 5 steps.
+- **The explanation**: those steps, with the situation at the time, go to the companion's model and persona. The text is stored on the run's record (visible on the history page) and pushed to the companion with `ai_behavior="respond"`. It is **not a lesson**: it does not enter `lessons` and influences no decision, and autoplay is not paused. With the "run review" switch (`run_reflection_enabled`) off, the comparison is still recorded but the model is not asked.
+
+Known limits: choices the game keeps no record of are not compared (leaving a shop or a rewards screen, claiming gold / potion / relic rewards, confirm and cancel on a card selection, the Crystal Sphere, discarding a potion outside combat); some records are written late by the game, so a recommendation that was superseded waits for its answer a little longer (4 entries, 3 minutes); one recommendation is answered once, so the second of two cards played between two refreshes has no recommendation to be compared with; an older Mod without `/choices` is asked once and then left alone for 5 minutes.
 
 ## Danmaku / Commentary
 
@@ -147,9 +161,9 @@ Switch with `sts2_set_control_mode`; the catgirl also calls it itself when you s
 | `advise` | "listen to me", "hold off", "wait for me" | **computes but does not act**: outside combat it waits for your go on every decision screen |
 | `standby` | "stop", "standby" | stops entirely, not even planning |
 
-**Switching is silent.** A mode change does not make the catgirl speak (the push uses `ai_behavior="blind"` — it is not even fed to the LLM, only kept as an internal record for the panel and for diagnosis), and the `llm_tool` returns a terse machine result (`{"ok": true, "style": ...}`) — a sentence there would just get parroted back. So she will **not** announce "ok, I'm on mischief mode now"; she just carries on, and only answers if you ask which mode she is in.
+**Switching is silent.** A mode change does not make the catgirl speak (the push uses `ai_behavior="blind"` — it is not even fed to the LLM, only kept as an internal record for the panel and for diagnosis), and the `llm_tool` returns a terse machine result (`{"ok": true, "mode": ...}`) — a sentence there would just get parroted back. So she will **not** announce "ok, I'll wait for you"; she just carries on, and only answers if you ask which mode she is in.
 
-She may also **switch on her own judgement** without being told: your tone is enough ("why are you so dumb today" -> mischief or silly; "play properly" -> serious; "I'll call this one" -> listen). The tool descriptions explicitly authorise that.
+She may also **switch on her own judgement** without being told: your tone is enough ("I'll call this one" -> listen; "just play it yourself" -> play on your own). The tool descriptions explicitly authorise that.
 
 `advise` is driven by the entry pair that already exists:
 
@@ -166,26 +180,6 @@ She may also **switch on her own judgement** without being told: your tone is en
 Exception: `standby` really does stop everything, so it **includes combat** — the turn stops until you speak. That is the intended semantics of that mode, not a bug.
 
 **The mode is pushed to the mod** (`POST /config {coop_control_mode: auto|advise|hold}`), because the mod has its own autoplay driver: stopping only the plugin is not stopping anything. Mapping: `program→auto`, `advise→advise`, `standby→hold`. Like the map policy, this sync only matters while the **plugin is attached** (see the lease above); with no plugin the mod always runs itself.
-
-## Play style (serious / mischievous / silly)
-
-A different axis from the control mode: the control mode decides **who calls the shots**, the play style decides **how seriously it plays**.
-
-| Style | You say | Behaviour |
-|---|---|---|
-| `serious` (**default**) | "play it straight", "play properly", "I want to win" | **byte-identical** to before this feature |
-| `mischievous` | "mischief", "just for fun", "don't be so serious" | 20% chance to swap the best move for the **runner-up** legal one |
-| `silly` | "silly", "you idiot", "just play anything" | 60% chance to swap the best move for the **worst** legal one |
-
-Switch at runtime with `sts2_set_play_style(style=...)`; config key `play_style` (plugin `plugin.toml` / `config.example.toml`).
-
-**Three hard guarantees:**
-
-1. **`serious` has zero impact** — under serious the perturbation layer returns the planner's result verbatim and does not even compute the candidate ranking, so the default style cannot regress.
-2. **Always legal** — candidates come only from that screen's **legal index set** (unplayable cards and unaffordable shop items are excluded), and the swapped operation still has to pass `action_engine` validation; if no legal alternative exists the perturbation is abandoned and the best move is kept. It never emits an illegal action.
-3. **Every decision screen is covered** — combat plays, map, rewards, card picks (all variants), events, shop, rest, chests, bundles and capstones. Events / map / rewards / card-removal are ranked with each screen's **existing scorer**; the remaining screens degrade to "best + the other legal indices".
-
-Exception: **a step the player explicitly authorised is never perturbed.** `sts2_execute_planned_operation` ("go with that") is explicit authorisation, so it does exactly what you said even in silly mode.
 
 ## Which process the plugin is driving (host / catgirl)
 
@@ -325,6 +319,7 @@ scripts\Start-NekoCoop.ps1 -SkipHostLaunch -ClientAutoplays           # host alr
 | `/solver/plan` | combat solver decision (authoritative source) |
 | `/policy/decision` | policy network: candidates + observation frame for the current screen (`?obs_format=N` selects the frame format); says why when it is not its turn or not its screen |
 | `/policy/data` | policy network: receives the vocabulary from the plugin (stored in `user://NekoSpire/policy`) |
+| `/choices` | what the local player just chose (`?since=<seq>`), read from the game's combat history and map-point history; used by the end-of-run review |
 
 The `/action` that goes with the policy network is `policy_act`: it carries the `decision_id` returned by `/policy/decision` and a candidate index, and the Mod executes it only after checking that the screen has not changed.
 

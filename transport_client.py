@@ -218,6 +218,13 @@ class STS2TransportClient:
         """
         return await self._request("GET", f"/policy/decision?obs_format={int(obs_format)}")
 
+    async def get_player_choices(self, since: int = 0) -> Dict[str, Any]:
+        """玩家（或任何人）刚在游戏里做的选择（GET /choices?since=N，读自游戏自己的战斗历史与地图点历史）。
+
+        返回 ``{latest_seq, choices:[{seq, kind, id, target, target_index, offered, floor, act, round}]}``。
+        """
+        return await self._request("GET", f"/choices?since={int(since)}")
+
     async def push_policy_data(self, files: Dict[str, str]) -> Dict[str, Any]:
         """把策略网络的词表交给模组（POST /policy/data）。模组自己不带这份数据。"""
         return await self._request("POST", "/policy/data", json={"files": dict(files)})

@@ -3,7 +3,7 @@
 玩家口径：「给尖塔速报和尖塔复盘设置两个开关控制是否开启这个」。
 
 - **尖塔速报**（`host_digest_enabled`）：是否把局势悄悄交给本体、由它主动讲一句。
-- **尖塔复盘**（`run_reflection_enabled`）：局末是否生成反思并推给本体。
+- **尖塔复盘**（`run_reflection_enabled`）：局末是否把玩家的选择与推荐差得最多的几步交给本体讲。
 
 两者都**只影响"跟本体说话"这一路**：关掉之后游戏内弹幕、自动游玩、结构化记录
 （损血归因 / 路线图 / 历史页）照旧 —— 这是刻意的，别把开关做成"顺便把记录也停了"。
@@ -117,14 +117,14 @@ def test_character_announcement_keeps_danmaku_but_drops_the_host_push() -> None:
 # ---- 尖塔复盘 ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_run_end_records_but_does_not_pause_when_reflection_is_off(tmp_path) -> None:
-    """复盘关掉时：结构化记录照写，但不反思、也不做"暂停-恢复"这一步。"""
-    service = _service()
-    service._catgirl_memory = CatgirlMemoryStore(path=str(tmp_path / "mem.json"), logger=DummyLogger())
-    service._state.autoplay_state = "running"
-    service.set_run_reflection_enabled(False)
+_DIVERGENT_STEP = {
+        "source": "network", "decision": "COMBAT", "floor": 6, "act": 1, "round": 2, "room": "NIBBIT",
+        "situation": "血 30/80", "hp": 30, "max_hp": 80, "chosen": "play 打击 -> 小啃兽", "recommended": "play 防御",
+        "same": False, "p_chosen": 0.05, "p_recommended": 0.8, "gap": 0.75,
+    }
 
+
+def _run_end(service: STS2AutoplayService) -> None:
     async def drive() -> None:
         service._maybe_record_run_memory(dict(_terminal_snapshot()))
         for _ in range(3):
@@ -132,17 +132,30 @@ def test_run_end_records_but_does_not_pause_when_reflection_is_off(tmp_path) -> 
 
     asyncio.run(drive())
 
+
+@pytest.mark.unit
+def test_run_end_records_and_never_pauses_autoplay(tmp_path) -> None:
+    """局末只写记录：没有可对照的步就没有复盘，自动玩的状态不被动（"复盘暂停"已删除）。"""
+    service = _service()
+    service._catgirl_memory = CatgirlMemoryStore(path=str(tmp_path / "mem.json"), logger=DummyLogger())
+    service._state.autoplay_state = "running"
+
+    _run_end(service)
+
     assert len(service._catgirl_memory.runs) == 1, "记录必须照写（历史页/路线图靠它）"
-    assert service._catgirl_memory.runs[0]["reflection"] == "", "不该生成反思"
-    assert service._state.autoplay_state == "running", "关掉复盘就不该动自动玩的状态"
-    assert service._state.reflection_paused is False
+    assert "review" not in service._catgirl_memory.runs[0], "纯自动玩的局没有可对照的步"
+    assert service._state.autoplay_state == "running"
+    assert service._state.pause_reason == ""
 
 
 @pytest.mark.unit
-def test_reflect_run_end_returns_early_when_disabled(tmp_path) -> None:
-    service = _service()
+def test_review_is_recorded_but_not_explained_when_the_switch_is_off(tmp_path) -> None:
+    """复盘关掉时：对照本身照写（它是结构化记录），只是不请模型讲、也不推给本体。"""
+    calls: list[dict] = []
+    service = STS2AutoplayService(DummyLogger(), lambda payload: None, lambda **k: calls.append(k))
     service._catgirl_memory = CatgirlMemoryStore(path=str(tmp_path / "mem.json"), logger=DummyLogger())
     service.set_run_reflection_enabled(False)
+    service._choice_review.steps = [dict(_DIVERGENT_STEP)]
 
     class Gen:
         available = True
@@ -151,9 +164,14 @@ def test_reflect_run_end_returns_early_when_disabled(tmp_path) -> None:
             raise AssertionError("开关关掉时不该调用模型")
 
     service._catgirl_llm = Gen()
-    record = {"run_id": "run-a", "outcome": "defeat", "character": "C", "floor": 3, "lessons": [], "decisions": []}
 
-    asyncio.run(service._reflect_run_end(dict(record), {}))
+    _run_end(service)
+
+    review = service._catgirl_memory.runs[0]["review"]
+    assert review["compared"] == 1 and review["agreed"] == 0
+    assert review["steps"][0]["recommended"] == "play 防御"
+    assert review["explanation"] == ""
+    assert not [c for c in calls if (c.get("metadata") or {}).get("kind") == "run_review"]
 
 
 # ---- 启动时读配置 -----------------------------------------------------------------------

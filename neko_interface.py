@@ -55,7 +55,7 @@ class STS2NekoInterface:
     async def _refresh_if_connected(self) -> bool:
         """尽力刷新一次快照；连不上 mod 就跳过。
 
-        档位、游玩模式、停手、陪伴模式都是**插件本地的偏好**——玩家完全可能先设好再开游戏。
+        档位、停手、陪伴模式都是**插件本地的偏好**——玩家完全可能先设好再开游戏。
         若因为游戏没开就连带把整个切换判为失败，NEKO 会得到一个报错，而设置其实早就生效了。
         所以这里吞掉连接错误，并在返回值里如实说明 refreshed 与否。
 
@@ -94,16 +94,6 @@ class STS2NekoInterface:
         result["refreshed"] = await self._refresh_if_connected()
         return result
 
-    async def set_play_style(self, style: str) -> dict[str, Any]:
-        """切换游玩模式：`serious` 认真（默认）/ `mischievous` 捣蛋 / `silly` 笨蛋。
-
-        不影响"控制档位"（谁来决定），只决定"决定得多不认真"：捣蛋有 20%、笨蛋有 60% 的概率
-        把最优操作换成次优/最差的**合法**选择。显式授权（`sts2_execute_planned_operation`）不受影响。
-        """
-        result = self._service.set_play_style(style)
-        result["refreshed"] = await self._refresh_if_connected()
-        return result
-
     async def set_standby(self, standby: bool) -> dict[str, Any]:
         mode_info = self._service.set_standby(standby)
         # standby 也要同步给 mod：只停插件等于没停，mod 有自己的自动玩驱动。
@@ -132,7 +122,7 @@ class STS2NekoInterface:
         if enabled:
             # ★★★ t54：与 `set_standby` 同理 —— 陪伴模式是本地偏好，开着游戏没开着也得能切。
             #   返回值里带 `refreshed`，让"开了但没连上 mod"与"开了且刷到局面"在数据上可区分
-            #   （同 `set_control_mode` / `set_play_style` / `set_instance` 的口径）。
+            #   （同 `set_control_mode` / `set_instance` 的口径）。
             result["refreshed"] = await self._refresh_if_connected()
         return result
 

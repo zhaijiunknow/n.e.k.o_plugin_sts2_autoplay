@@ -141,9 +141,7 @@ class STS2AutoplayPlugin(NekoPluginBase):
         让它不进聊天窗，这里再把 `ai_behavior` 放到 `"blind"`：连喂给 LLM 都不喂。
         留痕仍然有用——它是插件面板与排障能看到的那份记录。
         """
-        label = str(
-            payload.get("play_style") or payload.get("style") or payload.get("mode") or entry_id
-        )
+        label = str(payload.get("mode") or entry_id)
         self._get_dispatcher().push_status_feedback(label, entry_id=entry_id, ai_behavior="blind")
 
     def _push_frontend_notification(
@@ -433,8 +431,8 @@ class STS2AutoplayPlugin(NekoPluginBase):
         description=tr(
             "entries.sts2_set_run_reflection.description",
             default=(
-                "打开/关闭「尖塔复盘」：开着时每局结束会生成一次复盘并交给你；关掉后只记数据、不反思，"
-                "损血归因/路线图/历史页照旧可看。"
+                "打开/关闭「尖塔复盘」：开着时，玩家亲手打过的局结束后，会把他的选择和推荐差得最多的几步"
+                "交给你讲讲为什么；关掉后只记数据，损血归因/路线图/对照记录/历史页照旧可看。"
             ),
         ),
         llm_result_fields=["summary"],
@@ -599,38 +597,6 @@ class STS2AutoplayPlugin(NekoPluginBase):
         return await self._run_entry(action)
 
     @llm_tool(
-        name="sts2_set_play_style",
-        description=tr(
-            "tools.sts2_set_play_style.description",
-            default=(
-                "切换猫娘的游玩模式（打得认不认真）。按玩家原话选 style："
-                "玩家要认真打、想通关（“认真打”“好好打”“我要通关”“别乱来”）-> style=serious；"
-                "玩家要你偶尔闹一下（“捣蛋”“闹着玩”“别太认真”“调皮点”）-> style=mischievous；"
-                "玩家要你摆烂（“笨蛋”“你傻啦”“随便打打”“犯傻”）-> style=silly。"
-                "捣蛋有 20%、笨蛋有 60% 的概率把最优操作换成次优/最差的合法选择；"
-                "serious 是默认档，行为与平常完全一致。这是「打得多不认真」，不是「谁来指挥」——"
-                "后者用 sts2_set_control_mode。玩家亲口说「就这个」时执行的那一步不受本模式影响。"
-            ),
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "style": {
-                    "type": "string",
-                    "enum": ["serious", "mischievous", "silly"],
-                    "description": "serious=认真（默认）；mischievous=捣蛋；silly=笨蛋。",
-                },
-            },
-            "required": ["style"],
-        },
-        timeout=20.0,
-    )
-    async def llm_set_play_style(self, style: str = "serious", **_: Any) -> JsonObject:
-        result = await self._service.neko.set_play_style(style)
-        # 同上：只回机器可读的最小结果，别给 LLM 一句可以被复述的话。
-        return {"ok": result.get("status") == "ok", "style": result.get("play_style") or style}
-
-    @llm_tool(
         name="sts2_set_host_digest",
         description=tr(
             "tools.sts2_set_host_digest.description",
@@ -659,10 +625,10 @@ class STS2AutoplayPlugin(NekoPluginBase):
         description=tr(
             "tools.sts2_set_run_reflection.description",
             default=(
-                "开关「尖塔复盘」：每局结束时是否生成一次复盘（指出哪几处损血最要命、下次怎么改）。"
+                "开关「尖塔复盘」：玩家亲手打过的局结束时，是否把他的选择和你的推荐差得最多的几步拿出来讲讲为什么。"
                 "玩家说「别复盘了」「打完直接开下一局」「快点重开」-> enabled=false；"
                 "玩家说「打完讲讲问题」「复盘一下」-> enabled=true。"
-                "关掉后只记数据不反思，损血归因/路线图/历史页照旧可看。"
+                "关掉后只记数据不讲解，损血归因/路线图/历史页照旧可看。纯自动玩的局本来就没有这一步。"
             ),
         ),
         parameters={
@@ -678,32 +644,6 @@ class STS2AutoplayPlugin(NekoPluginBase):
         result = self._service.set_run_reflection_enabled(bool(enabled))
         return {"ok": result.get("status") == "ok", "enabled": bool(result.get("enabled"))}
 
-    @plugin_entry(
-        id="sts2_set_play_style",
-        name=tr("entries.sts2_set_play_style.name", default="认真打/捣蛋/摆烂"),
-        description=tr(
-            "entries.sts2_set_play_style.description",
-            default=(
-                "切换游玩模式：serious 认真（默认，与平常逐字相同）；mischievous 捣蛋（20% 概率换成次优）；"
-                "silly 笨蛋（60% 概率换成评分最差的合法选择）。只影响自动决策，不影响玩家亲口授权的那一步。"
-            ),
-        ),
-        llm_result_fields=["summary"],
-        input_schema={
-            "type": "object",
-            "properties": {"style": {"type": "string", "enum": ["serious", "mischievous", "silly"]}},
-            "required": ["style"],
-        },
-        metadata={"agent_auto": False},
-    )
-    @_ui.action(id="sts2_set_play_style", label=tr("entries.sts2_set_play_style.name", default="sts2_set_play_style"), tone="default", group="mode", order=30)
-    async def sts2_set_play_style(self, style: str = "serious", **_: Any):
-        async def action() -> JsonObject:
-            payload = await self._service.neko.set_play_style(style)
-            self._push_silent_mode_change("sts2_set_play_style", payload)
-            return payload
-
-        return await self._run_entry(action)
 
     @plugin_entry(
         id="sts2_set_instance",

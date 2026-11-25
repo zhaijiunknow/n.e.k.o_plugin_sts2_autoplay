@@ -538,6 +538,10 @@ class STS2LoopRunner:
 
         executable_operation = self._service._action_engine.validate({**snapshot, "action_registry": action_registry}, agent_operation)
         situation_summary = self._service._summary_engine.summarize(summary_context)
+        # 对照复盘：玩家自己打的步，记下这一刻的推荐，并认领模组报来的选择（见 service.review_tick）。
+        review_tick = getattr(self._service, "review_tick", None)
+        if review_tick is not None:
+            await review_tick(client, snapshot, agent_operation, situation_summary)
         companion_evaluation = self._service._companion_evaluator.evaluate(
             summary_context=summary_context,
             situation_summary=situation_summary,

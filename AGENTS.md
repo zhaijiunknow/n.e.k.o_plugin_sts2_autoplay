@@ -116,6 +116,25 @@ D:/NekoClaw/_refs/AlphaDefect-Public/.venv/Scripts/python.exe -I -X utf8 game_mo
   chest): no Godot screens exist offline. That part is only observable in the game; `[sts2_policy]` log
   lines say what was chosen and why a step fell back.
 
+## End-of-run review (player's choices vs the recommendation)
+
+Replaces the old LLM reflection and the reflection pause. Three parts:
+
+- Mod `GET /choices?since=N` (`game_mod/nekospire/Game/PlayerChoiceLog.cs`): what the local player chose, read
+  from the game's own records (`CombatManager.History`, `PlayerEndedTurn`, the local player's
+  `PlayerMapPointHistoryEntry`). No Harmony patch, no screen diffing.
+- `choice_review.py`: matches a choice to a network candidate (`match_candidate`) or to the planner's step
+  (`planner_recommendation` / `compare_planner`); `ChoiceReview` accumulates one run.
+- `service.review_tick` (called from `loop_runner.tick`): claims new choices, then records the current
+  recommendation — only while the plugin is not the one acting (`_plugin_is_driving`). At run end
+  `_maybe_record_run_memory` stores the summary on the run record (`review`) and `_explain_review` asks the
+  LLM about the most divergent steps. It never becomes a lesson and never pauses autoplay.
+
+`policy_fidelity_run.py` (above) also checks this path: every step of the network-driven runs is fed through
+`ChoiceReview` with the candidate actually taken as the recommendation; the "wrong" column must be 0. It
+needs nekospire's own candidate labels, so the harness takes them from `PolicyFidelityProbe.LastChoices`.
+What it cannot cover: a human at the controls in the real game (UI-driven actions, timing between ticks).
+
 ## Deploying
 
 `deploy-all.ps1` copies the plugin into N.E.K.O and builds/deploys the mod into the game. It changes the

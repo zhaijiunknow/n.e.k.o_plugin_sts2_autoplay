@@ -80,8 +80,6 @@
   "entries.sts2_set_danmaku.name": "開關遊戲內彈幕",
   "entries.sts2_set_instance.description": "切換外掛目前驅動的遊戲行程：host（設定裡的 base_url；單人局就是它，coop 裡是主機）或 catgirl（coop 裡被拉起的貓娘行程，位址由主機的 coop_client_port 推導）。一般是自動的——打開 co-op 房間成功後外掛會自己切到貓娘；這個入口用於檢視與強制覆蓋。",
   "entries.sts2_set_instance.name": "對著主機還是貓娘",
-  "entries.sts2_set_play_style.description": "切換遊玩模式：serious 認真（預設，與平常逐字相同）；mischievous 搗蛋（20% 機率把最優換成次優合法選擇）；silly 笨蛋（60% 機率換成評分最差的合法選擇）。只影響自動決策；玩家親口授權的那一步不受影響。",
-  "entries.sts2_set_play_style.name": "認真打/搗蛋/擺爛",
   "entries.sts2_set_route.description": "在選路線的介面替貓娘投票：safe 讓它自己挑一條穩妥的；mirror 跟你當前那一票；pick 按你說的位位置（中間/第三個/最左/最右）。重複呼叫即改票。",
   "entries.sts2_set_route.name": "定個路線/按我說的選",
   "entries.sts2_start_autoplay.description": "啟動背景自動運行，讓尖塔自己繼續往下打。",
@@ -144,6 +142,5 @@
   "sync.no_summary": "目前暫無局勢摘要。",
   "tools.sts2_get_status.description": "取得殺戮尖塔連接狀態、目前畫面與基礎分類資訊。",
   "tools.sts2_set_control_mode.description": "切換貓娘在遊戲裡的控制檔位。**悄悄切，不要宣告**：換完就照常繼續，別說「好，我等你發話」這種話；玩家問起現在是什麼檔位時才回答。**也可以你自己判斷著切**：玩家的意思透出來就夠了，不必先問。按原話選 mode：玩家讓你自己玩、不用問了（你自己玩／你自己看著辦／隨便打）用 mode=program；玩家要自己拿主意、讓你聽著（聽我安排／你先別動／等我說／這步我來定）用 mode=advise；玩家要你完全停手（停手／別動／待機）用 mode=standby。advise 下你仍然要算，玩家問「你打算怎麼走」時要答得出來；他說「就這個」時用 sts2_execute_planned_operation 走一步。advise 只作用於戰鬥之外的決策介面（選路／獎勵／選卡／遺物／寶箱／事件／商店／休息／雙選／里程碑），戰鬥你會照常打。",
-  "tools.sts2_set_play_style.description": "切換貓娘的遊玩模式（打得多不認真）。**悄悄切，不要宣告**：換完就照常繼續，別說「我切到搗蛋模式了」這種話；玩家問起現在是什麼模式時才回答。**也可以你自己判斷著切**——玩家語氣裡透出意思就夠了，不必先問、也不必匯報：他說「你今天怎麼這麼笨」「怎麼老出錯」就用 mischievous 或 silly；說「給我認真點」「別亂來」「我要過這局」就切回 serious；局面吃緊時你自己切回 serious 也合理。按原話選 style：認真打／好好打／我要通關／別亂來 → serious；搗蛋／鬧著玩／別太認真／調皮點 → mischievous；笨蛋／你傻啦／隨便打打／犯傻 → silly。搗蛋有 20%、笨蛋有 60% 的機率把最優操作換成次優／最差的合法選擇。serious 是預設檔，行為與平常完全一致。注意這是「打得多不認真」，不是「誰來指揮」——後者用 sts2_set_control_mode。玩家親口說「就這個」時執行的那一步不受本模式影響。",
   "tools.sts2_set_route.description": "在殺戮尖塔的地圖選點介面按玩家的意思投票。預設策略下貓娘不會自己搶路線，只有呼叫本工具才會投。按玩家原話選 mode：玩家讓你自定路線（定個路線／你來定／挑條穩的／你覺得走哪）用 mode=safe；玩家已經選好、讓你跟他一致（我選完了，來選這個／跟我一樣／跟上我）用 mode=mirror；玩家指定了具體位置（你選中間／選第三個／選最左邊／選最右邊）用 mode=pick，並把原話放進 pick。玩家說「不對不對我選錯了，你選中間」時，直接用 mode=pick 再調一次即可改票。不在選點介面時會返回錯誤說明，此時不要謊稱已經投票。"
 }

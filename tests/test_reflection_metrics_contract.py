@@ -954,33 +954,20 @@ def test_reward_penalty_must_keep_discrimination(planner: STS2HeuristicPlanner) 
 def test_ranking_layer_is_not_the_decision_layer() -> None:
     """★把「候选层」与「决策层」的差别写进测试，防止后人拿前者当后者。
 
-    默认档下 `service._apply_play_style`（`service.py:793-794`）早退，`ordered_candidates`
-    （唯一调用点 `:804`）**不可达**。因此直接在测试里调 `_ranked_option_indices` 得到的重排，
+    `_ranked_option_indices` 的调用者只有 `lesson_trace`（度量）——原先的另一个调用者
+    `ordered_candidates`（游玩模式的扰动候选池）已随游玩模式一起删除，自动玩的一步里没有任何
+    代码读这份排序。因此直接在测试里调 `_ranked_option_indices` 得到的重排，
     **不代表**真实决策发生了位移 —— 真实的位移判据是 `plan()` 端到端。
 
     本测试做两件事：
-    1. 用猴子补丁确认 serious 档下 `ordered_candidates` 一次都没被调用；
+    1. 确认候选层没有接进自动玩的一步（扰动入口不存在）；
     2. 断言 `reflection_metrics.py` 确实提供 `e2e` 口径（防止脚手架被换成占位率类指标）。
     """
     from plugin.plugins.sts2_autoplay.service import STS2AutoplayService
 
     service = STS2AutoplayService(_Logger(), lambda payload: None, lambda **kwargs: None)
-    service._state.play_style = "serious"
-
-    touched: list[str] = []
-
-    def spy(context, operation):
-        touched.append("called")
-        raise AssertionError("serious 档不得触达 ordered_candidates")
-
-    service._planner.ordered_candidates = spy
-    snapshot = {"classification": {"state_name": "map"}, "summary_context": {"payload": {}},
-                "strategy_context": {}}
-    operation = {"action_type": "choose_map_node", "kwargs": {"option_index": 1}, "reason": "test"}
-    out, info = service._apply_play_style(snapshot, operation)
-
-    assert touched == [], "serious 档调用了 ordered_candidates，说明早退闸门失效"
-    assert out is operation and info == {}, "serious 必须原对象返回、零扰动信息"
+    assert not hasattr(service, "_apply_play_style")
+    assert not hasattr(service._planner, "ordered_candidates")
 
     # 脚手架必须提供端到端口径（而非只有覆盖率/占位率）。
     # ⚠️ 位置探测要跨副本工作：测试可能从 installed 或 builtin 副本运行，

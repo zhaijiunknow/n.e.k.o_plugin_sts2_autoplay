@@ -75,8 +75,6 @@ class STS2RuntimeState:
     raw_state: dict[str, Any] = field(default_factory=dict)
     raw_actions: dict[str, Any] = field(default_factory=dict)
     control_mode: str = "program"
-    # 游玩模式：serious（默认，零影响）/ mischievous / silly。见 play_style.py。
-    play_style: str = "serious"
     autoplay_state: str = "idle"
     # 进 standby（待机）之前的**意图**，退出待机时还回去。
     # 以前这里没有记忆，退出待机直接写死 `idle` —— 而自动玩循环只认 `running`，
@@ -243,11 +241,9 @@ class STS2RuntimeState:
     announced_character_run_id: str = ""
     # 本局已记录的历史条目 id（避免同一局重复写历史）。
     last_history_run_id: str = ""
-    # 是否正因"局末复盘"而暂停自动游玩（复盘完要恢复；玩家自己动过就不擅自恢复）。
-    reflection_paused: bool = False
     # 两个"跟本体说话"的开关（玩家口径：给尖塔速报和尖塔复盘各一个开关）。
     #   host_digest_enabled     尖塔速报：把局势悄悄交给本体，让它自己主动讲一句
-    #   run_reflection_enabled  尖塔复盘：局末生成反思并推给本体
+    #   run_reflection_enabled  尖塔复盘：局末把玩家的选择与推荐差得最多的几步交给本体讲
     # 关掉只影响"跟本体说话"这一路；结构化记录（损血归因/路线图/历史页）照旧写。
     host_digest_enabled: bool = True
     run_reflection_enabled: bool = True

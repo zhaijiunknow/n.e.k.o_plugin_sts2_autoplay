@@ -4,7 +4,7 @@ import asyncio
 import os
 from hashlib import sha1
 from pathlib import Path
-from random import Random, random
+from random import random
 from time import time
 from typing import Any, Callable
 
@@ -14,6 +14,7 @@ from .candidate_generator import STS2CandidateGenerator
 from .catgirl_bridge import STS2CatgirlBridge
 from .catgirl_llm import CatgirlCommentGenerator
 from .catgirl_memory import CatgirlMemoryStore, _default_memory_path
+from .choice_review import SOURCE_NETWORK, ChoiceReview, collect_names, review_digest
 from .companion_evaluator import STS2CompanionEvaluator, _enemy_intent_label
 from .encounter_memory import EncounterMemory, _default_encounter_db_path
 from .heuristic_planner import (
@@ -28,11 +29,6 @@ from .instructions import normalize_guidance_instruction
 from .loop_runner import STS2LoopRunner, _combat_plan_signature, _current_turn_steps
 from .mode_controller import STS2ModeController
 from .neko_interface import STS2NekoInterface
-from .play_style import (
-    PLAY_STYLE_SERIOUS,
-    choose_candidate,
-    normalize_play_style,
-)
 from .policy_client import PolicyAdvisor, is_policy_operation
 from .preference_extractors import STS2PreferenceExtractor
 from .preference_store import STS2PreferenceStore
@@ -84,7 +80,7 @@ def _read_plugin_version(plugin_toml: Path | None = None) -> str:
 
 
 class STS2AutoplayService:
-    def __init__(self, logger: Any, status_reporter: Callable[[dict[str, Any]], None], frontend_notifier: Callable[..., Any] | None = None, *, sdk_bus: Any = None, sdk_ctx: Any = None, i18n: Any = None, play_style_random: Any = None) -> None:
+    def __init__(self, logger: Any, status_reporter: Callable[[dict[str, Any]], None], frontend_notifier: Callable[..., Any] | None = None, *, sdk_bus: Any = None, sdk_ctx: Any = None, i18n: Any = None) -> None:
         self.logger = logger
         self._report_status = status_reporter
         self._frontend_notifier = frontend_notifier
@@ -104,8 +100,6 @@ class STS2AutoplayService:
         # 猫娘头像(base64)缓存:从 N.E.K.O 主 server card-drop 拉一次,TTL 300s
         self._avatar_b64: str | None = None
         self._avatar_at: float = 0.0
-        # 游玩模式（认真/捣蛋/笨蛋）的随机源。可替换，便于测试确定性地验证概率与落点。
-        self._play_style_random = play_style_random if play_style_random is not None else Random()
         self._client: STS2TransportClient | None = None
         # 活动实例相关（见 switch_active_instance）。默认值放在这里而不是只放 startup()：
         # 测试桩直接构造 service、不走 startup()，缺这些字段会让它们全部炸掉。
@@ -125,6 +119,10 @@ class STS2AutoplayService:
         self._preference_extractor = STS2PreferenceExtractor()
         # 猫娘跨局记忆：run 结束总结教训/偏好，落盘后注入 strategy_directives 影响下一局决策。
         self._catgirl_memory = CatgirlMemoryStore(path=_default_memory_path(), logger=self.logger)
+        # 局末复盘的原料：玩家亲手打的每一步与当时推荐的对照（见 choice_review）。
+        self._choice_review = ChoiceReview()
+        # 对端没有 /choices（旧版模组）时，隔一阵再问，别每个 tick 撞一次 404。
+        self._choice_review_retry_at = 0.0
         # ★ t31：怪物/事件实例知识库。**独立文件**（契约 §5.1）—— 不挂 catgirl_memory，
         #   因为后者是 cap=50 环形缓冲（实测 20 分钟内就有局被逐出），
         #   而"这只怪啃过我多少血"是**跨局累积**资产，生命周期必须长于单局。
@@ -202,7 +200,6 @@ class STS2AutoplayService:
         base_url = self._resolve_base_url()
         self._state.base_url = base_url
         self._apply_control_mode("program")
-        self._state.play_style = normalize_play_style(self._cfg.get("play_style"))
         self._client = self._build_client(base_url)
         # 主机实例永远是这一个（配置里的 base_url）。开房必须发给它——只有主机能拉起猫娘进程。
         self._host_base_url = base_url
@@ -645,9 +642,8 @@ class STS2AutoplayService:
     async def run_autoplay_step(self, *, force: bool = False) -> dict[str, Any]:
         """自动玩循环的一步：拿当前计划并执行。
 
-        ``force=True`` 是"我点头了"的显式授权（``sts2_execute_planned_operation``）：它既绕开
-        "听安排"档位的停手闸门，**也不受游玩模式扰动影响**——那是玩家亲口点的，不能被换成别的。
-        自动循环调用时不传，于是两件事都会生效。
+        ``force=True`` 是"我点头了"的显式授权（``sts2_execute_planned_operation``）：它绕开
+        "听安排"档位的停手闸门。自动循环调用时不传。
         """
         if self._state.standby:
             message = self.t("autoplay.standby_blocked", default="当前处于 standby 模式，不执行动作。")
@@ -674,9 +670,7 @@ class STS2AutoplayService:
             await self.refresh_state(trigger_sync=True)
             snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
             operation = snapshot.get("agent_operation") if isinstance(snapshot.get("agent_operation"), dict) else None
-        perturbation: dict[str, Any] = {}
         # 玩家口径（2026-10-07）：「还有每次对战如果损血大于8就鼓励使用药水」。这条是**硬规则**：
-        #   - 放在游玩模式扰动**之前**算 —— 捣蛋/笨蛋档也不许把"该喝药保命"扰掉（保命优先压过其它考虑）；
         #   - **不依赖规划器给出动作** —— 战斗里偶尔规划不出动作时，该保命还是要保命；
         #   - 只在这一步真的能派发 `use_potion`（动作在册 = 在战斗里且手里有能用的药水）时才会 override。
         # 策略网络自己决定喝不喝药（药水是它的候选之一），这条硬规则只管求解器 / 启发式那条路。
@@ -692,13 +686,9 @@ class STS2AutoplayService:
             # 别静默空转：持续拿不到动作就记一次日志 + 写进状态 + 告诉本体（**不改 autoplay 意图**）。
             self._note_no_operation(snapshot)
             return {"status": "idle", "message": message, "summary": message}
-        elif not force:
-            operation, perturbation = self._apply_play_style(snapshot, operation)
         # 自定义事件屏（水晶球占卜）上按下标依次试，别死盯一个下标空点。
         operation = self._advance_custom_event_cursor(snapshot, operation)
         result = await self.execute_operation(operation)
-        if perturbation.get("applied"):
-            result["perturbation"] = perturbation
         if result.get("status") == "ok":
             self._state.step_count += 1
             self._clear_stuck()
@@ -1081,86 +1071,6 @@ class STS2AutoplayService:
         if not getattr(self._state, "host_digest_enabled", True):
             return
         self._push_proactive_to_host(host_text, kind="stuck_alert", priority=8)
-
-    # ---- 游玩模式（认真/捣蛋/笨蛋）--------------------------------------------------------
-
-    def _apply_play_style(self, snapshot: dict[str, Any], operation: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        """按游玩模式把规划器选出的**最优**操作换成次优/最差。
-
-        ``serious``（默认）**直接原样返回**，连候选排序都不算——这是"默认档零影响"的实现方式：
-        不走任何扰动代码路径，规划器的结果逐字传出。
-
-        非 serious 档也只是"尽量换"：候选全部来自规划器给出的合法下标集合，换完还要再通过
-        ``action_engine`` 校验；任何一步不成立就放弃本次扰动、退回最优。宁可不动，不可发非法动作。
-        """
-        style = normalize_play_style(getattr(self._state, "play_style", PLAY_STYLE_SERIOUS))
-        if style == PLAY_STYLE_SERIOUS:
-            return operation, {}
-
-        info: dict[str, Any] = {"style": style, "applied": False}
-        context = {
-            "snapshot": snapshot,
-            "classification": snapshot.get("classification") if isinstance(snapshot.get("classification"), dict) else {},
-            "summary_context": snapshot.get("summary_context") if isinstance(snapshot.get("summary_context"), dict) else {},
-            "strategy_context": snapshot.get("strategy_context") if isinstance(snapshot.get("strategy_context"), dict) else {},
-        }
-        try:
-            ordered = self._planner.ordered_candidates(context, operation)
-        except Exception as exc:
-            self.logger.debug(f"[sts2_play_style] candidate ranking failed (non-fatal): {exc}")
-            ordered = []
-        info["candidate_count"] = len(ordered)
-        if len(ordered) < 2:
-            # 没有合法替代（或该动作本来就不带下标）：放弃扰动。
-            info["reason"] = "no_alternative"
-            return operation, info
-
-        candidate, reason = choose_candidate(ordered, style=style, roll=self._play_style_random.random())
-        info["reason"] = reason
-        if candidate is None or reason in {"kept_best", "serious", "no_alternative", "no_candidates"}:
-            return operation, info
-
-        try:
-            perturbed = self._planner.build_perturbed_operation(context, operation, int(candidate))
-        except Exception as exc:
-            self.logger.debug(f"[sts2_play_style] perturbation build failed (non-fatal): {exc}")
-            perturbed = None
-        if perturbed is None:
-            info["reason"] = "not_buildable"
-            return operation, info
-        if self._action_engine.validate(snapshot, perturbed) is None:
-            # 换了之后动作类型都不在册了：不冒险。
-            info["reason"] = "illegal"
-            return operation, info
-
-        info.update(applied=True, index=int(candidate), previous_index=self._operation_index(operation))
-        self.logger.info(
-            "[sts2_play_style] style=%s %s -> %s (%s)",
-            style,
-            info.get("previous_index"),
-            candidate,
-            reason,
-        )
-        return perturbed, info
-
-    def _operation_index(self, operation: dict[str, Any]) -> Any:
-        kwargs = operation.get("kwargs") if isinstance(operation.get("kwargs"), dict) else {}
-        action_type = str(operation.get("action_type") or "")
-        return kwargs.get(self._planner.index_key_for(action_type))
-
-    def set_play_style(self, style: str) -> dict[str, Any]:
-        """切换游玩模式：认真（默认）/ 捣蛋 / 笨蛋。"""
-        normalized = normalize_play_style(style)
-        self._state.play_style = normalized
-        self._cfg["play_style"] = normalized
-        self._emit_status()
-        message = {
-            "serious": "好，我认真打。",
-            "mischievous": "好，那我就偶尔闹一下，别怪我。",
-            "silly": "好，我摆烂了，你多担待。",
-        }[normalized]
-        return {"status": "ok", "message": message, "summary": message, "play_style": normalized}
-
 
     async def execute_operation(self, operation: dict[str, Any] | None) -> dict[str, Any]:
         snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
@@ -1604,10 +1514,6 @@ class STS2AutoplayService:
                 "policy": self._map_policy,
                 "vote_wait_seconds": self._map_vote_wait_seconds,
             },
-            "play_style": {
-                # serious（默认，零影响）/ mischievous（20% 换成次优）/ silly（60% 换成最差）。
-                "style": normalize_play_style(getattr(self._state, "play_style", PLAY_STYLE_SERIOUS)),
-            },
             "classification": classification,
             "summary_context": summary_context,
             "strategy_context": strategy_context,
@@ -1701,15 +1607,14 @@ class STS2AutoplayService:
         return {"status": "ok", "enabled": bool(enabled), "message": message, "summary": message}
 
     def set_run_reflection_enabled(self, enabled: bool) -> dict[str, Any]:
-        """开关「尖塔复盘」：局末是否生成反思并推给本体。
+        """开关「尖塔复盘」：局末是否把"玩家的选择与推荐差得最多的几步"交给本体讲。
 
-        关掉后**结构化记录照旧写**（损血归因、路线图、历史页都能看），只是不再让模型复盘、
-        也不再加"暂停-恢复"这一步。
+        关掉后**结构化记录照旧写**（损血归因、路线图、对照本身、历史页都能看），只是不再请模型讲解。
         """
         self._state.run_reflection_enabled = bool(enabled)
         self._cfg["run_reflection_enabled"] = bool(enabled)
         self._emit_status()
-        message = "好，打完我会复盘一局。" if enabled else "好，我不复盘了，只记数据。"
+        message = "好，打完我会讲讲你和我选得不一样的那几步。" if enabled else "好，我不讲了，只记数据。"
         return {"status": "ok", "enabled": bool(enabled), "message": message, "summary": message}
 
     def set_standby(self, standby: bool) -> dict[str, Any]:
@@ -3121,7 +3026,7 @@ class STS2AutoplayService:
             character = str(snapshot.get("character") or raw_state.get("character_id") or run.get("character_id") or "")
             floor = int(snapshot.get("floor") or 0)
             act = int(snapshot.get("act") or 0)
-            # 事实部分立刻落盘（同步、确定）；自然语言反思稍后异步补（见 _reflect_run_end）。
+            # 事实部分立刻落盘（同步、确定）；对照复盘的讲解稍后异步补（见 _explain_review）。
             hp_report = self._hp_loss_report()
             # 收尾最后一个房间，把路线图一起写进本局记录。
             self._close_route_room(reason="run_end")
@@ -3173,21 +3078,26 @@ class STS2AutoplayService:
                 len(record.get("lessons", [])),
                 len(record.get("preferences", [])),
             )
+            # 对照复盘：玩家亲手打的步里，哪几步和推荐差得最多。纯自动玩的局没有可对照的步。
+            review = self._choice_review.summary()
+            self._choice_review.steps = []
+            self._choice_review.drop_pending()
+            if review["compared"]:
+                self._catgirl_memory.attach_review(run_id, review)
+                self.logger.info(
+                    "[sts2_review] 本局玩家亲手打了 %s 步可对照，%s 步与推荐相同，挑出 %s 步讲",
+                    review["compared"], review["agreed"], len(review["steps"]),
+                )
             self._write_history_view()
-            # 复盘开关关掉时：只留结构化记录，既不暂停也不生成反思（连"暂停再恢复"这套都不做）。
-            if not getattr(self._state, "run_reflection_enabled", True):
-                self.logger.info("[sts2_reflect] 复盘开关关闭，只记录不反思")
+            # 复盘开关关掉、或没有差得多的步：只留结构化记录，不请模型讲。
+            if not review["steps"] or not getattr(self._state, "run_reflection_enabled", True):
                 return
-            # 复盘期间**暂停自动游玩**（玩家口径："复盘的时候暂停自动游玩，复盘完再继续"）——
-            # 否则猫娘会在复盘还没讲完时就冲进主菜单开下一局。
-            self._pause_for_reflection()
-            # 异步：让**本体**（同一模型 + 本体人设）做一次复盘，落盘并说给玩家听。
             try:
                 loop = asyncio.get_running_loop()
-                task = loop.create_task(self._reflect_run_end(dict(record), hp_report))
+                task = loop.create_task(self._explain_review(dict(record), review))
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             except RuntimeError:
-                self._resume_after_reflection()
+                pass
         except Exception as exc:
             self.logger.info("[sts2_memory] record run end failed (non-fatal): %s", exc)
 
@@ -3206,7 +3116,7 @@ class STS2AutoplayService:
           与"算出来是 unknown"**不是一回事**，绝不能补一个 `kind="unknown"` 去糊上
           （那会把"系统没落库"伪装成"这局证据不足"，是 t30 里 zero vs null 的同款错误）。
 
-        ⚠️ 全程吞异常：落库失败**不得**影响记忆主链路（复盘/暂停/异步反思都在它后面）。
+        ⚠️ 全程吞异常：落库失败**不得**影响记忆主链路（对照复盘在它后面）。
         """
         if not isinstance(attribution, dict):
             return
@@ -3259,100 +3169,113 @@ class STS2AutoplayService:
         except Exception:
             return {"summary": {}, "runs": []}
 
-    def _run_summary_digest(self, record: dict[str, Any], hp_report: dict[str, Any]) -> str:
-        """局末战报（**简化后的提示词**）：结局 + 角色 + 层级 + 损血归因 + 关键决策。
+    async def _explain_review(self, record: dict[str, Any], review: dict[str, Any]) -> None:
+        """局末复盘：把玩家的选择与推荐差得最多的几步交给**本体**（同一模型 + 本体人设）讲讲为什么。
 
-        损血归因就是玩家要的"看看哪些地方损血导致失败"：把单次掉血最多的三处列出来，
-        带上是哪个界面、第几层、掉了多少。
-        """
-        parts = [
-            f"结局:{record.get('outcome') or '?'}",
-            f"角色:{record.get('character') or '?'}",
-            f"打到第{record.get('floor') or 0}层",
-        ]
-        if hp_report:
-            parts.append(f"共损血{hp_report.get('total_lost')}点({hp_report.get('loss_events')}次)")
-            parts.append(f"最低血{hp_report.get('min_hp')}/{hp_report.get('max_hp')}")
-            for item in hp_report.get("heaviest") or []:
-                parts.append(
-                    f"最痛:「{item.get('room') or item.get('screen')}」-{item.get('lost')}"
-                    f"({item.get('hp_before')}->{item.get('hp_after')})"
-                )
-        decisions = [d for d in (record.get("decisions") or []) if isinstance(d, dict)]
-        if decisions:
-            recent = decisions[-8:]
-            parts.append(
-                "近况:"
-                + "；".join(f"{str(d.get('screen') or '')}:{str(d.get('action_type') or '')}" for d in recent)
-            )
-        lessons = [str(item) for item in (record.get("lessons") or []) if str(item).strip()]
-        if lessons:
-            parts.append("已知教训:" + "；".join(lessons[:3]))
-        return "｜".join(parts)[:600]
-
-    def _pause_for_reflection(self) -> None:
-        """复盘期间暂停自动游玩，并记下"是我们暂停的"（复盘完才恢复）。"""
-        try:
-            if self._state.autoplay_state != "running":
-                return
-            self.pause_autoplay(reason="run_reflection")
-            self._state.reflection_paused = True
-            self.logger.info("[sts2_reflect] 复盘期间已暂停自动游玩")
-        except Exception as exc:
-            self.logger.info("[sts2_reflect] pause failed (non-fatal): %s", exc)
-
-    def _resume_after_reflection(self) -> None:
-        """复盘结束后恢复自动游玩。
-
-        只在"确实是我们为了复盘暂停的、且玩家没在这期间动过档位"时才恢复 —— 玩家手动暂停/切到
-        standby 之后被我们擅自恢复，比不恢复更糟。
-        """
-        if not getattr(self._state, "reflection_paused", False):
-            return
-        self._state.reflection_paused = False
-        try:
-            if self._state.standby:
-                return
-            if self._state.autoplay_state != "paused" or self._state.pause_reason != "run_reflection":
-                return
-            self.resume_autoplay()
-            self.logger.info("[sts2_reflect] 复盘结束，已恢复自动游玩")
-        except Exception as exc:
-            self.logger.info("[sts2_reflect] resume failed (non-fatal): %s", exc)
-
-    async def _reflect_run_end(self, record: dict[str, Any], hp_report: dict[str, Any]) -> None:
-        """局末复盘：让**本体**（同一模型 + 本体人设）指出损血/失败的关键并给出下次的改法。
-
-        产物有三处去处：① 贴回猫娘记忆（并作为一条教训参与下一局的 strategy_directives）；
-        ② 作为弹幕说给玩家听；③ 推给本体 NEKO 的对话（`ai_behavior="respond"`，让它用自己口吻再说一遍）。
+        讲解贴回这一局的记录（历史页可见），并推给本体 NEKO 让它用自己的口吻说。它**不**进教训、
+        不影响任何决策，也不暂停自动游玩。
         """
         try:
-            if not getattr(self._state, "run_reflection_enabled", True):
-                return
-            digest = self._run_summary_digest(record, hp_report)
-            self.logger.info("[sts2_reflect] digest=%s", digest)
+            digest = review_digest(record, review)
+            self.logger.info("[sts2_review] digest=%s", digest.replace("\n", " ‖ "))
             if not getattr(self._catgirl_llm, "available", False):
-                self.logger.info("[sts2_reflect] 主系统 LLM 不可用，保留启发式总结")
+                self.logger.info("[sts2_review] 主系统 LLM 不可用，只留对照记录")
                 return
-            text = await self._catgirl_llm.generate(summary_text=digest, summary_kind="run_summary", payload={})
+            text = await self._catgirl_llm.generate(summary_text=digest, summary_kind="run_review", payload={})
             if not text:
-                self.logger.info("[sts2_reflect] 反思未产出（保留启发式总结）")
+                self.logger.info("[sts2_review] 讲解未产出，只留对照记录")
                 return
-            self._catgirl_memory.attach_reflection(str(record.get("run_id") or ""), text)
-            self.logger.info("[sts2_reflect] 反思=%s", text)
-            self._write_history_view()  # 让历史页也能看到这条反思
-            self._schedule_catgirl_push(text)
+            self._catgirl_memory.attach_review(str(record.get("run_id") or ""), {**review, "explanation": text})
+            self.logger.info("[sts2_review] 讲解=%s", text)
+            self._write_history_view()
             head = (
                 f"这一局结束了（{record.get('outcome') or '?'}，第{record.get('floor') or 0}层）。"
-                f"复盘要点：{text}"
-                "用你自己的口吻复盘这局为什么输，一两句就够。"
+                f"玩家亲手打的步里和你的推荐差得最多的几步，你的看法是：{text}"
+                "用你自己的口吻和玩家聊聊这几步，两三句就够；是讨论不是批评。"
             )
-            self._push_proactive_to_host(head, kind="run_reflection", priority=7)
+            self._push_proactive_to_host(head, kind="run_review", priority=7)
         except Exception as exc:
-            self.logger.info("[sts2_reflect] failed (non-fatal): %s", exc)
-        finally:
-            # 无论复盘成功与否都要恢复 —— 卡在"暂停"上等于猫娘永久停手。
-            self._resume_after_reflection()
+            self.logger.info("[sts2_review] failed (non-fatal): %s", exc)
+
+    def _plugin_is_driving(self, snapshot: dict[str, Any]) -> bool:
+        """这一屏是不是插件自己在走（自动玩在跑、没停手、也不在"听安排"的等待清单里）。"""
+        return (
+            self._state.autoplay_state == "running"
+            and not self._state.standby
+            and not self._should_hold_for_orders(snapshot)
+        )
+
+    async def review_tick(self, client: Any, snapshot: dict[str, Any], operation: Any, situation_summary: Any) -> None:
+        """对照复盘的一拍：先认领模组报来的选择，再记下这一刻的推荐。任何失败都不影响 tick。
+
+        只在**玩家自己打**的时候记推荐（陪玩、停手、"听安排"等你发话、自动玩没在跑）；插件自己走的步
+        不进对照。本局角色下载了策略网络模型时推荐来自网络，否则来自这一拍规划器算出的那一步。
+        """
+        try:
+            run_id = str(snapshot.get("run_id") or "")
+            getter = getattr(client, "get_player_choices", None)
+            if not run_id or getter is None or time() < self._choice_review_retry_at:
+                return
+            review = self._choice_review
+            review.begin_run(run_id)
+            try:
+                data = await getter(review.since or 0)
+            except Exception as exc:
+                self._choice_review_retry_at = time() + 300.0
+                self.logger.info(
+                    "[sts2_review] 读不到玩家的选择（模组没有 /choices？5 分钟后再试）：%s: %s", type(exc).__name__, exc
+                )
+                return
+            choices = data.get("choices") if isinstance(data, dict) and isinstance(data.get("choices"), list) else []
+            latest = data.get("latest_seq") if isinstance(data, dict) else None
+            first_contact = review.since is None
+            if isinstance(latest, int):
+                if review.since is not None and latest < review.since:
+                    first_contact = True  # 模组重启过，序号从头来
+                review.since = latest
+            if not first_contact:
+                for step in review.resolve(choices, last_plugin_action_at=float(self._state.last_action_at or 0.0)):
+                    self.logger.info(
+                        "[sts2_review] 第%s层 %s：玩家选「%s」，推荐「%s」%s",
+                        step.get("floor"), step.get("decision"), step.get("chosen"), step.get("recommended"),
+                        "（相同）" if step.get("same") else "（不同%s）" % (
+                            "，概率差 %.2f" % step["gap"] if step.get("source") == SOURCE_NETWORK else ""
+                        ),
+                    )
+            if self._plugin_is_driving(snapshot):
+                review.drop_pending()
+                return
+            raw_state = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
+            summary_context = snapshot.get("summary_context") if isinstance(snapshot.get("summary_context"), dict) else {}
+            payload = summary_context.get("payload") if isinstance(summary_context.get("payload"), dict) else {}
+            screen = str(snapshot.get("screen") or "")
+
+            def context() -> dict[str, Any]:
+                return {
+                    "floor": snapshot.get("floor"),
+                    "act": snapshot.get("act"),
+                    "room": self._room_identity(screen, raw_state),
+                    "situation": str(situation_summary.get("text") or "")[:160] if isinstance(situation_summary, dict) else "",
+                    "hp": payload.get("current_hp"),
+                    "max_hp": payload.get("max_hp"),
+                    "names": collect_names(raw_state),
+                }
+
+            character = str(snapshot.get("character") or "").upper()
+            advisor = self._policy_advisor
+            if character and advisor.enabled and advisor.assets.runtime_ready() and advisor.assets.model_ready(character):
+                scored = await advisor.recommend(client, character=character, known_id=review.pending_key())
+                if scored and scored.get("unchanged"):
+                    return
+                if scored:
+                    review.capture_network(scored, context=context())
+                    return
+            if isinstance(operation, dict) and operation.get("action_type"):
+                kwargs = operation.get("kwargs") if isinstance(operation.get("kwargs"), dict) else {}
+                key = f"planner|{self._state.snapshot_signature}|{screen}|{operation.get('action_type')}|{sorted(kwargs.items())}"
+                review.capture_planner(operation, raw_state, key=key, context=context())
+        except Exception as exc:
+            self.logger.info("[sts2_review] tick failed (non-fatal): %s", exc)
 
     def _is_host_commentary_enabled(self) -> bool:
         """弹幕关着时，是否把点评改走宿主（`push_message(ai_behavior="respond")`）。
