@@ -87,7 +87,7 @@ Character select: when some characters have a downloaded model, each run picks a
 
 ## Catgirl Memory Growth (cross-run lessons → decision)
 
-When a run ends (death / clear — the `state_machine` classifies it as `screen_class=terminal`), the plugin summarizes the run's `recent_decision_memory` into "lessons + preferences", writes them via `CatgirlMemoryStore` in `catgirl_memory.py`, and persists to `<LOCALAPPDATA>/N.E.K.O/sts2_autoplay/catgirl_memory.json`. On the next run, `strategy_repository.build_context()` merges the recent runs' lessons into `strategy_directives.avoid` and preferences into `prefer` (soft constraints), thereby influencing card / route / combat decisions. The summarizer is **heuristic-first with optional LLM** (added only when `service._catgirl_llm.available`; silently falls back to heuristics on failure).
+When a run ends (death / clear — the `state_machine` classifies it as `screen_class=terminal`), the plugin summarizes the run's `recent_decision_memory` into "lessons + preferences", writes them via `CatgirlMemoryStore` in `catgirl_memory.py`, and persists to `<LOCALAPPDATA>/N.E.K.O/sts2_autoplay/catgirl_memory.json`. On the next run, `strategy_repository.build_context()` merges the recent runs' lessons into `strategy_directives.avoid` and preferences into `prefer` (soft constraints), thereby influencing card / route / combat decisions. The summarizer is **purely heuristic** (deterministic, free); the model takes no part in producing lessons.
 
 ## End-of-run review: your choices vs the recommendation
 

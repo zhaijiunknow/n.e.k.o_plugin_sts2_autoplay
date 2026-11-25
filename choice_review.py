@@ -289,6 +289,8 @@ class ChoiceReview:
         self.backlog: list[dict[str, Any]] = []
         #: `/choices` 读到哪了；None = 还没和这个 mod 进程对过表（第一次只对表，不认领旧选择）。
         self.since: int | None = None
+        #: 已经认领过的最大序号：同一条选择即使被再报一遍，也不回答第二条推荐。
+        self.seen_seq = 0
 
     def begin_run(self, run_id: str) -> None:
         if run_id and run_id != self.run_id:

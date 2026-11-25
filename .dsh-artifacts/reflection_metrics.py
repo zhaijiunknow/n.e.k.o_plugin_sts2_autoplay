@@ -12,8 +12,8 @@
 * 位移必须走**真实注入路径**：
   `STS2StrategyRepository._inject_run_memory_directives → CatgirlMemoryStore.summarize_recent`。
   **禁止手工喂 `avoid`** —— t2 已证手工喂会得假阳性。
-* 默认档 `serious` 下 `service.py:793` 早退 ⇒ `ordered_candidates`（`:804`）唯一调用点不可达
-  ⇒ 位移恒为 0。这是所有后续对照的**零点**。
+* 「游玩模式」已删除（`play_style.py`、`service._apply_play_style`、`ordered_candidates` 都不在了），
+  原先隔离扰动层的 `light_isolated` 段随之去掉。`static` 段里的 gate1 字段现在恒为空，只是历史对照用。
 
 用法
 ----
@@ -492,109 +492,6 @@ def _ranked_for(planner: Any, snapshot: dict[str, Any], avoid: list[str]) -> tup
                                                                "kwargs": data.get("kwargs") or {}})
 
 
-def _section_light_isolated(planner: Any, repo: Any, scenarios: dict[str, Any],
-                            real_reflections: list[str]) -> dict[str, Any]:
-    """★实机档位（mischievous）下的端到端位移，**必须隔离扰动层**。
-
-    为什么必须隔离
-    --------------
-    captain 更正（我已独立复核）：实机生效的 `play_style` 由 config 层覆盖为 `mischievous`，
-    于是 `service._apply_play_style` **不早退**，会走到 `ordered_candidates`，并以 20% 概率
-    （`play_style.py:30`）把最优换成 `items[1]`（`play_style.py:107 return items[1], "mischievous_second"`）。
-
-    ⇒ 若直接跑 `_apply_play_style` 对比"有教训 vs 无教训"并看到位移，
-    **分不清位移来自教训还是来自扰动层掷骰子**。
-
-    隔离方法（两条同时用，互为对照）
-    --------------------------------
-    1. **固定随机源**：给 service 注入 `play_style_random`，其 `.random()` 恒返回一个
-       > 0.2 的值 ⇒ `roll >= probability` ⇒ 走 `kept_best`（`play_style.py:103-104`），
-       扰动层输出恒为最优项。此时"有/无教训"的差异**只能**来自教训。
-    2. **反向对照**：再注入恒返回 0.0 的随机源 ⇒ 强制扰动生效 ⇒ 证明第 1 条的
-       "无位移"不是因为扰动层根本没被走到（否则那条断言是恒真的）。
-    """
-    result: dict[str, Any] = {
-        "effective_play_style_source": "config 层覆盖（见顶层 effective_config 段）",
-        "why": "mischievous 档 20% 概率把最优换成 items[1]，不隔离则位移不可归因",
-    }
-    try:
-        if PLUGIN_PARENT not in sys.path:
-            sys.path.insert(0, PLUGIN_PARENT)
-        from sts2_autoplay.service import STS2AutoplayService
-    except Exception as exc:  # pragma: no cover
-        result["error"] = f"{type(exc).__name__}: {exc}"
-        return result
-
-    class _Logger:
-        def debug(self, *a: Any, **k: Any) -> None:
-            return None
-
-        info = warning = exception = debug
-
-    class _FixedRandom:
-        """可注入随机源：`value` 固定，便于确定性对照。"""
-
-        def __init__(self, value: float) -> None:
-            self.value = value
-
-        def random(self) -> float:
-            return self.value
-
-    def build(style: str, roll: float) -> Any:
-        service = STS2AutoplayService(_Logger(), lambda payload: None, lambda **kwargs: None,
-                                      play_style_random=_FixedRandom(roll))
-        service._state.play_style = style
-        # 让 build_context 真的把记忆注入 avoid（真实注入路径）。
-        service._planner._repo = None  # 占位，避免属性缺失
-        return service
-
-    rows: list[dict[str, Any]] = []
-    for name, snapshot in scenarios.items():
-        avoid_real = list(repo.build_context(snapshot)["strategy_directives"]["avoid"])
-        for style, roll, tag in (
-            ("mischievous", 0.9, "扰动被概率挡下(kept_best)"),
-            ("mischievous", 0.0, "扰动强制生效(mischievous_second)"),
-            ("serious", 0.0, "serious 早退对照"),
-        ):
-            service = build(style, roll)
-            row: dict[str, Any] = {"screen": name, "style": style, "roll": roll, "tag": tag}
-            for label, avoid in (("empty", []), ("real_injected", avoid_real)):
-                context = _context_from_snapshot(snapshot, avoid)
-                operation = service._planner.plan(context)
-                data = operation.as_dict() if hasattr(operation, "as_dict") else (operation or {})
-                shipped, info = service._apply_play_style(snapshot, dict(data))
-                row[f"plan_{label}"] = {
-                    "action_type": data.get("action_type"),
-                    "kwargs": data.get("kwargs"),
-                    "reason": data.get("reason"),
-                }
-                row[f"shipped_{label}"] = {
-                    "action_type": shipped.get("action_type"),
-                    "kwargs": shipped.get("kwargs"),
-                }
-                row[f"perturbation_{label}"] = info
-            row["plan_displacement_bits"] = (
-                0 if row["plan_empty"] == row["plan_real_injected"] else 1
-            )
-            row["shipped_displacement_bits"] = (
-                0 if row["shipped_empty"] == row["shipped_real_injected"] else 1
-            )
-            rows.append(row)
-    result["rows"] = rows
-    result["isolated_plan_displacement_total"] = sum(
-        row["plan_displacement_bits"] for row in rows if row["roll"] == 0.9
-    )
-    result["isolated_shipped_displacement_total"] = sum(
-        row["shipped_displacement_bits"] for row in rows if row["roll"] == 0.9
-    )
-    # 反恒真校验：强制扰动那条必须真的产生了 "mischievous_second"
-    result["perturbation_actually_fires"] = any(
-        str((row.get("perturbation_empty") or {}).get("reason", "")).startswith("mischievous")
-        for row in rows
-    )
-    return result
-
-
 def section_runtime(runs: list[dict[str, Any]]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     store = _memory_store(runs)
@@ -663,14 +560,7 @@ def section_runtime(runs: list[dict[str, Any]]) -> dict[str, Any]:
     out["e2e_anticheat_note"] = (
         "若 ranked_displacement_bits > 0 而 plan_displacement_bits == 0 ⇒ 判未通过（t_r3 §3.3 反作弊条款）"
     )
-    out["e2e_scope_note"] = (
-        "★本段只测「教训层」的位移（直接喂 strategy_context），**绕过** service._apply_play_style。"
-        "原因：实机 mischievous 档会以 20% 概率把最优换成 items[1]（play_style.py:107），"
-        "不隔离就分不清位移来自教训还是扰动骰子。见 light_isolated 段。"
-    )
-
-    # ---- ★实机档位（mischievous）下的位移：必须隔离扰动 ----
-    out["light_isolated"] = _section_light_isolated(planner, repo, scenarios, real_reflections)
+    out["e2e_scope_note"] = "本段只测「教训层」的位移（直接喂 strategy_context）。"
 
     # ---- 真实注入的 avoid 内容（默认档下确实只有 1 条模板句） ----
     out["injected_avoid_example"] = _build_repo(store).build_context(
@@ -733,8 +623,8 @@ def section_runtime(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
     # ---- 默认档可达性（运行时旁证）----
     out["gate1_runtime_note"] = (
-        "默认档不触达 ordered_candidates（static 段已证唯一调用点在 :793 早退之后）；"
-        "本段测得的 ranked_displacement_bits 也恒为 0，与静态结论一致。"
+        "游玩模式已删除，自动玩的一步里没有代码读候选排序；"
+        "ranked_displacement_bits 只反映 lesson_trace 这条度量路径。"
     )
     return out
 

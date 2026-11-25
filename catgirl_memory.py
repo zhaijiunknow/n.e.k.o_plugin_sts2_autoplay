@@ -6,9 +6,8 @@
 - summarize_recent 聚合最近几局的教训/偏好（去重），注入到 strategy_directives，
   让下一局的选牌/选路线/战斗决策能参考上一局踩的坑和偏好。
 
-总结引擎：
-- 默认启发式（确定性、零成本），从 recent_decision_memory 里提炼规律；
-- 若传入可用 LLM（service 的 self._catgirl_llm），叠加自然语言归纳，失败静默回退启发式。
+总结引擎：启发式（确定性、零成本），从 recent_decision_memory 里提炼规律。
+（曾经留过一条"叠加 LLM 归纳"的路径，它从来没有生效过，已删除。）
 只注入软约束（avoid / prefer），不碰 must（硬约束），避免把玩家带进坑。
 """
 
@@ -105,18 +104,16 @@ def _default_memory_path() -> str | None:
 
 
 class CatgirlMemoryStore:
-    """猫娘跨局记忆 store：落盘读写 + 启发式/LLM 总结 + 跨局聚合。
+    """猫娘跨局记忆 store：落盘读写 + 启发式总结 + 跨局聚合。
 
     Args:
         path: 记忆文件路径（默认从环境解析；None 时仅内存，不落盘）。
-        engine: "heuristic" | "llm"（llm 需要传入可用 `llm` 实例）。
         logger: 用于告警日志。
     """
 
-    def __init__(self, path: str | None = None, *, engine: str = "heuristic", logger: Any = None) -> None:
+    def __init__(self, path: str | None = None, *, logger: Any = None) -> None:
         # path=None -> 纯内存（不落盘、不读盘），用于测试；生产由调用方显式传 _default_memory_path()。
         self._path = path
-        self._engine = engine
         self._logger = logger
         self._runs: list[dict[str, Any]] = []
         self.load()
@@ -235,19 +232,15 @@ class CatgirlMemoryStore:
                 pass
 
     def add_run(self, run_id: str, *, character: str, outcome: str, floor: int, act: int,
-                decision_memory: list[dict[str, Any]], llm: Any = None,
+                decision_memory: list[dict[str, Any]],
                 hp_report: dict[str, Any] | None = None,
                 route: list[dict[str, Any]] | None = None,
                 deck: list[dict[str, Any]] | None = None,
                 extra_lessons: list[str] | None = None) -> dict[str, Any]:
         """总结一局并追加到记忆（幂等：同 run_id 的旧记录先移除再添新，避免终端屏重复触发累积）。
 
-        ``llm`` 参数保留但**这里不再使用**：本方法必须是同步、确定、立刻落盘的（terminal 屏会反复
-        出现，记录不能等模型）。局末的对照复盘由 service 事后经 ``attach_review`` 贴回同一条记录。
-
-        旧代码在这里同步调用 ``llm.generate(...)`` —— 那是个 ``async`` 方法，拿到的是协程，
-        随后 ``.splitlines()`` 直接抛错被 ``except`` 吞掉；而且还有 ``self._engine == "llm"`` 这道
-        默认关闭的闸门。**那条 LLM 总结路径从来没有生效过**，一直是纯启发式。
+        本方法必须是同步、确定、立刻落盘的（terminal 屏会反复出现，记录不能等模型）。
+        局末的对照复盘由 service 事后经 ``attach_review`` 贴回同一条记录。
 
         ``deck``（2026-10-19 新增）：死亡那一刻的**完整牌组快照**（mod 的
         `DeckCardPayload`，带 card_type / upgraded / energy_cost / dynamic_values /
@@ -386,22 +379,11 @@ class CatgirlMemoryStore:
                 records.append(record)
         return records
 
-    def summarize_run(self, *, decision_memory: list[dict[str, Any]], run_meta: dict[str, Any],
-                      llm: Any = None) -> dict[str, Any]:
-        """提炼一局的教训 + 偏好。
-
-        - llm 为可用实例时叠加自然语言归纳（失败/不可用静默回退启发式）。
-        - 启发式：low-hp 翻车/连败 -> 教训（avoid）；反复同型选择 -> 偏好（prefer）。
-        """
+    def summarize_run(self, *, decision_memory: list[dict[str, Any]], run_meta: dict[str, Any]) -> dict[str, Any]:
+        """提炼一局的教训 + 偏好（启发式）：low-hp 翻车/连败 -> 教训（avoid）；反复同型选择 -> 偏好（prefer）。"""
         lessons = self._heuristic_lessons(decision_memory, run_meta)
         preferences = self._heuristic_preferences(decision_memory)
-        lessons, preferences = self._dedup(lessons), self._dedup(preferences)
-        if llm is not None and self._llm_available(llm):
-            llm_out = self._summarize_with_llm(llm, decision_memory, run_meta)
-            if llm_out:
-                lessons = self._dedup(lessons + llm_out.get("lessons", []))
-                preferences = self._dedup(preferences + llm_out.get("preferences", []))
-        return {"lessons": lessons, "preferences": preferences}
+        return {"lessons": self._dedup(lessons), "preferences": self._dedup(preferences)}
 
     def attach_review(self, run_id: str, review: dict[str, Any]) -> dict[str, Any] | None:
         """把"玩家的选择 vs 当时的推荐"的对照（及事后补上的讲解）贴到那一局的记录上。
@@ -652,40 +634,6 @@ class CatgirlMemoryStore:
                 seen.add(normalized)
                 out.append(normalized)
         return out
-
-    # ---- LLM 可选扩展点 ----
-
-    @staticmethod
-    def _llm_available(llm: Any) -> bool:
-        try:
-            return bool(getattr(llm, "available", False))
-        except Exception:
-            return False
-
-    def _summarize_with_llm(self, llm: Any, decision_memory: list[dict[str, Any]], run_meta: dict[str, Any]) -> dict[str, Any]:
-        """LLM 自然语言归纳一局教训/偏好。失败/解析不出任何东西返回空 dict（调用方回退启发式）。"""
-        try:
-            memory_line = "；".join(
-                f"{str(item.get('action_type') or item.get('kind') or '')}:{str(item.get('reason') or item.get('summary') or '')}"
-                for item in decision_memory[:15] if isinstance(item, dict)
-            ) or "（本局无关键决策记录）"
-            outcome = str(run_meta.get("outcome") or "?")
-            text = llm.generate(
-                summary_text=f"本局结局:{outcome}。关键决策:{memory_line}",
-                summary_kind="memory_summary",
-                payload={},
-            )
-            if not text:
-                return {}
-            # 简单按分隔符切出 lessons / preferences 两条；LLM 可能自由发挥，取不到就都算教训
-            lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
-            lessons = [ln for ln in lines if ln.startswith(("教训", "lesson"))]
-            preferences = [ln for ln in lines if ln.startswith(("偏好", "prefer"))]
-            if not lessons and not preferences:
-                lessons = lines[:1] or []
-            return {"lessons": lessons, "preferences": preferences}
-        except Exception:
-            return {}
 
     def _log(self, msg: str) -> None:
         try:

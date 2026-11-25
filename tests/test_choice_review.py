@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -321,12 +322,12 @@ class _Client:
         self.seq = 10
         self.choices: list[dict[str, Any]] = []
         self.asked: list[int] = []
-        self.fail = False
+        self.fail: Exception | None = None
 
     async def get_player_choices(self, since: int = 0) -> dict[str, Any]:
         self.asked.append(since)
-        if self.fail:
-            raise RuntimeError("Route not found")
+        if self.fail is not None:
+            raise self.fail
         return {"latest_seq": self.seq, "choices": [c for c in self.choices if c["seq"] > since]}
 
     def add(self, **choice: Any) -> None:
@@ -384,14 +385,71 @@ def test_review_tick_ignores_steps_while_the_plugin_is_driving() -> None:
     assert service._choice_review.steps == [] and service._choice_review.pending is None
 
 
-def test_review_tick_backs_off_when_the_mod_has_no_choices_route() -> None:
+def test_review_tick_asks_nothing_while_the_plugin_drives_with_no_recommendation_waiting() -> None:
     service, client = _service(), _Client()
-    client.fail = True
+    service._state.autoplay_state = "running"
+
+    asyncio.run(service.review_tick(client, _snapshot(), _PLANNED, {}))
+
+    assert client.asked == [], "纯自动玩的每一拍都问一次 /choices 是白问"
+
+
+def test_review_tick_backs_off_long_only_when_the_route_is_missing() -> None:
+    """旧版模组没有 /choices：歇 5 分钟。偶发的超时、断连只歇几秒，否则玩家这几分钟的步全丢。"""
+    from plugin.plugins.sts2_autoplay.transport_client import STS2ActionRejected, STS2TransportError
+
+    def retry_after(error: Exception) -> float:
+        service, client = _service(), _Client()
+        client.fail = error
+
+        async def drive() -> None:
+            await service.review_tick(client, _snapshot(), _PLANNED, {})
+            await service.review_tick(client, _snapshot(), _PLANNED, {})
+
+        asyncio.run(drive())
+        assert client.asked == [0], "退避期间不再问"
+        return service._choice_review_retry_at - time.time()
+
+    assert 290 < retry_after(STS2ActionRejected("Route not found.", code="not_found")) <= 300
+    assert 0 < retry_after(STS2TransportError("无法连接 STS2-Agent: ReadTimeout")) <= 5
+
+
+def test_a_choice_is_claimed_once_even_when_the_mod_reports_it_again() -> None:
+    """`since` 之前的选择即使又被报回来（并发的两路 tick、重复的响应）也不再回答别的推荐。"""
+    service, client = _service(), _Client()
 
     async def drive() -> None:
         await service.review_tick(client, _snapshot(), _PLANNED, {})
+        client.add(kind="play_card", id="STRIKE_IRONCLAD", target="NIBBIT", target_index=0, floor=6)
+        await service.review_tick(client, _snapshot(), _PLANNED, {})
+        service._choice_review.since = 10  # 把读数拨回去：mod 会把序号 11 的那条再报一遍
+        client.seq = 10
         await service.review_tick(client, _snapshot(), _PLANNED, {})
 
     asyncio.run(drive())
 
-    assert client.asked == [0], "旧版模组没有 /choices：问一次就歇 5 分钟，不每个 tick 撞一次"
+    assert len(service._choice_review.steps) == 1
+
+
+def test_overlapping_ticks_do_not_both_run_the_review() -> None:
+    service, client = _service(), _Client()
+    gate = asyncio.Event()
+    original = client.get_player_choices
+
+    async def slow(since: int = 0) -> dict[str, Any]:
+        await gate.wait()
+        return await original(since)
+
+    client.get_player_choices = slow  # type: ignore[method-assign]
+
+    async def drive() -> None:
+        first = asyncio.create_task(service.review_tick(client, _snapshot(), _PLANNED, {}))
+        await asyncio.sleep(0)
+        await service.review_tick(client, _snapshot(), _PLANNED, {})   # 第一路还在等 mod：这一路让开
+        gate.set()
+        await first
+
+    asyncio.run(drive())
+
+    assert client.asked == [0]
+    assert service._choice_review_busy is False

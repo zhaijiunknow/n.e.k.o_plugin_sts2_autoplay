@@ -161,7 +161,7 @@ class PolicyAdvisor:
         返回 `_score` 的结果（含每个候选的概率）；这一屏网络给不出、或只有一个候选时返回 None。
         `known_id` 是上次已经打过分的决策：界面没变时返回 ``{"decision_id":…, "unchanged": True}``，不重复推理。
         """
-        scored = await self._score(client, character=character, map_policy="auto", fail=lambda why: None, known_id=known_id)
+        scored = await self._score(client, character=character, map_policy="auto", fail=self._no_recommendation, known_id=known_id)
         if scored is None or scored.get("policy_hold") or scored.get("forced"):
             return None
         return scored
@@ -179,7 +179,7 @@ class PolicyAdvisor:
             return fail("策略网络的运行环境还没下载（在插件面板的「策略网络」页下载）")
         if not self.assets.model_ready(character):
             return fail(f"没有下载 {character} 的模型")
-        obs_format = await self._obs_format(character)
+        obs_format = await self._obs_format(character, fail)
         if obs_format is None:
             return None
         try:
@@ -188,7 +188,7 @@ class PolicyAdvisor:
             return fail(f"mod /policy/decision 失败：{type(exc).__name__}: {exc}")
         if isinstance(decision, dict) and decision.get("data_id") != self.assets.mod_data_id():
             # 模组没有词表，或它的词表与网络的不是同一份（编号对不上）：把本机这份交给它，下一轮再问。
-            return await self._push_mod_data(client, decision.get("data_id"))
+            return await self._push_mod_data(client, decision.get("data_id"), fail)
         if not isinstance(decision, dict) or not decision.get("available"):
             reason = decision.get("reason") if isinstance(decision, dict) else "响应不是对象"
             if isinstance(decision, dict) and decision.get("wait"):
@@ -242,6 +242,11 @@ class PolicyAdvisor:
         self._note("回落到原有逻辑：" + why, key="fallback:" + why)
         return None
 
+    def _no_recommendation(self, why: str) -> None:
+        """`recommend` 给不出打分时的去处：玩家自己在打，没有什么"回落"，不计入 fallbacks，只留一句原因。"""
+        self._note("对照复盘这一步拿不到网络的推荐：" + why, key="no-recommendation:" + why)
+        return None
+
     def _note(self, message: str, *, key: str) -> None:
         """同一句话只记一次（tick 每秒都跑，局面不变时不刷屏）。"""
         if key == self._last_note:
@@ -254,22 +259,25 @@ class PolicyAdvisor:
 
     # ---- 模组的词表 ---------------------------------------------------------------------
 
-    async def _push_mod_data(self, client: Any, mod_data_id: Any) -> None:
+    async def _push_mod_data(self, client: Any, mod_data_id: Any, fail: Any) -> None:
         mine = self.assets.mod_data_id()
         if monotonic() < self._next_data_push_at:
-            return self._fallback(f"模组的词表（{mod_data_id}）与本机的（{mine}）不一致，刚交过一次，稍后再试")
+            return fail(f"模组的词表（{mod_data_id}）与本机的（{mine}）不一致，刚交过一次，稍后再试")
         self._next_data_push_at = monotonic() + self.DATA_PUSH_RETRY_SECONDS
         try:
             result = await client.push_policy_data(self.assets.mod_data())
         except Exception as exc:  # noqa: BLE001
-            return self._fallback(f"把词表交给模组失败：{type(exc).__name__}: {exc}")
+            return fail(f"把词表交给模组失败：{type(exc).__name__}: {exc}")
         now = result.get("data_id") if isinstance(result, dict) else None
-        return self._fallback(f"已把词表交给模组（{mod_data_id} -> {now}），下一步起生效")
+        return fail(f"已把词表交给模组（{mod_data_id} -> {now}），下一步起生效")
 
     # ---- 推理旁路 -----------------------------------------------------------------------
 
-    async def _obs_format(self, character: str) -> int | None:
-        """这个角色的网络要的观测格式；旁路没起就拉起它（本轮回落），起不来返回 None。"""
+    async def _obs_format(self, character: str, fail: Any) -> int | None:
+        """这个角色的网络要的观测格式；旁路没起就拉起它（本轮回落），起不来返回 None。
+
+        `fail` 是"这一步给不出"的去处：自动玩是 `_fallback`（计数），对照复盘是 `_no_recommendation`（不计数）。
+        """
         if character in self._formats:
             return self._formats[character]
         if monotonic() < self._next_probe_at:
@@ -279,13 +287,13 @@ class PolicyAdvisor:
             info = await self._sidecar_health(character)
         except Exception as exc:  # noqa: BLE001
             started = self._start_sidecar()
-            self._fallback(
+            fail(
                 f"推理旁路 {self._sidecar_url} 连不上（{type(exc).__name__}）"
                 + ("，已启动旁路进程，稍后再试" if started else "，也没能启动它")
             )
             return None
         if not isinstance(info, dict) or not info.get("ok") or not isinstance(info.get("obs_format"), int):
-            self._fallback(f"推理旁路加载 {character} 的模型失败：{info.get('error') if isinstance(info, dict) else info}")
+            fail(f"推理旁路加载 {character} 的模型失败：{info.get('error') if isinstance(info, dict) else info}")
             return None
         self._formats[character] = int(info["obs_format"])
         self._next_probe_at = 0.0
@@ -307,7 +315,7 @@ class PolicyAdvisor:
                 env={k: v for k, v in os.environ.items() if not k.upper().startswith("PYTHON")},
             )
         except OSError as exc:
-            self._fallback(f"启动推理旁路失败：{exc}")
+            self._note(f"启动推理旁路失败：{exc}", key=f"sidecar-start:{exc}")
             return False
         return True
 

@@ -420,3 +420,26 @@ def test_tick_leaves_companion_polling_alone() -> None:
     advisor = _Advisor(health=HEALTH, scored=_scored(0))
     _snapshot, _client, planner = _tick(_decision(), advisor, autoplay="idle")
     assert advisor.health_calls == 0 and planner.calls == 1
+
+
+@pytest.mark.unit
+def test_recommend_scores_without_acting_and_never_counts_a_fallback() -> None:
+    """玩家自己打的时候（对照复盘）：只打分；给不出也不算"回落"，不污染自动玩的统计。"""
+    advisor = _Advisor(health=HEALTH, scored=_scored(1))
+    scored = asyncio.run(advisor.recommend(_ModClient(_decision()), character="IRONCLAD"))
+    assert scored["choice"] == 1 and scored["probs"] == [0.1, 0.8, 0.1] and scored["decision_id"] == "abc123"
+    assert advisor.decisions == 0 and advisor.fallbacks == 0
+    assert asyncio.run(advisor.recommend(_ModClient(_decision()), character="IRONCLAD", known_id="abc123")) == {
+        "decision_id": "abc123", "unchanged": True,
+    }
+    assert len(advisor.infer_calls) == 1, "界面没变不重复推理"
+
+    down = _Advisor(health=None)
+    assert asyncio.run(down.recommend(_ModClient(_decision()), character="IRONCLAD")) is None
+    assert down.sidecar_starts == 1 and down.fallbacks == 0
+    assert not any("回落到原有逻辑" in line for line in down.log.lines)
+
+    stale = _Advisor(health=HEALTH)
+    client = _ModClient(_decision(data_id="other"))
+    assert asyncio.run(stale.recommend(client, character="IRONCLAD")) is None
+    assert client.pushed and stale.fallbacks == 0

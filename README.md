@@ -101,7 +101,7 @@ CombatSolver + 启发式，日志 `[sts2_policy]` 写明选了什么、为什么
 
 ## 猫娘记忆成长（跨局教训 → 决策）
 
-每局结束（死亡/通关，`state_machine` 判为 `screen_class=terminal`）时，插件把本局 `recent_decision_memory` 总结成「教训 + 偏好」，写入 `catgirl_memory.py` 的 `CatgirlMemoryStore`，持久化到 `<LOCALAPPDATA>/N.E.K.O/sts2_autoplay/catgirl_memory.json`。下一局 `strategy_repository.build_context()` 会把最近几局的教训并入 `strategy_directives.avoid`、偏好并入 `prefer`（软约束），从而影响选牌/路线/战斗决策。总结引擎为**启发式打底 + LLM 可选**（`service._catgirl_llm.available` 时才叠加，失败静默回退）。
+每局结束（死亡/通关，`state_machine` 判为 `screen_class=terminal`）时，插件把本局 `recent_decision_memory` 总结成「教训 + 偏好」，写入 `catgirl_memory.py` 的 `CatgirlMemoryStore`，持久化到 `<LOCALAPPDATA>/N.E.K.O/sts2_autoplay/catgirl_memory.json`。下一局 `strategy_repository.build_context()` 会把最近几局的教训并入 `strategy_directives.avoid`、偏好并入 `prefer`（软约束），从而影响选牌/路线/战斗决策。总结引擎是**纯启发式**（确定、零成本）；模型不参与教训的生成。
 
 ## 弹幕/点评
 
@@ -525,7 +525,8 @@ mod 下发的 `node_type` 是**游戏枚举名**（`Point.PointType.ToString()`�
 - 有些记录游戏写得晚（跳过的选牌奖励要到离开房间才写，锻造、开选牌界面的药水要等选完牌才写），
   所以被新推荐顶掉的旧推荐会再留 4 条、3 分钟等它的回答。
 - 同一条推荐只被回答一次：你在两次刷新之间连出两张牌时，第二张没有对应的推荐，不进对照。
-- 模组没有 `/choices`（旧版模组）时，插件问一次后歇 5 分钟，其余功能不受影响。
+- 模组没有 `/choices`（旧版模组）时，插件问一次后歇 5 分钟，其余功能不受影响；偶发的超时只歇 5 秒。
+- 装了模型时，你自己打也会拉起推理旁路进程给每一步打分（占一些 CPU 和内存）；不想要就关掉陪玩，或设 `policy_enabled = false`。
 
 ### 损血归因按**房间标识**，不是层数（v0.7.0 起）
 

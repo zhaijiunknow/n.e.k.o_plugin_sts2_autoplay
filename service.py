@@ -123,6 +123,8 @@ class STS2AutoplayService:
         self._choice_review = ChoiceReview()
         # 对端没有 /choices（旧版模组）时，隔一阵再问，别每个 tick 撞一次 404。
         self._choice_review_retry_at = 0.0
+        # review_tick 正在跑：轮询、事件流、自动玩循环都会进 tick，同一拍只让一路做对照。
+        self._choice_review_busy = False
         # ★ t31：怪物/事件实例知识库。**独立文件**（契约 §5.1）—— 不挂 catgirl_memory，
         #   因为后者是 cap=50 环形缓冲（实测 20 分钟内就有局被逐出），
         #   而"这只怪啃过我多少血"是**跨局累积**资产，生命周期必须长于单局。
@@ -3211,6 +3213,11 @@ class STS2AutoplayService:
         只在**玩家自己打**的时候记推荐（陪玩、停手、"听安排"等你发话、自动玩没在跑）；插件自己走的步
         不进对照。本局角色下载了策略网络模型时推荐来自网络，否则来自这一拍规划器算出的那一步。
         """
+        if self._choice_review_busy:
+            # 另一路 tick 正在做这一拍（它在等 mod 或推理旁路）：两路各读一遍 /choices 会把同一条选择
+            # 认领两次，所以这一路直接让开。
+            return
+        self._choice_review_busy = True
         try:
             run_id = str(snapshot.get("run_id") or "")
             getter = getattr(client, "get_player_choices", None)
@@ -3218,23 +3225,37 @@ class STS2AutoplayService:
                 return
             review = self._choice_review
             review.begin_run(run_id)
+            driving = self._plugin_is_driving(snapshot)
+            if driving and review.pending is None and not review.backlog:
+                # 插件自己在走、也没有等回答的推荐：这一拍没有可认领的，不必问 mod。
+                return
+            previous = review.since
             try:
-                data = await getter(review.since or 0)
+                data = await getter(previous or 0)
             except Exception as exc:
-                self._choice_review_retry_at = time() + 300.0
+                # 只有"对端没有这条路由"（旧版模组）才长时间不再问；偶发的超时、断连隔几秒就再试，
+                # 否则玩家这几分钟里的步全丢。
+                missing = getattr(exc, "code", "") == "not_found"
+                self._choice_review_retry_at = time() + (300.0 if missing else 5.0)
                 self.logger.info(
-                    "[sts2_review] 读不到玩家的选择（模组没有 /choices？5 分钟后再试）：%s: %s", type(exc).__name__, exc
+                    "[sts2_review] 读不到玩家的选择（%s）：%s: %s",
+                    "模组没有 /choices，5 分钟后再试" if missing else "5 秒后再试", type(exc).__name__, exc,
                 )
                 return
             choices = data.get("choices") if isinstance(data, dict) and isinstance(data.get("choices"), list) else []
             latest = data.get("latest_seq") if isinstance(data, dict) else None
-            first_contact = review.since is None
+            first_contact = previous is None
             if isinstance(latest, int):
-                if review.since is not None and latest < review.since:
+                if previous is not None and latest < previous:
                     first_contact = True  # 模组重启过，序号从头来
                 review.since = latest
-            if not first_contact:
-                for step in review.resolve(choices, last_plugin_action_at=float(self._state.last_action_at or 0.0)):
+            if first_contact:
+                review.seen_seq = latest if isinstance(latest, int) else 0
+            else:
+                # 只认没认领过的（序号比认领过的都大）：同一条选择不回答两条推荐。
+                fresh = [c for c in choices if isinstance(c, dict) and int(c.get("seq") or 0) > review.seen_seq]
+                review.seen_seq = max([review.seen_seq, *(int(c.get("seq") or 0) for c in fresh)])
+                for step in review.resolve(fresh, last_plugin_action_at=float(self._state.last_action_at or 0.0)):
                     self.logger.info(
                         "[sts2_review] 第%s层 %s：玩家选「%s」，推荐「%s」%s",
                         step.get("floor"), step.get("decision"), step.get("chosen"), step.get("recommended"),
@@ -3242,7 +3263,7 @@ class STS2AutoplayService:
                             "，概率差 %.2f" % step["gap"] if step.get("source") == SOURCE_NETWORK else ""
                         ),
                     )
-            if self._plugin_is_driving(snapshot):
+            if driving:
                 review.drop_pending()
                 return
             raw_state = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
@@ -3276,6 +3297,8 @@ class STS2AutoplayService:
                 review.capture_planner(operation, raw_state, key=key, context=context())
         except Exception as exc:
             self.logger.info("[sts2_review] tick failed (non-fatal): %s", exc)
+        finally:
+            self._choice_review_busy = False
 
     def _is_host_commentary_enabled(self) -> bool:
         """弹幕关着时，是否把点评改走宿主（`push_message(ai_behavior="respond")`）。
