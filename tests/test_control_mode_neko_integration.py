@@ -510,7 +510,10 @@ def test_switching_to_the_catgirl_instance_pushes_hold() -> None:
 
     assert result["switched"] is True
     assert result["instance"] == "catgirl"
-    assert client.config_writes[-1] == {"coop_control_mode": "hold"}
+    assert client.config_writes[-2:] == [
+        {"coop_control_mode": "hold"},
+        {"coop_map_policy": "wait", "coop_map_vote_wait_seconds": 20},
+    ]
 
 
 @pytest.mark.unit
