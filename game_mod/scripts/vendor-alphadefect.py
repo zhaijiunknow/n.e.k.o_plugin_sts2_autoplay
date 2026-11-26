@@ -74,6 +74,26 @@ LOCAL_PATCHES += [
 ]
 
 
+# Optional 0.113.x APIs: preserve the training frame on the pinned game and use the
+# installed game's non-destructive arrow rules when those members no longer exist.
+LOCAL_PATCHES += [
+    ("Engine/Obs/Cards.cs", "copy.UpgradeInternal();",
+     "NekoComm.Game.GameApiCompat.UpgradeInternal(copy);", 1, "binary-compatible upgrade preview across game versions"),
+    ("Engine/Obs/Characters/Fool.cs", "a.Status == ArrowStatus.Destroyed",
+     "NekoComm.Game.GameApiCompat.IsDestroyedArrow(a.Status)", 1, "optional destroyed arrow state"),
+    ("Engine/Obs/Characters/Fool.cs", "MegaCrit.Sts2.Core.Commands.MelodyCmd.MelodyCardsPlayedThisTurn(me)",
+     "NekoComm.Game.GameApiCompat.MelodyCardsPlayedThisTurn(me)", 1, "count finished melody plays"),
+    ("Engine/Obs/Gains26.cs", "l is FreeCardPower or FreeAttackPower or FreeSkillPower or FreePowerPower",
+     "NekoComm.Game.GameApiCompat.IsFreeCardPower(l) || l is FreeAttackPower or FreeSkillPower or FreePowerPower",
+     1, "optional general free-card power; retain typed free powers"),
+    ("Engine/Obs/Gains26.cs", "FreeCardPower => pw.Amount,",
+     "_ when NekoComm.Game.GameApiCompat.IsFreeCardPower(pw) => pw.Amount,", 1, "optional free-card layers"),
+    ("Engine/Obs/Gains26.cs", "bool quietus = me.Creature.HasPower<QuietusPower>();",
+     "bool quietus = NekoComm.Game.GameApiCompat.SupportsArrowDestruction && me.Creature.HasPower<QuietusPower>();",
+     1, "Quietus no longer destroys arrows on games without arrow destruction"),
+]
+
+
 def git(upstream: Path, *args: str) -> bytes:
     return subprocess.run(["git", "-C", str(upstream), *args], check=True, capture_output=True).stdout
 

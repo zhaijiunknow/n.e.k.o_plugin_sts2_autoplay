@@ -67,7 +67,7 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
     entries = collect_entries()
     entry_ids = {entry_id for entry_id, _ in entries}
 
-    assert len(entries) == 25
+    assert len(entries) == 26
     # 有本机副作用的下载入口不进实机冒烟（参数组为空表 = 一次都不调用）。
     assert [SPECIAL_ARGS[e] for e in ("sts2_policy_prepare_runtime", "sts2_policy_download_model", "sts2_policy_remove_model")] == [[], [], []]
     assert entry_ids == {
@@ -97,6 +97,7 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
         "sts2_continue_run",
         # 对话式地图协作：定路线 / 跟自己 / 按指定位置投票。
         "sts2_set_route",
+        "sts2_set_map_policy",
         # 控制档位：自己玩 / 听安排 / 停手。
         "sts2_set_control_mode",
         # 活动实例：插件对着主机还是 coop 里的猫娘。

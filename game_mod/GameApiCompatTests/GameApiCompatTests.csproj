@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <DefineConstants Condition="'$(LegacyApi)' == 'true'">$(DefineConstants);LEGACY_API</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../nekospire/Game/GameApiCompat.cs" Link="GameApiCompat.cs" />
+  </ItemGroup>
+</Project>

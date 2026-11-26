@@ -17,20 +17,28 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
+import re
 import shutil
 import threading
 import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from time import time
+from time import sleep, time
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 MANIFEST_PATH = Path(__file__).resolve().parent / "policy_manifest.json"
 _CHUNK = 1 << 18
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler())      # 走系统代理设置（外网下载）
+_RETRY_ROUNDS = 3
+_RETRY_DELAY = 2.0
+
+
+class _IntegrityError(ValueError):
+    """完整文件的摘要不匹配；续传的旧片段也可能是损坏来源。"""
 
 
 def default_root() -> Path:
@@ -47,13 +55,14 @@ class _Job:
         self.total_bytes = 0
         self.current = ""
         self.error = ""
+        self.message = ""
         self.started_at = 0.0
         self.thread: threading.Thread | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "state": self.state, "done_bytes": self.done_bytes, "total_bytes": self.total_bytes,
-            "current": self.current, "error": self.error,
+            "current": self.current, "error": self.error, "message": self.message,
         }
 
 
@@ -63,11 +72,14 @@ class PolicyAssets:
         self.root = Path(root) if root is not None else default_root()
         self.manifest = manifest if manifest is not None else json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
         self._lock = threading.Lock()
+        self._publish_lock = threading.Lock()
+        self._download_slots = threading.BoundedSemaphore(2)
         #: 下载前端读的进度文件（插件的 static 目录下）。前端是静态页，读不到插件内存，所以落一份快照。
         self.status_path: Path | None = None
         self._published_at = 0.0
         self._runtime_job = _Job()
         self._model_jobs: dict[str, _Job] = {}
+        self._catalog_checks: dict[str, tuple[tuple, bool]] = {}
 
     # ---- 路径与就绪判定 -----------------------------------------------------------------
 
@@ -86,11 +98,26 @@ class PolicyAssets:
             return False
         return marker.get("runtime_version") == self.manifest["runtime_version"] and self.python_exe.is_file()
 
+    def _catalog_valid(self, item: dict[str, Any]) -> bool:
+        path = self.root / item["dest"]
+        try:
+            stat = path.stat()
+            if not path.is_file() or stat.st_size != int(item["size"]):
+                return False
+            # Checked once per unchanged file, not on every autoplay tick. Atomic repair changes the
+            # timestamps; the expected digest is part of the key so manifest updates also invalidate it.
+            signature = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, item["sha256"])
+            cached = self._catalog_checks.get(item["dest"])
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+            valid = _sha256(path) == item["sha256"]
+            self._catalog_checks[item["dest"]] = (signature, valid)
+            return valid
+        except OSError:
+            return False
+
     def _missing_catalog(self) -> list[dict[str, Any]]:
-        return [
-            item for item in self.manifest["runtime"]
-            if item["kind"] == "catalog" and not ((self.root / item["dest"]).is_file() and (self.root / item["dest"]).stat().st_size == int(item["size"]))
-        ]
+        return [item for item in self.manifest["runtime"] if item["kind"] == "catalog" and not self._catalog_valid(item)]
 
     def runtime_ready(self) -> bool:
         """运行环境装完整了：完成标记的版本与清单一致、解释器在、词表与内容目录齐全。"""
@@ -133,11 +160,16 @@ class PolicyAssets:
 
     def status(self) -> dict[str, Any]:
         runtime_size = sum(int(item["size"]) for item in self.manifest["runtime"])
+        missing = self._missing_catalog()
+        repair_needed = self._interpreter_ready() and bool(missing)
         return {
             "root": str(self.root),
             "runtime": {
                 "ready": self.runtime_ready(), "download_bytes": runtime_size,
                 "version": self.manifest["runtime_version"], **self._runtime_job.as_dict(),
+                "repair_needed": repair_needed,
+                "missing_catalogs": [item["dest"] for item in missing],
+                "repair_bytes": sum(int(item["size"]) for item in missing) if repair_needed else 0,
             },
             "models": [
                 {
@@ -151,15 +183,16 @@ class PolicyAssets:
 
     def publish(self, *, force: bool = True) -> None:
         """把当前状态写进进度文件（下载中约每 0.7 秒一次；失败不影响下载）。"""
-        if self.status_path is None or (not force and time() - self._published_at < 0.7):
-            return
-        self._published_at = time()
-        try:
-            tmp = self.status_path.with_name(self.status_path.name + ".tmp")
-            tmp.write_text(json.dumps({**self.status(), "updated_at": time()}, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self.status_path)
-        except OSError:
-            pass
+        with self._publish_lock:
+            if self.status_path is None or (not force and time() - self._published_at < 0.7):
+                return
+            self._published_at = time()
+            try:
+                tmp = self.status_path.with_name(self.status_path.name + ".tmp")
+                tmp.write_text(json.dumps({**self.status(), "updated_at": time()}, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, self.status_path)
+            except OSError:
+                pass
 
     # ---- 后台任务 -----------------------------------------------------------------------
 
@@ -202,9 +235,13 @@ class PolicyAssets:
     def _start(self, job: _Job, work: Callable[[_Job], None]) -> None:
         job.state, job.error, job.done_bytes, job.total_bytes, job.started_at = "running", "", 0, 0, time()
 
+        job.current, job.message = "", "排队等待下载（最多同时下载 2 项）"
+
         def run() -> None:
             try:
-                work(job)
+                with self._download_slots:
+                    work(job)
+                job.message = "已完成"
                 job.state = "done"
             except Exception as exc:  # noqa: BLE001 —— 任何失败都要落到面板上
                 job.state, job.error = "failed", f"{type(exc).__name__}: {exc}"
@@ -246,6 +283,8 @@ class PolicyAssets:
             base += int(item["size"])
             job.done_bytes = base
         job.current = "解压"
+        job.message = "下载完成，正在解压安装"
+        self.publish()
         # 先装到旁边的目录，全部成功再换上去：装到一半失败不会留下一个"看着像装好了"的环境。
         staging = self.root / "staging"
         shutil.rmtree(staging, ignore_errors=True)
@@ -269,7 +308,13 @@ class PolicyAssets:
             (staging / name).rename(self.root / name)
         shutil.rmtree(staging, ignore_errors=True)
         self._runtime_marker.write_text(json.dumps({"runtime_version": self.manifest["runtime_version"], "installed_at": time()}), encoding="utf-8")
-        shutil.rmtree(downloads, ignore_errors=True)
+        # downloads 同时供模型任务使用，不能递归清空它（也要保留失败任务的断点）。
+        for _, path in fetched:
+            path.unlink(missing_ok=True)
+        try:
+            downloads.rmdir()  # 只移除空目录；模型可能正在写入。
+        except OSError:
+            pass
         self._log("运行环境就绪：%s", self.root)
 
     def _install_model(self, character: str, job: _Job) -> None:
@@ -282,42 +327,114 @@ class PolicyAssets:
         self._log("模型就绪：%s -> %s", character, target)
 
     def _fetch(self, item: dict[str, Any], dest: Path, job: _Job, base: int) -> Path:
-        """把一个文件下到 `dest`（校验通过才算），返回 `dest`。逐个地址试，断点续传。"""
+        """轮流尝试各源，再退避重试；中断保留断点，完整文件必须通过 SHA-256。"""
         size, digest = int(item["size"]), str(item["sha256"])
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.is_file() and dest.stat().st_size == size and _sha256(dest) == digest:
+            job.done_bytes = base + size
             return dest
         part = dest.with_name(dest.name + ".part")
-        errors: list[str] = []
-        for url in item["urls"]:
-            for _attempt in range(3):
+        errors: dict[str, str] = {}
+        disabled: set[str] = set()
+        urls = list(dict.fromkeys(item["urls"]))
+        for attempt in range(_RETRY_ROUNDS):
+            if not any(url not in disabled for url in urls):
+                break
+            if attempt:
+                delay = _RETRY_DELAY * 2 ** (attempt - 1)
+                job.message = f"连接中断，{delay:g} 秒后自动重试；已下载部分保留"
+                self.publish()
+                sleep(delay)
+            for url in list(urls):
+                if url in disabled:
+                    continue
+                host = urlsplit(url).hostname or "下载源"
                 try:
                     have = part.stat().st_size if part.is_file() else 0
                     if have > size:
                         part.unlink()
                         have = 0
+                    job.done_bytes = base + have
+                    job.message = f"连接 {host}（第 {attempt + 1}/{_RETRY_ROUNDS} 轮）" + (" · 断点续传" if have else "")
+                    self.publish()
                     if have < size:
-                        request = urllib.request.Request(url, headers={"User-Agent": "sts2_autoplay", **({"Range": f"bytes={have}-"} if have else {})})
-                        with _OPENER.open(request, timeout=30) as response:
-                            if have and response.status != 206:      # 这个地址不支持续传：从头来
-                                have = 0
+                        request = urllib.request.Request(url, headers={
+                            "User-Agent": "sts2_autoplay", "Accept-Encoding": "identity",
+                            **({"Range": f"bytes={have}-"} if have else {}),
+                        })
+                        # 每次连接重读代理设置；用户修好代理后点重试无需重启插件。
+                        opener = urllib.request.build_opener(urllib.request.ProxyHandler())
+                        with opener.open(request, timeout=30) as response:
+                            if response.status == 206:
+                                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", ""))
+                                if not match or not (int(match[1]) == have <= int(match[2]) < size == int(match[3])):
+                                    raise ValueError("下载源返回的续传范围不正确")
+                            elif response.status == 200:
+                                have = 0  # 不支持 Range：完整响应必须覆盖，不能追加。
+                            else:
+                                raise ValueError(f"下载源返回异常状态 HTTP {response.status}")
+                            job.done_bytes = base + have
+                            job.message = f"正在下载 · {host}"
                             with open(part, "ab" if have else "wb") as handle:
                                 while True:
-                                    chunk = response.read(_CHUNK)
+                                    interrupted = None
+                                    try:
+                                        chunk = response.read1(_CHUNK)
+                                    except http.client.IncompleteRead as exc:
+                                        chunk, interrupted = exc.partial, exc
+                                    if have + len(chunk) > size:
+                                        raise ValueError("下载内容超过清单大小")
+                                    if chunk:
+                                        handle.write(chunk)
+                                        have += len(chunk)
+                                        job.done_bytes = base + have
+                                        self.publish(force=False)
+                                    if interrupted is not None:
+                                        raise interrupted
                                     if not chunk:
                                         break
-                                    handle.write(chunk)
-                                    have += len(chunk)
-                                    job.done_bytes = base + min(have, size)
-                                    self.publish(force=False)
-                    if part.stat().st_size != size or _sha256(part) != digest:
-                        part.unlink()
-                        raise ValueError("大小或 SHA-256 与清单不符")
+                    if have < size:
+                        # 短响应/提前 EOF 不是哈希损坏：保留文件，下一源从该位置继续。
+                        raise ConnectionError("连接提前结束，保留已下载部分")
+                    job.message = "正在校验 SHA-256"
+                    self.publish()
+                    if _sha256(part) != digest:
+                        part.unlink(missing_ok=True)
+                        job.done_bytes = base
+                        raise _IntegrityError("SHA-256 与清单不符，已丢弃损坏文件")
                     os.replace(part, dest)
                     return dest
-                except (OSError, ValueError, urllib.error.URLError) as exc:
-                    errors.append(f"{url.split('/')[2]}: {type(exc).__name__}: {exc}")
-        raise RuntimeError(f"{item['name']} 下载失败（{'; '.join(errors[-3:])}）")
+                except (OSError, ValueError, http.client.HTTPException) as exc:
+                    if isinstance(exc, urllib.error.HTTPError):
+                        if exc.code == 416:
+                            part.unlink(missing_ok=True)
+                            job.done_bytes = base
+                        elif exc.code not in (408, 425, 429) and not 500 <= exc.code < 600:
+                            disabled.add(url)
+                        reason = f"HTTP {exc.code}"
+                        exc.close()
+                    elif isinstance(exc, ValueError):
+                        if isinstance(exc, _IntegrityError):
+                            # 可能是旧断点损坏，不能把当前正常镜像永久排除。
+                            # 下一轮优先向当前源请求完整文件，避免再次拼入坏前缀。
+                            urls.remove(url)
+                            urls.insert(0, url)
+                        else:
+                            disabled.add(url)
+                        # 无效范围未写入文件；只有超长内容需要丢弃。
+                        if str(exc) == "下载内容超过清单大小":
+                            part.unlink(missing_ok=True)
+                            job.done_bytes = base
+                        reason = str(exc)
+                    else:
+                        reason = "连接超时或中断，请检查网络/系统代理"
+                    errors[host] = reason
+                    self._log("%s 下载尝试失败 [%s, 第 %s 轮]：%s: %s", item["name"], host, attempt + 1, type(exc).__name__, exc)
+                    job.message = f"{host}：{reason}；正在尝试备用源"
+                    self.publish()
+        job.message = "下载未完成，点击重试会继续使用已保存的断点"
+        raise RuntimeError(f"{item['name']} 下载失败（{'；'.join(f'{host}：{reason}' for host, reason in errors.items())}）。"
+                           "已保留可续传进度，请检查网络或系统代理后点击重试。")
 
 
 def _sha256(path: Path) -> str:

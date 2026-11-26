@@ -35,6 +35,48 @@
       "new": "var me = RunSession.Me;",
       "hits": 1,
       "why": "multiplayer: the observer is the local player, not run slot 0"
+    },
+    {
+      "file": "Engine/Obs/Cards.cs",
+      "old": "copy.UpgradeInternal();",
+      "new": "NekoComm.Game.GameApiCompat.UpgradeInternal(copy);",
+      "hits": 1,
+      "why": "binary-compatible upgrade preview across game versions"
+    },
+    {
+      "file": "Engine/Obs/Characters/Fool.cs",
+      "old": "a.Status == ArrowStatus.Destroyed",
+      "new": "NekoComm.Game.GameApiCompat.IsDestroyedArrow(a.Status)",
+      "hits": 1,
+      "why": "optional destroyed arrow state"
+    },
+    {
+      "file": "Engine/Obs/Characters/Fool.cs",
+      "old": "MegaCrit.Sts2.Core.Commands.MelodyCmd.MelodyCardsPlayedThisTurn(me)",
+      "new": "NekoComm.Game.GameApiCompat.MelodyCardsPlayedThisTurn(me)",
+      "hits": 1,
+      "why": "count finished melody plays"
+    },
+    {
+      "file": "Engine/Obs/Gains26.cs",
+      "old": "l is FreeCardPower or FreeAttackPower or FreeSkillPower or FreePowerPower",
+      "new": "NekoComm.Game.GameApiCompat.IsFreeCardPower(l) || l is FreeAttackPower or FreeSkillPower or FreePowerPower",
+      "hits": 1,
+      "why": "optional general free-card power; retain typed free powers"
+    },
+    {
+      "file": "Engine/Obs/Gains26.cs",
+      "old": "FreeCardPower => pw.Amount,",
+      "new": "_ when NekoComm.Game.GameApiCompat.IsFreeCardPower(pw) => pw.Amount,",
+      "hits": 1,
+      "why": "optional free-card layers"
+    },
+    {
+      "file": "Engine/Obs/Gains26.cs",
+      "old": "bool quietus = me.Creature.HasPower<QuietusPower>();",
+      "new": "bool quietus = NekoComm.Game.GameApiCompat.SupportsArrowDestruction && me.Creature.HasPower<QuietusPower>();",
+      "hits": 1,
+      "why": "Quietus no longer destroys arrows on games without arrow destruction"
     }
   ],
   "files": {
@@ -44,10 +86,10 @@
     "Engine/Obs/Access.cs": "eea8bd8166baf702137c44a2ad9b1244b1a4bc78a25007f1dbb721588fd4f9f3",
     "Engine/Obs/Cand29.cs": "1a39f86039cb47915ac1535195f8eb6c86060fc18728f0d649718272fc9d83e9",
     "Engine/Obs/Candidates.cs": "11c77a9451a10e6ffd2a439d887fe461d6aa6c0d85d9a1b8a454b20482254480",
-    "Engine/Obs/Cards.cs": "7d59960388dfd4c241ec060c9be1a32df84eec0389ac2ac80279d18b11357e22",
+    "Engine/Obs/Cards.cs": "f2aebba5e229231a1d152d1513c7e03f0b39d35d96803c6f9054151c19aad51a",
     "Engine/Obs/Characters/Defect.cs": "38192caf355cfa0ad6c6313020cddd341248c1311502c0cae08924fd3fdf819f",
     "Engine/Obs/Characters/Defect29.cs": "46817c564b829dbae28991a45a5a17eb0c6ed47956907c3f5831da12d87e6337",
-    "Engine/Obs/Characters/Fool.cs": "fda429ffe3c5d2225daf5ea84ad38aa2b713a21f172948ffa8498907ddf17307",
+    "Engine/Obs/Characters/Fool.cs": "da70feca13d14c85f66e2fad7092d9dcd9ad3d0475d760c689a9c5ee4a52bcc4",
     "Engine/Obs/Characters/Ironclad.cs": "27bf56f3f922897cc4515f8933df602adb35f5845012eca2260bc56867a58e7a",
     "Engine/Obs/Characters/Necrobinder.cs": "98cd599be34daa58aeab056114da2b5ebf921037d50ff65db6c240be4a954c41",
     "Engine/Obs/Characters/Regent.cs": "0760e6fb2f17df852b1a49e2249a0fe35cc969b8037a51c8a0c9527c19146b12",
@@ -62,7 +104,7 @@
     "Engine/Obs/EndTurn29.cs": "86f147e4c681b318414fb7fbcd8aa0f23ebf00fb8060845f923c4749c102208d",
     "Engine/Obs/Events.cs": "bdf1f4787f66faefbc9ab506016509c82db118bade6b45c830a912ee1fe02ffd",
     "Engine/Obs/Format.cs": "3150d4c32f8d24eaecd84bded960cd8d16da506b506cd507665efd0a31459c7c",
-    "Engine/Obs/Gains26.cs": "0a37e3c528227acddb55d3f7f3099f47a4a94c02c56af2b89e44f3d83318fa27",
+    "Engine/Obs/Gains26.cs": "100a9c3ded3a20f36d81e4280647fa06a1223e0f19f1ff1d3c5d35a897a2bd04",
     "Engine/Obs/Gains29.cs": "4e3cfb9b271080168648b979f294bc131a472277a7f905ae7fae2e54ff4222f3",
     "Engine/Obs/Header.cs": "f077ff04145cba1748d1d91fac08d8dbbfc4b9b19529594afc8a01096a799644",
     "Engine/Obs/Knap29.cs": "2700506c0d6326aa2c1b17b22bce9bd4176d83ab14e447b497cc435d5966a9ea",

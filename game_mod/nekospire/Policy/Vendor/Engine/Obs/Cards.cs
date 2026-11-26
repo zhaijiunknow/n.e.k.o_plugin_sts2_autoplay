@@ -349,7 +349,7 @@ public sealed partial class Observation
         {
             if (!c.IsUpgradable) return null;
             var copy = (CardModel)c.ClonePreservingMutability();
-            copy.UpgradeInternal();
+            NekoComm.Game.GameApiCompat.UpgradeInternal(copy);
             return copy;
         }
         catch { return null; }

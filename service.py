@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from hashlib import sha1
+from math import ceil
 from pathlib import Path
 from random import random
 from time import time
@@ -23,6 +24,7 @@ from .heuristic_planner import (
     MAP_POLICY_WAIT,
     STS2HeuristicPlanner,
     normalize_map_policy,
+    validate_map_vote_wait_seconds,
 )
 from .history_view import static_dir, write_history_view
 from .instructions import normalize_guidance_instruction
@@ -182,23 +184,7 @@ class STS2AutoplayService:
         # ★ t31：怪物/事件实例知识库采集开关。默认开。
         #   关掉只停止累积（不影响自动游玩、不影响任何决策）。
         self._encounter_memory_enabled = bool(self._cfg.get("encounter_memory_enabled", True))
-        # 地图投票：跟随玩家（co-op 队友先投就跟着投），以及无人投票时的等待秒数。
-        # 地图投票策略：wait（默认，彻底等玩家发话）/ follow（自动跟票）/ auto（自己选）。
-        # 兼容旧配置：只有 map_follow_player 布尔而没有 map_policy 时，true->follow、false->auto。
-        if "map_policy" in self._cfg:
-            self._map_policy = normalize_map_policy(self._cfg.get("map_policy"))
-        elif "map_follow_player" in self._cfg:
-            self._map_policy = MAP_POLICY_FOLLOW if self._cfg.get("map_follow_player") else MAP_POLICY_AUTO
-        else:
-            self._map_policy = MAP_POLICY_WAIT
-        try:
-            self._map_vote_wait_seconds = max(0.0, float(self._cfg.get("map_vote_wait_seconds", 20) or 20))
-        except (TypeError, ValueError):
-            self._map_vote_wait_seconds = 20.0
-        self._planner.configure_map_policy(
-            policy=self._map_policy,
-            vote_wait_seconds=self._map_vote_wait_seconds,
-        )
+        self._configure_map_policy_from_config()
         base_url = self._resolve_base_url()
         self._state.base_url = base_url
         self._apply_control_mode("program")
@@ -360,10 +346,12 @@ class STS2AutoplayService:
                 self._catgirl_client = self._build_client(address)
             self._client = self._catgirl_client
             standdown = await self._push_driver_standdown(self._catgirl_client)
+            await self.sync_map_policy_to_mod()
         else:
             if self._host_client is None:
                 self._host_client = self._build_client(self._host_base_url)
             self._client = self._host_client
+            await self.sync_map_policy_to_mod()
             standdown = {"applied": False}
         self._state.active_instance = wanted
         self._state.catgirl_base_url = self._catgirl_base_url if wanted == self.INSTANCE_CATGIRL else ""
@@ -1811,8 +1799,30 @@ class STS2AutoplayService:
 
     # ---- 对话式地图协作（sts2_set_route）-----------------------------------------------
 
-    def set_map_policy(self, policy: str) -> dict[str, Any]:
+    def _configure_map_policy_from_config(self) -> None:
+        # 地图投票：跟随玩家（co-op 队友先投就跟着投），以及无人投票时的等待秒数。
+        # 地图投票策略：wait（默认，彻底等玩家发话）/ follow（自动跟票）/ auto（自己选）。
+        # 兼容旧配置：只有 map_follow_player 布尔而没有 map_policy 时，true->follow、false->auto。
+        if "map_policy" in self._cfg:
+            self._map_policy = normalize_map_policy(self._cfg.get("map_policy"))
+        elif "map_follow_player" in self._cfg:
+            self._map_policy = MAP_POLICY_FOLLOW if self._cfg.get("map_follow_player") else MAP_POLICY_AUTO
+        else:
+            self._map_policy = MAP_POLICY_WAIT
+        try:
+            self._map_vote_wait_seconds = validate_map_vote_wait_seconds(self._cfg.get("map_vote_wait_seconds", 20))
+        except (TypeError, ValueError):
+            self._map_vote_wait_seconds = 20.0
+        self._planner.configure_map_policy(
+            policy=self._map_policy,
+            vote_wait_seconds=self._map_vote_wait_seconds,
+        )
+
+    def set_map_policy(self, policy: str, *, vote_wait_seconds: float | None = None) -> dict[str, Any]:
         """切换地图投票策略。默认 wait：不投票也不跟票，等玩家发话。"""
+        if vote_wait_seconds is not None:
+            self._map_vote_wait_seconds = validate_map_vote_wait_seconds(vote_wait_seconds)
+            self._cfg["map_vote_wait_seconds"] = self._map_vote_wait_seconds
         self._map_policy = normalize_map_policy(policy)
         self._cfg["map_policy"] = self._map_policy
         self._planner.configure_map_policy(
@@ -1822,10 +1832,11 @@ class STS2AutoplayService:
         self._emit_status()
         message = {
             MAP_POLICY_WAIT: "地图我等你发话，你不说我不投。",
-            MAP_POLICY_FOLLOW: "地图我会自动跟你投同一个节点。",
+            MAP_POLICY_FOLLOW: f"地图我会跟你投同一个节点；联机时没人投票，我等 {self._map_vote_wait_seconds:g} 秒后自己选。",
             MAP_POLICY_AUTO: "地图我自己按稳妥的挑。",
         }[self._map_policy]
-        return {"status": "ok", "message": message, "summary": message, "policy": self._map_policy}
+        return {"status": "ok", "message": message, "summary": message, "policy": self._map_policy,
+                "vote_wait_seconds": self._map_vote_wait_seconds}
 
     async def sync_map_policy_to_mod(self) -> dict[str, Any]:
         """把等待策略写给 mod，让 mod 自己的自动玩循环也别抢路线。
@@ -1838,7 +1849,11 @@ class STS2AutoplayService:
         except Exception:
             return {"applied": False, "policy": self._map_policy}
         try:
-            await client.set_config(coop_map_policy=self._map_policy)
+            await client.set_config(
+                coop_map_policy=self._map_policy,
+                # mod 接口是整数秒，向上取整，不能比插件更早抢票。
+                coop_map_vote_wait_seconds=ceil(self._map_vote_wait_seconds),
+            )
             return {"applied": True, "policy": self._map_policy}
         except Exception as exc:
             self.logger.debug(f"[sts2] sync map policy to mod failed (non-fatal): {exc}")

@@ -165,6 +165,7 @@ SPECIAL_ARGS: dict[str, list[dict[str, Any]]] = {
     "sts2_set_instance": [{"instance": "host"}, {"instance": "catgirl"}],
     # 策略网络的下载入口有本机副作用（下几百 MB、删模型文件），冒烟不调用它们：参数组为空表。
     # 只读的 sts2_policy_status 照常调用。
+    "sts2_set_map_policy": [],  # 会保存用户配置，实机冒烟不要改。
     "sts2_policy_prepare_runtime": [],
     "sts2_policy_download_model": [],
     "sts2_policy_remove_model": [],

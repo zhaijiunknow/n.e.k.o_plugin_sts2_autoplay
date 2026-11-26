@@ -2135,7 +2135,7 @@ internal static class HotFoolTarot
         if (scratch.NeedsChoice || arrowIdx < 0)
             return false;
 
-        if (destroyAfterImpaled)
+        if (NekoComm.Game.GameApiCompat.SupportsArrowDestruction && destroyAfterImpaled)
             s.Fool.Arrows[arrowIdx] |= ArrowDestroyBit;
 
         if (HotCombatEngine.IsValidEnemyTarget(in s, targetEnemySlot))
@@ -2284,7 +2284,7 @@ internal static class HotFoolTarot
             }
 
             // 2. QuietusPower sets DestroyAfterImpaled = true on shot arrow if from a card.
-            if (sourceCardDefId != 0 && HotCombatEngine.GetPowerAmountById(in s, rules, 0, HotPowerId.QuietusPower) > 0)
+            if (NekoComm.Game.GameApiCompat.SupportsArrowDestruction && sourceCardDefId != 0 && HotCombatEngine.GetPowerAmountById(in s, rules, 0, HotPowerId.QuietusPower) > 0)
                 s.Fool.Arrows[arrowIdx] |= ArrowDestroyBit;
         }
 
@@ -2412,13 +2412,13 @@ internal static class HotFoolTarot
                     RemoveArrowFromImpaled(ref s, rules, liveIdx, arrowIdx);
                 }
             }
-            s.Fool.Arrows[arrowIdx] = PackArrow(ArrowStatus.Destroyed, destroyAfterImpaled: true, impaledEnemySlot: -1);
+            s.Fool.Arrows[arrowIdx] = PackArrow(NekoComm.Game.GameApiCompat.DestroyedArrowStatus, destroyAfterImpaled: true, impaledEnemySlot: -1);
         }
         else if (!aliveAfter)
         {
             DislodgeAllArrowsFromEnemy(ref s, ref cold, rules, scratch, targetEnemySlot, sourceCardDefId);
             if (GetArrowStatus(s.Fool.Arrows[arrowIdx]) != ArrowStatus.Retrieved
-                && GetArrowStatus(s.Fool.Arrows[arrowIdx]) != ArrowStatus.Destroyed)
+                && !NekoComm.Game.GameApiCompat.IsDestroyedArrow(GetArrowStatus(s.Fool.Arrows[arrowIdx])))
             {
                 FireAfterArrowDislodged(ref s, ref cold, rules, scratch, sourceCardDefId);
                 s.Fool.Arrows[arrowIdx] = PackArrow(ArrowStatus.Retrieved, destroyAfterImpaled: false, impaledEnemySlot: -1);
@@ -2462,7 +2462,7 @@ internal static class HotFoolTarot
                 bool destroyAfter = (packed & ArrowDestroyBit) != 0;
                 if (destroyAfter)
                 {
-                    s.Fool.Arrows[a] = PackArrow(ArrowStatus.Destroyed, destroyAfterImpaled: true, impaledEnemySlot: -1);
+                    s.Fool.Arrows[a] = PackArrow(NekoComm.Game.GameApiCompat.DestroyedArrowStatus, destroyAfterImpaled: true, impaledEnemySlot: -1);
                 }
                 else
                 {
@@ -2498,7 +2498,7 @@ internal static class HotFoolTarot
         bool destroyAfter = (s.Fool.Arrows[arrowIdx] & ArrowDestroyBit) != 0;
         if (destroyAfter)
         {
-            s.Fool.Arrows[arrowIdx] = PackArrow(ArrowStatus.Destroyed, destroyAfterImpaled: true, impaledEnemySlot: -1);
+            s.Fool.Arrows[arrowIdx] = PackArrow(NekoComm.Game.GameApiCompat.DestroyedArrowStatus, destroyAfterImpaled: true, impaledEnemySlot: -1);
             return;
         }
 

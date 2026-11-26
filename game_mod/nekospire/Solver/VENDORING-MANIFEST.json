@@ -52,10 +52,13 @@
     }
   },
   "local_patches": {
+    "HotKernel/Import/HotRootBuilder.cs": 2,
     "HotKernel/Rules/HotCombatRulesSnapshot.cs": 3,
+    "HotKernel/Sim/Content/HotFoolTarot.cs": 6,
     "HotKernel/Sim/Content/HotMonsters.cs": 4,
     "HotKernel/Sim/HotCombatEngine.Damage.cs": 2,
     "Runtime/BattleDamageTracker.cs": 1,
+    "Runtime/SolverDisplayNames.cs": 1,
     "Search/GrowthPolicy.cs": 1
   },
   "files": [
@@ -80,7 +83,7 @@
     {
       "path": "HotKernel/Import/HotRootBuilder.cs",
       "lines": 3179,
-      "sha256": "e1753fa29a6758264facbfc900a34e224d6ee6a9afb695890ec001afd3a7ddde",
+      "sha256": "74295bfb17c88d57e58a6df90e1e208c7493293cf44c8419234e95b0a0beebc4",
       "verbatim": false
     },
     {
@@ -152,8 +155,8 @@
     {
       "path": "HotKernel/Sim/Content/HotFoolTarot.cs",
       "lines": 2843,
-      "sha256": "e3bdbd1296f9a33ec918920a70c6c65f66e44611a2c4d995bf57124504d1cf60",
-      "verbatim": true
+      "sha256": "cae886d989ce50b46fd92225daeed17f2c69e605b49d75658ae77c96d1ea20a6",
+      "verbatim": false
     },
     {
       "path": "HotKernel/Sim/Content/HotMonsters.cs",
@@ -446,8 +449,8 @@
     {
       "path": "Runtime/SolverDisplayNames.cs",
       "lines": 317,
-      "sha256": "0167a0691dfae2f7191d8fb5c58a7006ad7f2cd42336cd26dcb581b158aee9fc",
-      "verbatim": true
+      "sha256": "c97b830bb6e85d48cf4b6871b6820d41acbb41d5d526f7fd84ec79dbd85a318f",
+      "verbatim": false
     },
     {
       "path": "Runtime/SolverProgress.cs",

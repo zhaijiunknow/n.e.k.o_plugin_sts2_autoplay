@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
+import socket
 import threading
 import time
 import zipfile
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from plugin.plugins.sts2_autoplay import policy_assets as assets_module
 from plugin.plugins.sts2_autoplay.policy_assets import MANIFEST_PATH, PolicyAssets
 
 
@@ -46,6 +49,11 @@ class _Server:
 
     def __init__(self) -> None:
         self.corrupt: set[str] = set()
+        self.truncate: dict[str, int] = {}
+        self.disconnect: set[str] = set()
+        self.ignore_range: set[str] = set()
+        self.invalid_range: set[str] = set()
+        self.http_errors: dict[str, int] = {}
         self.requests: list[tuple[str, str | None]] = []
         outer = self
 
@@ -53,6 +61,13 @@ class _Server:
             def do_GET(self) -> None:  # noqa: N802
                 name = self.path.strip("/").split("/")[-1]
                 outer.requests.append((self.path, self.headers.get("Range")))
+                if self.path in outer.disconnect:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    return
+                if self.path in outer.http_errors:
+                    self.send_error(outer.http_errors[self.path])
+                    return
                 data = FILES.get(name)
                 if data is None:
                     self.send_error(404)
@@ -60,10 +75,18 @@ class _Server:
                 if self.path in outer.corrupt:
                     data = b"!" * len(data)
                 start = int((self.headers.get("Range") or "bytes=0-").split("=")[1].rstrip("-"))
+                if self.path in outer.ignore_range:
+                    start = 0
                 self.send_response(206 if start else 200)
+                if start:
+                    offset = start + 1 if self.path in outer.invalid_range else start
+                    self.send_header("Content-Range", f"bytes {offset}-{len(data) - 1}/{len(data)}")
                 self.send_header("Content-Length", str(len(data) - start))
                 self.end_headers()
-                self.wfile.write(data[start:])
+                body = data[start:]
+                if self.path in outer.truncate:
+                    body = body[:outer.truncate[self.path]]
+                self.wfile.write(body)
 
             def log_message(self, *args: Any) -> None:
                 return
@@ -82,6 +105,11 @@ def _item(name: str, kind: str, urls: list[str], dest: str | None = None) -> dic
     if dest:
         item["dest"] = dest
     return item
+
+
+@pytest.fixture(autouse=True)
+def no_retry_delay(monkeypatch):
+    monkeypatch.setattr(assets_module, "_RETRY_DELAY", 0)
 
 
 @pytest.fixture()
@@ -230,7 +258,248 @@ def test_shipped_manifest_is_self_consistent() -> None:
     version = manifest["upstream"]["game_version"]
     assert catalog == {
         "engine/catalog/vocab.txt", "engine/catalog/aliases.txt", "engine/catalog/no_downside_relics.txt",
-        f"engine/catalog/{version}/catalog.json",
+        f"engine/catalog/{version}/catalog.json", "engine/catalog/v0.111.0/catalog.json",
     }
     commit = manifest["upstream"]["commit"]
     assert all(commit in url for item in manifest["runtime"] if item["kind"] == "catalog" for url in item["urls"]), "词表必须钉在同一个上游提交上"
+
+
+@pytest.mark.unit
+def test_short_response_resumes_on_next_mirror(server: _Server, tmp_path: Path) -> None:
+    server.truncate["/short/model.pt"] = 12345
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server, model_urls=[
+        f"{server.base}/short/model.pt", f"{server.base}/good/model.pt",
+    ]))
+    assets.download_model("IRONCLAD")
+    assert _wait(assets, _model)["state"] == "done"
+    assert server.requests == [("/short/model.pt", None), ("/good/model.pt", "bytes=12345-")]
+    assert assets.model_path("IRONCLAD").read_bytes() == FILES["model.pt"]
+
+
+@pytest.mark.unit
+def test_remote_disconnect_tries_backup_before_retry(server: _Server, tmp_path: Path) -> None:
+    server.disconnect.add("/closed/model.pt")
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server, model_urls=[
+        f"{server.base}/closed/model.pt", f"{server.base}/good/model.pt",
+    ]))
+    assets.download_model("IRONCLAD")
+    assert _wait(assets, _model)["state"] == "done"
+    assert [path for path, _ in server.requests] == ["/closed/model.pt", "/good/model.pt"]
+
+
+@pytest.mark.unit
+def test_failed_download_keeps_progress_for_user_retry(server: _Server, tmp_path: Path) -> None:
+    server.truncate["/a/model.pt"] = 10000
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server))
+    assets.download_model("IRONCLAD")
+    job = _wait(assets, _model)
+    assert job["state"] == "failed"
+    assert job["done_bytes"] == 30000
+    part = tmp_path / "downloads/model.pt.part"
+    assert part.read_bytes() == FILES["model.pt"][:30000]
+    server.truncate.clear()
+    assets.download_model("IRONCLAD")
+    assert _wait(assets, _model)["state"] == "done"
+    assert server.requests[-1] == ("/a/model.pt", "bytes=30000-")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode", ["ignore", "invalid"])
+def test_resume_validates_response(server: _Server, tmp_path: Path, mode: str) -> None:
+    getattr(server, "ignore_range" if mode == "ignore" else "invalid_range").add("/a/model.pt")
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server, model_urls=[
+        f"{server.base}/a/model.pt", f"{server.base}/good/model.pt",
+    ]))
+    part = tmp_path / "downloads/model.pt.part"
+    part.parent.mkdir()
+    part.write_bytes(FILES["model.pt"][:10000])
+    assets.download_model("IRONCLAD")
+    assert _wait(assets, _model)["state"] == "done"
+    assert assets.model_path("IRONCLAD").read_bytes() == FILES["model.pt"]
+    if mode == "invalid":
+        assert server.requests[-1] == ("/good/model.pt", "bytes=10000-")
+    else:
+        assert len(server.requests) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("code, attempts", [(404, 1), (403, 1), (429, 3), (503, 3)])
+def test_bounded_http_retries(server: _Server, tmp_path: Path, code: int, attempts: int) -> None:
+    server.http_errors["/a/model.pt"] = code
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server))
+    assets.download_model("IRONCLAD")
+    job = _wait(assets, _model)
+    assert job["state"] == "failed" and f"HTTP {code}" in job["error"]
+    assert len(server.requests) == attempts
+
+
+@pytest.mark.unit
+def test_runtime_cleanup_preserves_other_downloads(server: _Server, tmp_path: Path) -> None:
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server))
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    (downloads / "model.pt.part").write_bytes(b"partial checkpoint")
+    (downloads / "model.pt").write_bytes(b"completed checkpoint awaiting install")
+    assets.ensure_runtime()
+    assert _wait(assets, _runtime)["state"] == "done"
+    assert (downloads / "model.pt.part").read_bytes() == b"partial checkpoint"
+    assert (downloads / "model.pt").read_bytes() == b"completed checkpoint awaiting install"
+    assert not (downloads / "python.zip").exists()
+
+
+@pytest.mark.unit
+def test_download_jobs_are_queued(tmp_path: Path) -> None:
+    assets = PolicyAssets(root=tmp_path, manifest={})
+    release = threading.Event()
+    first_two = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def work(job):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            if active == 2:
+                first_two.set()
+        assert release.wait(5)
+        with lock:
+            active -= 1
+
+    jobs = [assets_module._Job() for _ in range(4)]
+    try:
+        for job in jobs:
+            assets._start(job, work)
+        assert first_two.wait(5)
+        assert maximum == 2
+        assert jobs[2].state == "running" and "排队" in jobs[2].message
+    finally:
+        release.set()
+        for job in jobs:
+            if job.thread:
+                job.thread.join(5)
+    assert maximum == 2 and all(job.state == "done" for job in jobs)
+
+
+@pytest.mark.unit
+def test_bad_partial_does_not_blacklist_healthy_mirror(server: _Server, tmp_path: Path) -> None:
+    server.truncate["/bad/model.pt"] = 10000
+    server.corrupt.add("/bad/model.pt")
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server, model_urls=[
+        f"{server.base}/bad/model.pt", f"{server.base}/good/model.pt",
+    ]))
+    assets.download_model("IRONCLAD")
+    assert _wait(assets, _model)["state"] == "done"
+    assert server.requests == [
+        ("/bad/model.pt", None), ("/good/model.pt", "bytes=10000-"), ("/good/model.pt", None),
+    ]
+    assert assets.model_path("IRONCLAD").read_bytes() == FILES["model.pt"]
+
+
+@pytest.mark.unit
+def test_timeout_refreshes_opener_and_backs_off(server: _Server, tmp_path: Path, monkeypatch) -> None:
+    build = assets_module.urllib.request.build_opener
+    builds = []
+    sleeps = []
+
+    class TimeoutOpener:
+        def open(self, request, timeout):
+            assert timeout == 30
+            raise TimeoutError("connect timeout")
+
+    def opener(*args):
+        builds.append(args)
+        return TimeoutOpener() if len(builds) < 3 else build(*args)
+
+    monkeypatch.setattr(assets_module.urllib.request, "build_opener", opener)
+    monkeypatch.setattr(assets_module, "_RETRY_DELAY", 2)
+    monkeypatch.setattr(assets_module, "sleep", sleeps.append)
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server))
+    assets.download_model("IRONCLAD")
+    assert _wait(assets, _model)["state"] == "done"
+    assert sleeps == [2, 4] and len(builds) == 3
+
+
+@pytest.mark.unit
+def test_incomplete_read_preserves_exception_partial(server: _Server, tmp_path: Path, monkeypatch) -> None:
+    build = assets_module.urllib.request.build_opener
+    calls = []
+
+    class BrokenResponse:
+        status = 200
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read1(self, size):
+            raise http.client.IncompleteRead(FILES["model.pt"][:777], 1000)
+
+    class BrokenOpener:
+        def open(self, request, timeout):
+            return BrokenResponse()
+
+    def opener(*args):
+        calls.append(1)
+        return BrokenOpener() if len(calls) == 1 else build(*args)
+
+    monkeypatch.setattr(assets_module.urllib.request, "build_opener", opener)
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server))
+    assets.download_model("IRONCLAD")
+    assert _wait(assets, _model)["state"] == "done"
+    assert server.requests == [("/a/model.pt", "bytes=777-")]
+    assert assets.model_path("IRONCLAD").read_bytes() == FILES["model.pt"]
+
+
+@pytest.mark.unit
+def test_catalog_added_by_upgrade_repairs_without_redownloading_runtime_or_models(server: _Server, tmp_path: Path) -> None:
+    manifest = _manifest(server)
+    old = PolicyAssets(root=tmp_path, manifest=manifest)
+    old.ensure_runtime()
+    assert _wait(old, _runtime)["state"] == "done"
+    old.download_model("IRONCLAD")
+    assert _wait(old, _model)["state"] == "done"
+    manifest["runtime"].append(_item("aliases.txt", "catalog", [f"{server.base}/a/aliases.txt"], "engine/catalog/v0.111.0/catalog.json"))
+    upgraded = PolicyAssets(root=tmp_path, manifest=manifest)
+    state = upgraded.status()["runtime"]
+    assert not state["ready"] and state["repair_needed"]
+    assert state["missing_catalogs"] == ["engine/catalog/v0.111.0/catalog.json"]
+    assert state["repair_bytes"] == len(FILES["aliases.txt"])
+    assert upgraded.model_ready("IRONCLAD")
+    server.requests.clear()
+    upgraded.ensure_runtime()
+    assert _wait(upgraded, _runtime)["state"] == "done" and upgraded.runtime_ready()
+    assert server.requests == [("/a/aliases.txt", None)]
+    assert upgraded.model_path("IRONCLAD").read_bytes() == FILES["model.pt"]
+    assert not upgraded.status()["runtime"]["repair_needed"]
+
+
+@pytest.mark.unit
+def test_same_size_catalog_corruption_is_repaired_and_hash_is_cached(server: _Server, tmp_path: Path, monkeypatch) -> None:
+    assets = PolicyAssets(root=tmp_path, manifest=_manifest(server))
+    assets.ensure_runtime()
+    assert _wait(assets, _runtime)["state"] == "done"
+    original = assets_module._sha256
+    hashed = []
+
+    def counted(path):
+        hashed.append(path)
+        return original(path)
+
+    monkeypatch.setattr(assets_module, "_sha256", counted)
+    assert assets.runtime_ready() and assets.runtime_ready()
+    assert not hashed, "unchanged catalogs must not be rehashed every autoplay tick"
+    path = tmp_path / "engine/catalog/aliases.txt"
+    path.write_bytes(b"x" * len(FILES["aliases.txt"]))
+    assert not assets.runtime_ready()
+    assert hashed == [path]
+    assert not assets.runtime_ready() and hashed == [path]
+    server.requests.clear()
+    assets.ensure_runtime()
+    assert _wait(assets, _runtime)["state"] == "done" and assets.runtime_ready()
+    assert server.requests == [("/a/aliases.txt", None)]
+    assert path.read_bytes() == FILES["aliases.txt"]

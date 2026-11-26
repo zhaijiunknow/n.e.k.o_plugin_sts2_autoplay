@@ -15,6 +15,35 @@
 
 ---
 
+## 本地游戏 API 兼容（2026-11-26）
+
+当前安装的游戏不再提供 `ArrowSlot.DestroyAfterImpaled`、`ArrowStatus.Destroyed`、
+`MelodyCmd.MelodyCardsPlayedThisTurn` 和 `FreeCardPower`。共享兼容层在
+`Game/GameApiCompat.cs`：按运行时能力保留旧版行为；无销毁机制时，根导入、Quietus
+模拟和策略候选的箭矢预测都不再设置销毁标记。旋律计数复用旧版的**已完成出牌**历史口径，
+按本地玩家与当前回合过滤，而非统计已开始但未完成的出牌。
+`CardModel.UpgradeInternal` 的无参数/可选 bool 参数签名也按运行时绑定，保持默认的非静默升级行为。
+
+求解器修改登记在 `vendor_local_patches.py`，策略编码器修改登记在
+`vendor-alphadefect.py`；生成目录不要手改。没有 CombatSolver 上游检出时，可以只重放
+新增本地补丁（先逐文件校验当前清单哈希，拒绝覆盖任何未知改动，不升级上游版本）：
+
+```bash
+python game_mod/scripts/vendor-combat-solver.py --refresh-local-patches
+python game_mod/scripts/vendor-combat-solver.py --refresh-local-patches --apply
+```
+
+兼容层的两套最小 API fixture 检查（不依赖 Godot；不是实机验证）：
+
+```bash
+dotnet run --project game_mod/GameApiCompatTests -c Release
+dotnet run --project game_mod/GameApiCompatTests -c Release -p:LegacyApi=true
+```
+
+Python `tests/test_game_api_compat_patches.py` 校验补丁严格命中、可重放、幂等、清单哈希，
+以及箭矢销毁标记的所有模拟写入点都经过能力判断。`PolicyFidelity` 仍使用固定的旧版游戏
+检查观测帧不变；实机加载和当前游戏的战斗回放仍须另外验证。
+
 ## 1. 上游与当前版本
 
 - 上游仓库：<https://github.com/Torch1230/CombatSolver>

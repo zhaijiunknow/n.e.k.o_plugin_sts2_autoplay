@@ -35,7 +35,7 @@ public sealed partial class Observation
             _f[1] = arrows.Count;
             _f[2] = arrows.Count(a => a.Status == ArrowStatus.Retrieved);
             _f[3] = arrows.Count(a => a.Status == ArrowStatus.Away);
-            _f[4] = arrows.Count(a => a.Status == ArrowStatus.Destroyed);
+            _f[4] = arrows.Count(a => NekoComm.Game.GameApiCompat.IsDestroyedArrow(a.Status));
             foreach (var e in CombatManager.Instance.History.Entries)
             {
                 switch (e)
@@ -52,7 +52,7 @@ public sealed partial class Observation
             _f[8] = PlayedCho(me) ? 1 : 0;
             _f[9] = PlayedKi(me) ? 1 : 0;
             _f[10] = MegaCrit.Sts2.Core.Commands.MelodyCmd.MelodiesThisTurn(me);
-            _f[11] = MegaCrit.Sts2.Core.Commands.MelodyCmd.MelodyCardsPlayedThisTurn(me);
+            _f[11] = NekoComm.Game.GameApiCompat.MelodyCardsPlayedThisTurn(me);
             Emit(null, TokenKind.CombatStat, 0, Zone.Ally, playerTok, 0);
         }
         catch { }

@@ -88,7 +88,7 @@ public sealed partial class Observation
     static float CardBlockTotal(CardModel c, float pb, int plays) =>
         plays <= 1 ? pb * plays * BlockGains(c) : BlockGains(c) * (pb + (plays - 1) * PbNoStretch(c, pb));
 
-    static bool IsFreePower(AbstractModel l) => l is FreeCardPower or FreeAttackPower or FreeSkillPower or FreePowerPower;
+    static bool IsFreePower(AbstractModel l) => NekoComm.Game.GameApiCompat.IsFreeCardPower(l) || l is FreeAttackPower or FreeSkillPower or FreePowerPower;
 
     /// <summary>不算“免费出牌”时这张牌的费用（照 CardEnergyCost.GetWithModifiers：Local 之后过 TryModifyEnergyCostInCombat、再过 Late，Late 跳过 Free*Power）。X 费为 −1。</summary>
     static int CostNoFree(CardModel c)
@@ -113,7 +113,7 @@ public sealed partial class Observation
         foreach (var pw in me.Creature.Powers)
             n += pw switch
             {
-                FreeCardPower => pw.Amount,
+                _ when NekoComm.Game.GameApiCompat.IsFreeCardPower(pw) => pw.Amount,
                 FreeAttackPower when c.Type == CardType.Attack => pw.Amount,
                 FreeSkillPower when c.Type == CardType.Skill => pw.Amount,
                 FreePowerPower when c.Type == CardType.Power => pw.Amount,
@@ -159,7 +159,7 @@ public sealed partial class Observation
             var (pd, _, h) = Preview(card, tgt);
             Preview(card, null);
             if (pd < 0) return (0, 0, shots);
-            bool quietus = me.Creature.HasPower<QuietusPower>();
+            bool quietus = NekoComm.Game.GameApiCompat.SupportsArrowDestruction && me.Creature.HasPower<QuietusPower>();
             for (int r = 0; r < plays; r++)
             {
                 if (shoot && r >= shots) continue;

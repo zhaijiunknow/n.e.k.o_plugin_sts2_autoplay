@@ -176,7 +176,7 @@ class PolicyAdvisor:
         if not self.enabled or not character:
             return None
         if not self.assets.runtime_ready():
-            return fail("策略网络的运行环境还没下载（在插件面板的「策略网络」页下载）")
+            return fail("策略网络运行环境缺失或校验失败（打开插件面板的「策略网络」页补齐/修复，无需重下已有模型）")
         if not self.assets.model_ready(character):
             return fail(f"没有下载 {character} 的模型")
         obs_format = await self._obs_format(character, fail)
@@ -294,6 +294,9 @@ class PolicyAdvisor:
             return None
         if not isinstance(info, dict) or not info.get("ok") or not isinstance(info.get("obs_format"), int):
             fail(f"推理旁路加载 {character} 的模型失败：{info.get('error') if isinstance(info, dict) else info}")
+            return None
+        if info.get("content_alignment_version") != 1:
+            fail("推理旁路版本过旧，未验证模型内容特征对齐；请重启插件的推理旁路后重试，当前回落到后备策略")
             return None
         self._formats[character] = int(info["obs_format"])
         self._next_probe_at = 0.0

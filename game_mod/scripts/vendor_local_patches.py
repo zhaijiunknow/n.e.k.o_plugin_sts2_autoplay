@@ -194,3 +194,53 @@ LOCAL_PATCHES: dict[str, list[tuple[str, str]]] = {
 '''),
     ],
 }
+
+
+# Optional game APIs removed after the pinned 0.113.1 engine. Keep every simulation writer of
+# ArrowDestroyBit gated as well as the importer: compiling against a numeric enum alone would
+# incorrectly destroy Quietus arrows on the installed game.
+LOCAL_PATCHES["HotKernel/Import/HotRootBuilder.cs"] = [
+    ("arrow.DestroyAfterImpaled ? 0x10 : 0",
+     "NekoComm.Game.GameApiCompat.ArrowDestroyAfterImpaled(arrow) ? 0x10 : 0"),
+]
+LOCAL_PATCHES["HotKernel/Sim/Content/HotFoolTarot.cs"] = [
+    ("        if (destroyAfterImpaled)\n",
+     "        if (NekoComm.Game.GameApiCompat.SupportsArrowDestruction && destroyAfterImpaled)\n"),
+    ("            if (sourceCardDefId != 0 && HotCombatEngine.GetPowerAmountById(in s, rules, 0, HotPowerId.QuietusPower) > 0)",
+     "            if (NekoComm.Game.GameApiCompat.SupportsArrowDestruction && sourceCardDefId != 0 && HotCombatEngine.GetPowerAmountById(in s, rules, 0, HotPowerId.QuietusPower) > 0)"),
+    ("s.Fool.Arrows[arrowIdx] = PackArrow(ArrowStatus.Destroyed, destroyAfterImpaled: true, impaledEnemySlot: -1);",
+     "s.Fool.Arrows[arrowIdx] = PackArrow(NekoComm.Game.GameApiCompat.DestroyedArrowStatus, destroyAfterImpaled: true, impaledEnemySlot: -1);"),
+]
+# The assignment occurs twice; include its distinct following branch/return as the anchor.
+_assignment = LOCAL_PATCHES["HotKernel/Sim/Content/HotFoolTarot.cs"].pop()
+for _suffix in ("\n        }\n        else if (!aliveAfter)", "\n            return;"):
+    LOCAL_PATCHES["HotKernel/Sim/Content/HotFoolTarot.cs"].append(
+        (_assignment[0] + _suffix, _assignment[1] + _suffix))
+LOCAL_PATCHES["HotKernel/Sim/Content/HotFoolTarot.cs"] += [
+    ("GetArrowStatus(s.Fool.Arrows[arrowIdx]) != ArrowStatus.Destroyed",
+     "!NekoComm.Game.GameApiCompat.IsDestroyedArrow(GetArrowStatus(s.Fool.Arrows[arrowIdx]))"),
+    ("s.Fool.Arrows[a] = PackArrow(ArrowStatus.Destroyed, destroyAfterImpaled: true, impaledEnemySlot: -1);",
+     "s.Fool.Arrows[a] = PackArrow(NekoComm.Game.GameApiCompat.DestroyedArrowStatus, destroyAfterImpaled: true, impaledEnemySlot: -1);"),
+]
+
+
+# UpgradeInternal gained an optional bool parameter; source-compatible is not binary-compatible.
+LOCAL_PATCHES["HotKernel/Import/HotRootBuilder.cs"].append(
+    ("upgModel.UpgradeInternal();", "NekoComm.Game.GameApiCompat.UpgradeInternal(upgModel);"))
+LOCAL_PATCHES["Runtime/SolverDisplayNames.cs"] = [
+    ("card.UpgradeInternal();", "NekoComm.Game.GameApiCompat.UpgradeInternal(card);"),
+]
+
+
+def apply_local_patch_updates(text: str, pairs: list[tuple[str, str]]) -> str:
+    """Replay newly added patches on a manifest-verified vendored file; fail on ambiguous anchors."""
+    for old, new in pairs:
+        if text.count(new) == 1:
+            if old in text.replace(new, "", 1):
+                raise ValueError(f"mixed patched and unpatched anchors: {old[:100]!r}")
+            continue
+        hits = text.count(old)
+        if hits != 1 or new in text:
+            raise ValueError(f"local patch anchor matched {hits} times (expected 1): {old[:100]!r}")
+        text = text.replace(old, new)
+    return text

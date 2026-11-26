@@ -150,6 +150,17 @@
    ]
   },
   {
+   "name": "engine__catalog__v0.111.0__catalog.json",
+   "kind": "catalog",
+   "dest": "engine/catalog/v0.111.0/catalog.json",
+   "size": 572346,
+   "sha256": "fda991c75d9cd9efc10194d564d74a15a2cc3fcbaaf44ab3147b29ef0d084b69",
+   "urls": [
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/v0.111.0/catalog.json",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/v0.111.0/catalog.json"
+   ]
+  },
+  {
    "name": "engine__catalog__aliases.txt",
    "kind": "catalog",
    "dest": "engine/catalog/aliases.txt",
@@ -181,7 +192,8 @@
    "urls": [
     "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v6/ironclad_ema_v24782.pt",
     "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v6/ironclad_ema_v24782.pt"
-   ]
+   ],
+   "content_catalog": "v0.113.1"
   },
   "SILENT": {
    "file": "silent_ema_v26428.pt",
@@ -191,7 +203,8 @@
    "urls": [
     "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v4/silent_ema_v26428.pt",
     "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v4/silent_ema_v26428.pt"
-   ]
+   ],
+   "content_catalog": "v0.111.0"
   },
   "DEFECT": {
    "file": "student_e_v165018.pt",
@@ -201,7 +214,8 @@
    "urls": [
     "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v1/student_e_v165018.pt",
     "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v1/student_e_v165018.pt"
-   ]
+   ],
+   "content_catalog": "v0.111.0"
   },
   "REGENT": {
    "file": "regent_student_e8.pt",
@@ -211,7 +225,8 @@
    "urls": [
     "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v2/regent_student_e8.pt",
     "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v2/regent_student_e8.pt"
-   ]
+   ],
+   "content_catalog": "v0.111.0"
   },
   "NECROBINDER": {
    "file": "necrobinder_raw_v25875.pt",
@@ -221,7 +236,8 @@
    "urls": [
     "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v6/necrobinder_raw_v25875.pt",
     "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v6/necrobinder_raw_v25875.pt"
-   ]
+   ],
+   "content_catalog": "v0.113.1"
   },
   "FOOL": {
    "file": "fool_ema_v24181.pt",
@@ -231,7 +247,8 @@
    "urls": [
     "https://ghfast.top/https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v5/fool_ema_v24181.pt",
     "https://github.com/hmty-CHEN/AlphaDefect-Public/releases/download/weights-v5/fool_ema_v24181.pt"
-   ]
+   ],
+   "content_catalog": "v0.113.1"
   }
  }
 }

@@ -132,16 +132,18 @@ function renderRuntime(rt) {
   const badge = $('rt-badge'), bar = $('rt-bar'), err = $('rt-err');
   const running = rt.state === 'running', failed = rt.state === 'failed' && !rt.ready;
   badge.className = 'badge ' + (rt.ready ? 'ok' : running ? 'run' : failed ? 'bad' : '');
-  badge.textContent = rt.ready ? '已就绪' : running ? '下载中' : failed ? '下载失败' : '未下载';
+  badge.textContent = rt.ready ? '已就绪' : running ? '下载中' : failed ? '下载失败' : rt.repair_needed ? '待补齐' : '未下载';
   bar.hidden = !running;
   if (running) {
     const pct = rt.total_bytes ? Math.min(100, 100 * rt.done_bytes / rt.total_bytes) : 0;
     bar.firstElementChild.style.width = pct.toFixed(1) + '%';
-    $('rt-line').textContent = `${mb(rt.done_bytes)} / ${mb(rt.total_bytes || rt.download_bytes)}　${rt.current || ''}`;
+    $('rt-line').textContent = `${mb(rt.done_bytes)} / ${mb(rt.total_bytes || rt.download_bytes)}　${rt.current || ''}　${rt.message || ''}`;
   } else {
     $('rt-line').textContent = rt.ready
       ? '网络推理用的环境已在本机，不需要再下载。'
-      : `需要下载约 ${mb(rt.download_bytes)}，装好后占用约 600 MB。`;
+      : rt.repair_needed
+        ? `运行环境已有，只需补齐/修复内容目录约 ${mb(rt.repair_bytes)}，无需重下 Python、PyTorch 或模型。`
+        : `需要下载约 ${mb(rt.download_bytes)}，装好后占用约 600 MB。`;
   }
   err.hidden = !failed; err.textContent = failed ? rt.error : '';
   $('rt-retry').hidden = !failed;
@@ -156,8 +158,8 @@ function renderCards(models) {
     card.className = 'char ' + (m.ready ? 'ready' : running ? 'loading' : 'missing');
     card.style.setProperty('--tone', TONES[m.character] || '#64748b');
     const pct = running && m.total_bytes ? Math.min(100, 100 * m.done_bytes / m.total_bytes) : 0;
-    const meta = m.ready ? '已下载 · 该角色交给网络'
-      : running ? `下载中 ${mb(m.done_bytes)} / ${mb(m.total_bytes || m.size)}`
+    const meta = m.ready ? (status.runtime.ready ? '已下载 · 可使用策略网络' : '模型已下载 · 等待运行环境就绪')
+      : running ? `下载中 ${mb(m.done_bytes)} / ${mb(m.total_bytes || m.size)} · ${m.message || "连接中"}`
       : failed ? '下载失败，点击重试'
       : `未下载 · 点击下载（${mb(m.size)}）`;
     card.innerHTML =

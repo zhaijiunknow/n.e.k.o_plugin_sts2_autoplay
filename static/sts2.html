@@ -167,6 +167,25 @@ details summary:hover{background:var(--hover);border-color:var(--primary-border)
     </div>
 
     <div class="card">
+        <h3>联机地图等待</h3>
+        <form onsubmit="event.preventDefault(); saveMapPolicy();">
+            <div class="btn-row">
+                <label>地图策略
+                    <select id="map-policy">
+                        <option value="follow">跟随队友（超时自己选）</option>
+                        <option value="wait">等待玩家指令（无限等待）</option>
+                        <option value="auto">自动选路（不等待）</option>
+                    </select>
+                </label>
+                <label>等待秒数 <input id="map-wait" type="number" min="0" max="86400" step="any" value="20" required style="width:100px"></label>
+                <button class="primary" type="submit">保存并应用</button>
+                <button class="ghost" type="button" onclick="runEntry('sts2_get_status')">读取当前设置</button>
+            </div>
+        </form>
+        <p class="note">仅联机「跟随队友」有效：队友先投票就立即跟票；没人投票才等指定秒数，0 表示不等。单人局不受影响。保存后立即生效并保留到下次启动；修改会重新计时。</p>
+    </div>
+
+    <div class="card">
         <h3>存档</h3>
         <div class="btn-row">
             <button class="primary" onclick="runEntry('sts2_continue_run')">回到存档继续玩</button>
@@ -197,6 +216,13 @@ details summary:hover{background:var(--hover);border-color:var(--primary-border)
 const PLUGIN_ID = 'sts2_autoplay';
 const resultEl = document.getElementById('result');
 
+function saveMapPolicy() {
+    runEntry('sts2_set_map_policy', {
+        policy: document.getElementById('map-policy').value,
+        vote_wait_seconds: Number(document.getElementById('map-wait').value),
+    });
+}
+
 async function runEntry(entryId, args) {
     resultEl.textContent = '执行中…';
     try {
@@ -226,12 +252,19 @@ async function runEntry(entryId, args) {
         const json = item.json || {};
         // 显示摘要或结果
         const data = json.data || {};
+        const mapSettings = data.map_policy || (entryId === 'sts2_set_map_policy' ? data : null);
+        if (mapSettings && typeof mapSettings.policy === 'string') {
+            document.getElementById('map-policy').value = mapSettings.policy;
+            document.getElementById('map-wait').value = mapSettings.vote_wait_seconds;
+        }
         const summary = data.summary || data.message || data;
         resultEl.textContent = typeof summary === 'string' ? summary : JSON.stringify(summary, null, 2);
     } catch (err) {
         resultEl.textContent = '执行失败: ' + err;
     }
 }
+// 只读当前状态，避免把表单默认值误当成已保存配置。
+runEntry('sts2_get_status');
 </script>
 </body>
 </html>

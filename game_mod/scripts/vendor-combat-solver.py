@@ -36,7 +36,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-from vendor_local_patches import LOCAL_PATCHES
+from vendor_local_patches import LOCAL_PATCHES, apply_local_patch_updates
 
 GAME_MOD = Path(__file__).resolve().parents[1]
 SOLVER = GAME_MOD / "nekospire" / "Solver"
@@ -257,16 +257,53 @@ def write_manifest(rules: dict, version: str, head: str, planned: dict[str, str]
     MANIFEST_PATH.write_bytes((json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
 
+
+def refresh_local_patches(rules: dict, apply: bool) -> int:
+    """Apply added recipes without an upstream checkout, only on a hash-verified pinned tree."""
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    planned: dict[str, str] = {}
+    changed: list[str] = []
+    for entry in manifest["files"]:
+        rel = entry["path"]
+        path = (SOLVER / rel).resolve()
+        if not path.is_relative_to(SOLVER.resolve()):
+            raise ValueError(f"manifest path outside Solver: {rel}")
+        text = read_lf(path)
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != entry["sha256"]:
+            raise ValueError(f"{rel}: differs from the pinned manifest; refusing to overwrite")
+        updated = apply_local_patch_updates(text, LOCAL_PATCHES.get(rel, []))
+        planned[rel] = updated
+        if updated != text:
+            changed.append(rel)
+    if set(LOCAL_PATCHES) - set(planned):
+        raise ValueError("local patch targets are missing from the pinned manifest")
+    print(f"verified pinned {manifest['upstream']['commit']}; local patches change {len(changed)} files")
+    for rel in changed:
+        print(f"  ~ {rel}")
+    if apply:
+        for rel in changed:
+            (SOLVER / rel).write_bytes(planned[rel].encode("utf-8"))
+        write_manifest(rules, manifest["upstream"]["version"], manifest["upstream"]["commit"],
+                       planned, manifest["preserved_local_files"])
+    else:
+        print("dry run (pass --apply to write)")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--upstream", default=r"D:\NekoClaw\CombatSolver")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--manifest", action="store_true",
                         help="rewrite VENDORING-MANIFEST.json (requires the tree to already match upstream)")
+    parser.add_argument("--refresh-local-patches", action="store_true",
+                        help="replay local patches on the hash-verified pinned tree without upstream")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 
     rules = json.loads(RULES_PATH.read_text(encoding="utf-8"))
+    if args.refresh_local_patches:
+        return refresh_local_patches(rules, args.apply)
     upstream = Path(args.upstream)
     head = subprocess.run(["git", "-C", str(upstream), "rev-parse", "--short=8", "HEAD"],
                           capture_output=True, check=True, text=True).stdout.strip()

@@ -76,6 +76,8 @@ danmaku_enabled = true
 #   "auto"        = 不等，立即按自己的偏好选。
 # 旧的布尔配置 map_follow_player 仍被识别（true -> follow，false -> auto），但建议改用本项。
 map_policy = "wait"
+# 仅联机 follow 模式有效；0=不等待，支持小数秒，范围 0～86400。wait/auto 与单人局不受影响。
+# 可在「STS2 功能 → 联机地图等待」中修改并保存，下次启动仍生效。
 map_vote_wait_seconds = 20
 # 注意：插件不做任何 LLM 决策，事件房也早已是纯启发式（原 event_llm_* 配置项已移除）。
 
@@ -105,7 +107,7 @@ name = "尖塔2陪玩"
 description = "陪伴你在杀戮尖塔2（Slay the Spire 2）中游玩：自动出牌、局势点评与猫娘 LLM 实时解说（游戏内弹幕）。"
 short_description = "Slay the Spire 2 companion: autoplay, situation commentary, and live AI catgirl danmaku in-game."
 keywords = ["slay the spire", "杀戮尖塔", "陪玩", "autoplay", "companion", "sts2", "肉鸽", "卡牌"]
-version = "0.8.2"
+version = "0.8.3"
 entry = "plugin.plugins.sts2_autoplay:STS2AutoplayPlugin"
 
 # 默认语区**必须显式指定**。SDK 的 PluginI18n.t() 在不传 locale 时只按 default_locale 查表，

@@ -18,6 +18,7 @@ from plugin.sdk.plugin import Err, NekoPluginBase, Ok, SdkError, lifecycle, llm_
 from plugin.sdk.plugin import ui as _ui
 
 from .dispatcher import STS2Dispatcher
+from .heuristic_planner import MAP_POLICIES, validate_map_vote_wait_seconds
 from .service import STS2AutoplayService
 
 JsonObject = dict[str, Any]
@@ -376,6 +377,40 @@ class STS2AutoplayPlugin(NekoPluginBase):
     @_ui.action(id="sts2_disable_companion_mode", label=tr("entries.sts2_disable_companion_mode.name", default="sts2_disable_companion_mode"), tone="default", group="companion", order=20)
     async def sts2_disable_companion_mode(self, **_: Any):
         return await self._run_entry(lambda: self._service.neko.set_companion_mode(False))
+
+    @plugin_entry(
+        id="sts2_set_map_policy",
+        name="联机地图等待设置",
+        description="保存地图策略和联机跟票等待秒数；0 表示不等待，默认 20 秒。wait 无限等指令，auto 立即选路。",
+        llm_result_fields=["summary"],
+        input_schema={
+            "type": "object",
+            "properties": {
+                "policy": {"type": "string", "enum": ["wait", "follow", "auto"], "default": "follow"},
+                "vote_wait_seconds": {"type": "number", "minimum": 0, "maximum": 86400, "default": 20},
+            },
+            "required": ["policy", "vote_wait_seconds"],
+        },
+        metadata={"agent_auto": False},
+    )
+    @_ui.action(id="sts2_set_map_policy", label="联机地图等待设置", tone="default", group="route", order=20)
+    async def sts2_set_map_policy(self, policy: str = "follow", vote_wait_seconds: float = 20, **_: Any):
+        async def apply() -> JsonObject:
+            if policy not in MAP_POLICIES:
+                raise ValueError("地图策略必须是 wait、follow 或 auto")
+            seconds = validate_map_vote_wait_seconds(vote_wait_seconds)
+            patch = {"map_policy": policy, "map_vote_wait_seconds": seconds}
+            # 先保存，失败时不悄悄改变当前行为；宿主按字段合并，不覆盖其余 sts2 配置。
+            await self.config.update({"sts2": patch})
+            self._cfg.update(patch)
+            result = self._service.set_map_policy(policy, vote_wait_seconds=seconds)
+            result["saved"] = True
+            result["mod_sync"] = await self._service.sync_map_policy_to_mod()
+            if not result["mod_sync"].get("applied"):
+                result["summary"] += " 设置已保存；mod 尚未同步，重新连接时重试。"
+            return result
+
+        return await self._run_entry(apply)
 
     @plugin_entry(
         id="sts2_set_danmaku",

@@ -11,7 +11,7 @@ internal static class Router
 {
     private const string ServiceName = "nekospire";
     private const string ProtocolVersion = "2026-03-11-v1";
-    private const string ModVersion = "0.1.0";
+    private const string ModVersion = "0.1.11";
     private const string LogPrefix = "[NekoComm.Router]";
 
     private static long _requestCounter;

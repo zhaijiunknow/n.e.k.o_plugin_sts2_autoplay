@@ -132,7 +132,7 @@ def test_switching_to_the_catgirl_pushes_driver_standdown() -> None:
     assert service._state.active_instance == "catgirl"
     assert service._client is catgirl
     # 关键：必须让它自己的 mod 驱动停手，否则两个驱动会抢动作。
-    assert catgirl.config_writes[-1] == {"coop_control_mode": "hold"}
+    assert catgirl.config_writes[0] == {"coop_control_mode": "hold"}
 
 
 @pytest.mark.unit
@@ -177,7 +177,7 @@ def test_adoption_waits_for_the_catgirl_process_to_come_up() -> None:
     assert result["adopted"] is True
     assert service._state.active_instance == "catgirl"
     assert created and created[0].health_calls >= 1
-    assert created[0].config_writes[-1] == {"coop_control_mode": "hold"}
+    assert created[0].config_writes[0] == {"coop_control_mode": "hold"}
 
 
 @pytest.mark.unit

@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import re
 import time
+from math import isfinite
 from time import monotonic
 from typing import Any
 
@@ -133,6 +134,17 @@ def normalize_map_policy(value: Any) -> str:
     """未知取值一律退化为 wait：宁可不投，也不去抢玩家已经定好的路线。"""
     text = str(value or "").strip().lower()
     return text if text in MAP_POLICIES else MAP_POLICY_WAIT
+
+
+def validate_map_vote_wait_seconds(value: Any) -> float:
+    """UI 与配置共用秒数校验；0 表示不等，拒绝会造成无限等待的 NaN/inf。"""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("地图等待时间必须是 0～86400 秒之间的数字") from exc
+    if isinstance(value, bool) or not isfinite(seconds) or not 0 <= seconds <= 86400:
+        raise ValueError("地图等待时间必须是 0～86400 秒之间的数字")
+    return seconds
 
 
 def parse_map_pick(token: Any, count: int) -> int | None:
@@ -578,7 +590,7 @@ class STS2HeuristicPlanner:
 
     def configure_map_policy(self, *, policy: str, vote_wait_seconds: float) -> None:
         self._map_policy = normalize_map_policy(policy)
-        self._map_vote_wait_seconds = max(0.0, float(vote_wait_seconds or 0))
+        self._map_vote_wait_seconds = validate_map_vote_wait_seconds(vote_wait_seconds)
         self._map_wait_key = ""
         self._map_wait_started_at = 0.0
 

@@ -258,7 +258,7 @@ internal sealed class SolverDisplayNames
                 names[key] = card.Title;
             if (card is DingyDagger || !card.IsUpgradable)
                 return;
-            card.UpgradeInternal();
+            NekoComm.Game.GameApiCompat.UpgradeInternal(card);
             card.FinalizeUpgradeInternal();
         }
     }

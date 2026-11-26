@@ -138,7 +138,7 @@ class _Advisor(PolicyAdvisor):
         return True
 
 
-HEALTH = {"ok": True, "obs_format": 28, "characters": {"IRONCLAD": {}}}
+HEALTH = {"ok": True, "content_alignment_version": 1, "obs_format": 28, "characters": {"IRONCLAD": {}}}
 
 
 def _scored(choice: int, n: int = 3) -> dict[str, Any]:
@@ -170,7 +170,7 @@ def test_off_or_outside_a_run_touches_nothing(advisor: Any, character: str) -> N
 @pytest.mark.parametrize(
     "assets, expect",
     [
-        (_Assets(runtime=False), "运行环境还没下载"),
+        (_Assets(runtime=False), "运行环境缺失或校验失败"),
         (_Assets(models=("SILENT",)), "没有下载 IRONCLAD 的模型"),
         (_Assets(models=()), "没有下载 IRONCLAD 的模型"),
     ],
@@ -443,3 +443,26 @@ def test_recommend_scores_without_acting_and_never_counts_a_fallback() -> None:
     client = _ModClient(_decision(data_id="other"))
     assert asyncio.run(stale.recommend(client, character="IRONCLAD")) is None
     assert client.pushed and stale.fallbacks == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("version", [None, 0, 2])
+def test_old_or_unknown_sidecar_cannot_reuse_a_misaligned_cached_model(version) -> None:
+    health = dict(HEALTH)
+    health["content_alignment_version"] = version
+    advisor = _Advisor(health=health, scored=_scored(0))
+    client = _ModClient(_decision())
+    assert _decide(advisor, client) is None
+    assert not client.formats and not advisor.infer_calls and not advisor._formats
+    assert any("未验证模型内容特征对齐" in line for line in advisor.log.lines)
+
+
+@pytest.mark.unit
+def test_content_alignment_failure_is_visible_in_status_and_log() -> None:
+    reason = "ContentAlignmentError: 缺少内容目录 v0.111.0；请打开策略网络下载页补齐/修复运行环境"
+    advisor = _Advisor(health={"ok": False, "error": reason})
+    client = _ModClient(_decision())
+    assert _decide(advisor, client) is None
+    assert not client.formats and not advisor.infer_calls
+    assert reason in advisor.status()["last_note"]
+    assert any(reason in line for line in advisor.log.lines)

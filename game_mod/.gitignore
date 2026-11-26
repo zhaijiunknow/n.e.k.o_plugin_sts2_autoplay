@@ -41,3 +41,7 @@ SolverSmoke/obj/
 # Offline fidelity check for the AlphaDefect policy seam
 PolicyFidelity/bin/
 PolicyFidelity/obj/
+
+# API compatibility fixture checks
+GameApiCompatTests/bin/
+GameApiCompatTests/obj/

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -33,10 +34,48 @@ from pathlib import Path
 
 MODE_RUN = 1      # upstream sts2rl.actor.MODE_RUN: whole-run mode (the only mode the live game is in)
 
+# Bump when a client must reject an already-running sidecar from an older plugin.
+CONTENT_ALIGNMENT_VERSION = 1
+
+
+class ContentAlignmentError(RuntimeError):
+    """Do not silently pad/truncate content columns with unknown semantics."""
+
+
+def validated_content_names(net, blob: dict, spec: dict, resolve_names) -> tuple[str, ...] | None:
+    """Resolve exact training feature order before upstream load_state can use its unsafe fallback.
+
+    Released legacy checkpoints omit content_names. Their training catalog is pinned explicitly in
+    our manifest, not guessed by column count (equal widths do not imply equal meanings).
+    This wrapper is local; the vendored model/feature computations stay unchanged.
+    """
+    weight = blob['state'].get('content_proj.weight')
+    current = getattr(net, 'content_names', None)
+    if weight is None and current is None:
+        return None
+    if weight is None or current is None:
+        raise ContentAlignmentError('模型内容特征与网络结构不一致，拒绝加载')
+    names = blob.get('content_names')
+    if names is None:
+        version = spec.get('content_catalog')
+        if not version:
+            raise ContentAlignmentError('模型缺少内容特征名称及训练目录版本，拒绝按位置补零')
+        cfg = net.cfg
+        names = resolve_names(cfg.vocab_size, version, cfg.content_enchant, cfg.content_upgrade)
+    if not isinstance(names, (tuple, list)) or not names or any(not isinstance(n, str) or not n for n in names):
+        raise ContentAlignmentError('模型内容特征名称无效，拒绝加载')
+    names = tuple(names)
+    if len(names) != weight.shape[1] or len(set(names)) != len(names):
+        raise ContentAlignmentError(f'模型内容特征名称与权重列数不匹配：{len(names)} / {weight.shape[1]}，拒绝加载')
+    if not set(names).intersection(current):
+        raise ContentAlignmentError('模型与当前目录没有同名内容特征，拒绝加载')
+    return names
+
 
 class Policies:
     def __init__(self, root: Path, manifest: dict) -> None:
         self.root, self.manifest = root, manifest
+        self._verify_catalog(str(manifest["upstream"]["game_version"]))
         os.environ["STS2_POLICY_ROOT"] = str(root)
         os.environ["STS2_POLICY_GAME_VERSION"] = str(manifest["upstream"]["game_version"])
         sys.path.insert(0, str(Path(__file__).resolve().parent / "vendor"))
@@ -44,6 +83,7 @@ class Policies:
         import torch
         from sts2env.protocol import parse
         from sts2rl.catalog import Catalog
+        from sts2rl.content import content_names
         from sts2rl.features import Ragged, collate_ragged
         from sts2rl.model import ModelConfig, PolicyValueNet, load_state, zero_new_vocab
 
@@ -51,8 +91,22 @@ class Policies:
         self._ragged, self._collate = Ragged, collate_ragged
         self._build = (ModelConfig, PolicyValueNet, load_state, zero_new_vocab)
         self._vocab_n = Catalog().vocab_size
+        self._content_names = content_names
         self._nets: dict[str, tuple] = {}
         self._lock = threading.Lock()
+
+    def _verify_catalog(self, version: str) -> None:
+        dest = f"engine/catalog/{version}/catalog.json"
+        spec = next((s for s in self.manifest["runtime"] if s.get("kind") == "catalog" and s.get("dest") == dest), None)
+        hint = "请打开策略网络下载页补齐/修复运行环境后重试；不会按位置补零加载模型"
+        if spec is None:
+            raise ContentAlignmentError(f"清单没有固定内容目录 {version}；{hint}")
+        try:
+            data = (self.root / dest).read_bytes()
+        except OSError as exc:
+            raise ContentAlignmentError(f"缺少或无法读取内容目录 {version}；{hint}") from exc
+        if len(data) != int(spec["size"]) or hashlib.sha256(data).hexdigest() != spec["sha256"]:
+            raise ContentAlignmentError(f"内容目录 {version} 校验失败；{hint}")
 
     def available(self) -> dict[str, dict]:
         out = {}
@@ -79,8 +133,14 @@ class Policies:
             torch = self._torch
             model_config, net_class, load_state, zero_new_vocab = self._build
             blob = torch.load(str(path), map_location="cpu", weights_only=False)
+            if blob.get("content_names") is None and "content_proj.weight" in blob["state"]:
+                version = spec.get("content_catalog")
+                if not version:
+                    raise ContentAlignmentError(f"{character} 模型缺少训练目录版本，拒绝加载")
+                self._verify_catalog(version)
             net = net_class(model_config(**blob["config"]["model"])).eval()
-            load_state(net, blob["state"], blob.get("content_names"))
+            names = validated_content_names(net, blob, spec, self._content_names)
+            load_state(net, blob["state"], names)
             # Same handling as upstream's evaluation: vocabulary ids added after the checkpoint get zeroed rows.
             old_n = blob.get("vocab_n") or 1873
             if old_n < self._vocab_n:
@@ -132,6 +192,7 @@ def make_handler(policies: Policies):
                 # Loading tells the caller the frame format it must ask the mod for.
                 try:
                     reply["obs_format"] = policies.obs_format(character)
+                    reply["content_alignment_version"] = CONTENT_ALIGNMENT_VERSION
                 except Exception as exc:  # noqa: BLE001
                     reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             self._send(200, reply)

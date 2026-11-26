@@ -376,7 +376,7 @@ internal static partial class HotRootBuilder
         for (int i = 0; i < arrows.Count; i++)
         {
             ArrowSlot arrow = arrows[i];
-            hot.Fool.Arrows[i] = (ushort)(((int)arrow.Status & 0xF) | (arrow.DestroyAfterImpaled ? 0x10 : 0));
+            hot.Fool.Arrows[i] = (ushort)(((int)arrow.Status & 0xF) | (NekoComm.Game.GameApiCompat.ArrowDestroyAfterImpaled(arrow) ? 0x10 : 0));
         }
 
         // Powers across all creatures in exact CombatState.Creatures order
@@ -2140,7 +2140,7 @@ internal static partial class HotRootBuilder
             if (canonicalModel.IsCanonical && canonicalModel.MaxUpgradeLevel > 0)
             {
                 CardModel upgModel = canonicalModel.ToMutable();
-                upgModel.UpgradeInternal();
+                NekoComm.Game.GameApiCompat.UpgradeInternal(upgModel);
                 ExtractSemanticVars(upgModel, out string[] upgNames, out decimal[] upgVals, out _);
                 upgCost = (sbyte)Math.Clamp(GameRef.Get<int>(upgModel.EnergyCost, "_base"), sbyte.MinValue, sbyte.MaxValue);
                 if (upgNames.Length == baseNames.Length)
