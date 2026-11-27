@@ -62,7 +62,8 @@ def main() -> int:
                 assert all(policies._np.isfinite(result["logits"]))
                 assert abs(sum(result["probs"]) - 1) < 1e-8
                 obs = policies._parse(data)
-                print(f"  {frame.name}: {obs.labels[result['choice']]}, p={result['probs'][result['choice']]:.6f}")
+                label = obs.labels[result["choice"]] if obs.labels else f"candidate {result['choice']}"
+                print(f"  {frame.name}: {label}, p={result['probs'][result['choice']]:.6f}")
                 frames += 1
     assert checked or rejected, "no checkpoints tested"
     if args.expect_missing_legacy:

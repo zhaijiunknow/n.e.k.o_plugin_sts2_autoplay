@@ -21,6 +21,7 @@ from typing import Any
 
 # 跨局记忆条数上限（避免无限膨胀）
 _RUN_CAP = 50
+_MEMORY_SCHEMA_VERSION = 1
 
 #: 兜底教训文本（"没有任何可执行信息"的那一条）。
 #: ★实测它是**最高频**的教训（41/53 = 77.36%），且 `_lesson_tokens()` 对它返回 `[]`
@@ -116,6 +117,8 @@ class CatgirlMemoryStore:
         self._path = path
         self._logger = logger
         self._runs: list[dict[str, Any]] = []
+        self._write_blocked = False
+        self._document_extra: dict[str, Any] = {}
         self.load()
 
     @property
@@ -153,13 +156,16 @@ class CatgirlMemoryStore:
         向前兼容：文件不存在 / 空文件 / 完全非 JSON，均不抛异常（见 t16 D4）。
         """
         self._runs = []
+        self._write_blocked = False
+        self._document_extra = {}
         if not self._path or not os.path.exists(self._path):
             return
         try:
             with open(self._path, "r", encoding="utf-8") as f:
                 raw = f.read()
-        except OSError:
-            self._log(f"catgirl_memory load failed (IO): {self._path}")
+        except (OSError, UnicodeError):
+            self._write_blocked = True
+            self._log(f"catgirl_memory load failed (IO); saving blocked: {self._path}")
             return
         if not raw.strip():
             return
@@ -177,8 +183,9 @@ class CatgirlMemoryStore:
             data, end = json.JSONDecoder().raw_decode(raw)
         except ValueError:
             # --- 分支 3：连第一个对象都取不到 ⇒ 才回落空，且必须告警 ---
+            self._write_blocked = True
             self._log(
-                f"catgirl_memory load: unparsable, starting empty: {self._path} "
+                f"catgirl_memory load: unparsable, saving blocked: {self._path} "
                 f"(bytes={len(raw)})"
             )
             return
@@ -190,7 +197,13 @@ class CatgirlMemoryStore:
         )
 
     def _adopt_runs(self, data: Any) -> None:
-        """把解析出的文档里的 runs 收进来。"""
+        """Migrate unversioned v0 in memory; unknown schemas remain read-only."""
+        version = data.get("schema_version", 0) if isinstance(data, dict) else None
+        if type(version) is not int or version not in (0, _MEMORY_SCHEMA_VERSION):
+            self._write_blocked = True
+            self._log(f"catgirl_memory unsupported schema {version!r}; saving blocked: {self._path}")
+        elif isinstance(data, dict):
+            self._document_extra = {k: v for k, v in data.items() if k not in ("runs", "updated_at", "schema_version")}
         records = data.get("runs") if isinstance(data, dict) else None
         if isinstance(records, list):
             self._runs = [r for r in records if isinstance(r, dict)]
@@ -212,12 +225,16 @@ class CatgirlMemoryStore:
         """
         if not self._path:
             return
+        if self._write_blocked:
+            self._log(f"catgirl_memory save blocked to preserve unsupported/unreadable file: {self._path}")
+            return
         tmp = "%s.%d.%s.tmp" % (self._path, os.getpid(), uuid.uuid4().hex[:8])
         try:
             directory = os.path.dirname(self._path)
             if directory:
                 os.makedirs(directory, exist_ok=True)
-            payload = {"runs": self._runs[:_RUN_CAP], "updated_at": time()}
+            payload = {**self._document_extra, "schema_version": _MEMORY_SCHEMA_VERSION,
+                       "runs": self._runs[:_RUN_CAP], "updated_at": time()}
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
                 f.flush()

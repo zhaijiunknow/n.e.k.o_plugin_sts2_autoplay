@@ -21,9 +21,6 @@ store.db
 
 # agent/team local state and analysis artifacts (166MB+)
 .dsh-artifacts/*
-# 例外：度量脚手架是 t10 交付物，也是 t11/t13 前后对照的唯一判据来源，
-# 必须进版本库 —— 否则 `test_reflection_metrics_contract` 在 CI 上永远无解。
-!.dsh-artifacts/reflection_metrics.py
 .agent-teams/
 plugin.toml.lock
 
@@ -35,3 +32,7 @@ static/autoplay_history.json
 game_mod/nekospire/Policy/Data/
 # 下载前端读的进度快照（运行时生成）
 static/policy_status.json
+
+# Local review artifacts and smoke output are not source files.
+tmp/
+tests/live_entry_smoke*.json

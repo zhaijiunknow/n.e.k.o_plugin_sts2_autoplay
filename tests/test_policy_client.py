@@ -32,6 +32,7 @@ from plugin.plugins.sts2_autoplay.policy_client import (
 from test_d10_main_menu_recovery import _FakeClient, _make_runner
 
 DATA_ID = "b9ba21326c3d90dc"
+UPSTREAM = {"commit": "test-114", "game_version": "v0.114.0"}
 
 
 class _Logger:
@@ -48,6 +49,7 @@ class _Assets:
     def __init__(self, *, runtime: bool = True, models: tuple[str, ...] = ("IRONCLAD",)) -> None:
         self.runtime, self.models = runtime, list(models)
         self.root, self.python_exe = "root", "python.exe"
+        self.manifest = {"upstream": UPSTREAM}
 
     def runtime_ready(self) -> bool:
         return self.runtime
@@ -75,6 +77,7 @@ def _decision(**over: Any) -> dict[str, Any]:
     base = {
         "available": True,
         "data_id": DATA_ID,
+        "encoder_game_version": "v0.114.0",
         "decision_id": "abc123",
         "decision_kind": "COMBAT",
         "character": "IRONCLAD",
@@ -138,7 +141,7 @@ class _Advisor(PolicyAdvisor):
         return True
 
 
-HEALTH = {"ok": True, "content_alignment_version": 1, "obs_format": 28, "characters": {"IRONCLAD": {}}}
+HEALTH = {"ok": True, "policy_upstream": UPSTREAM, "content_alignment_version": 1, "obs_format": 28, "characters": {"IRONCLAD": {}}}
 
 
 def _scored(choice: int, n: int = 3) -> dict[str, Any]:
@@ -251,7 +254,8 @@ def test_sidecar_that_cannot_load_the_model_falls_back() -> None:
 @pytest.mark.unit
 def test_not_my_turn_yet_is_a_hold_not_a_fallback() -> None:
     advisor = _Advisor(health=HEALTH)
-    op = _decide(advisor, _ModClient({"available": False, "wait": True, "data_id": DATA_ID, "reason": "not the local player's play phase"}))
+    op = _decide(advisor, _ModClient({"available": False, "wait": True, "data_id": DATA_ID,
+        "encoder_game_version": "v0.114.0", "reason": "not the local player's play phase"}))
     assert is_policy_hold(op) and not is_policy_operation(op)
     assert advisor.fallbacks == 0
 
@@ -382,6 +386,8 @@ def _tick(decision: dict[str, Any], advisor: PolicyAdvisor, *, autoplay: str = "
 @pytest.mark.unit
 def test_tick_hands_the_whole_step_to_the_policy() -> None:
     snapshot, client, planner = _tick(_decision(), _Advisor(health=HEALTH, scored=_scored(2)))
+    assert snapshot["decision_engine"]["engine"] == "policy"
+    assert snapshot["decision_engine"]["phase"] == "ready"
     op = snapshot["agent_operation"]
     assert op["action_type"] == POLICY_ACTION_TYPE and op["kwargs"]["option_index"] == 2
     assert planner.calls == 0, "网络出了这一步，启发式规划器不该再跑"
@@ -395,6 +401,8 @@ def test_tick_hands_the_whole_step_to_the_policy() -> None:
 def test_tick_falls_back_to_the_planner_when_the_policy_declines() -> None:
     advisor = _Advisor(health=HEALTH)
     snapshot, _client, planner = _tick(_decision(available=False, reason="no adapter"), advisor)
+    assert snapshot["decision_engine"]["engine"] == "solver"
+    assert "no adapter" in snapshot["decision_engine"]["detail"]
     assert planner.calls == 1 and snapshot["agent_operation"] is None
     assert all(a.get("type") != POLICY_ACTION_TYPE for a in snapshot["action_registry"])
 
@@ -403,6 +411,8 @@ def test_tick_falls_back_to_the_planner_when_the_policy_declines() -> None:
 def test_tick_uses_the_old_path_when_the_character_has_no_model() -> None:
     advisor = _Advisor(health=HEALTH, scored=_scored(0), assets=_Assets(models=("SILENT",)))
     _snapshot, client, planner = _tick(_decision(), advisor)
+    assert _snapshot["decision_engine"]["engine"] == "solver"
+    assert "没有下载 IRONCLAD 的模型" in _snapshot["decision_engine"]["detail"]
     assert planner.calls == 1 and client.plan_calls == 1, "没有模型的角色：求解器 + 启发式照旧"
     assert advisor.health_calls == 0
 
@@ -410,7 +420,10 @@ def test_tick_uses_the_old_path_when_the_character_has_no_model() -> None:
 @pytest.mark.unit
 def test_tick_holds_when_the_policy_says_wait() -> None:
     advisor = _Advisor(health=HEALTH)
-    snapshot, client, planner = _tick({"available": False, "wait": True, "data_id": DATA_ID, "reason": "enemy turn"}, advisor)
+    snapshot, client, planner = _tick({"available": False, "wait": True, "data_id": DATA_ID,
+        "encoder_game_version": "v0.114.0", "reason": "enemy turn"}, advisor)
+    assert snapshot["decision_engine"]["engine"] == "policy"
+    assert snapshot["decision_engine"]["phase"] == "waiting"
     assert planner.calls == 0 and client.plan_calls == 0 and snapshot["agent_operation"] is None
 
 
@@ -466,3 +479,22 @@ def test_content_alignment_failure_is_visible_in_status_and_log() -> None:
     assert not client.formats and not advisor.infer_calls
     assert reason in advisor.status()["last_note"]
     assert any(reason in line for line in advisor.log.lines)
+
+@pytest.mark.unit
+@pytest.mark.parametrize("upstream", [None, {"commit": "old", "game_version": "v0.113.1"}, {"commit": "old", "game_version": "v0.114.0"}])
+def test_sidecar_with_stale_or_missing_catalog_identity_is_rejected(upstream) -> None:
+    advisor = _Advisor(health={**HEALTH, "policy_upstream": upstream}, scored=_scored(0))
+    client = _ModClient(_decision())
+    assert _decide(advisor, client) is None
+    assert not client.formats and not advisor.infer_calls and not advisor._formats
+    assert "策略数据版本" in advisor.status()["last_note"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("version", [None, "v0.113.1"])
+def test_new_plugin_does_not_infer_with_old_mod_encoder(version) -> None:
+    advisor = _Advisor(health=HEALTH, scored=_scored(0))
+    client = _ModClient(_decision(encoder_game_version=version))
+    assert _decide(advisor, client) is None
+    assert not advisor.infer_calls and not client.pushed
+    assert "同步更新 mod" in advisor.status()["last_note"]

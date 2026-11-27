@@ -358,7 +358,7 @@ def test_instant_line_uses_the_avatar_cache_only() -> None:
     service, _client = _service()
     seen: list[bool] = []
 
-    def fake_schedule(text: str, *, fetch_avatar: bool = True) -> None:
+    def fake_schedule(text: str, *, fetch_avatar: bool = True, change_key: str = "") -> None:
         seen.append(fetch_avatar)
 
     service._schedule_catgirl_push = fake_schedule  # type: ignore[method-assign]
@@ -510,9 +510,11 @@ def test_switching_to_the_catgirl_instance_pushes_hold() -> None:
 
     assert result["switched"] is True
     assert result["instance"] == "catgirl"
-    assert client.config_writes[-2:] == [
+    assert client.config_writes[-3:] == [
         {"coop_control_mode": "hold"},
         {"coop_map_policy": "wait", "coop_map_vote_wait_seconds": 20},
+        # A previous connection may have left the persisted live gate enabled.
+        {"livestream_enabled": False},
     ]
 
 

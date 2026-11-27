@@ -19,9 +19,8 @@ namespace NekoComm.Game
 {
     internal sealed class DanmakuOverlay
     {
-        private const float SpeedPxPerSecond = 120f;
-        private const int LaneCount = 8;
-        private const int MaxActive = 16;
+        private const int LaneCount = DanmakuPacing.MaxActive;
+        private readonly DanmakuPacing _pacing = new();
         private const float AvatarGap = 6f;
         private const float Padding = 14f;
 
@@ -31,7 +30,7 @@ namespace NekoComm.Game
         private static readonly Color CatgirlColor = new(1f, 0.72f, 0.88f);
         private static readonly Color SmokeBase = new(0.05f, 0.035f, 0.06f, 0.78f);
 
-        private readonly List<(Control Node, float Speed)> _active = new();
+        private readonly List<(Control Node, float Speed, double ExpiresAt)> _active = new();
         private readonly Dictionary<string, Texture2D> _avatarCache = new();
         private CanvasLayer? _layer;
         private Control? _control;
@@ -63,11 +62,12 @@ namespace NekoComm.Game
         public void Add(string text, string style, string placement, string? avatarBase64)
         {
             var control = _control;
-            if (control == null || !GodotObject.IsInstanceValid(control) || _active.Count >= MaxActive)
+            if (control == null || !GodotObject.IsInstanceValid(control))
                 return;
 
-            var clean = Clean(text);
-            if (clean.Length == 0)
+            var clean = DanmakuPacing.Clean(text);
+            var now = (double)Time.GetTicksMsec() / 1000.0;
+            if (!_pacing.TryAccept(clean, _active.Count, now))
                 return;
 
             if (control.IsInsideTree())
@@ -86,7 +86,7 @@ namespace NekoComm.Game
             // Size follows the configurable font size (like DanmakuSpire: font 24 -> icon 2x, ~56px tall).
             int fontSize = Math.Clamp(NekoConfig.Current.danmaku_font_size, 16, 40);
             float avatar = fontSize * 2f;
-            float laneStep = fontSize * 1.9f;
+            float laneStep = avatar + Padding * 2f;
             float y = Mathf.Max(40f, _viewportHeight * 0.12f) + lane * laneStep;
 
             var avatarTex = ResolveAvatar(avatarBase64);
@@ -164,7 +164,10 @@ namespace NekoComm.Game
             container.AddChild(smoke);
             container.Position = new Vector2(_viewportWidth + 60f, y);
             control.AddChild(container);
-            _active.Add((container, SpeedPxPerSecond));
+            // Short, bounded lifetime even on wide monitors; never accumulate twenty seconds of strips.
+            float widthBudget = clean.Length * fontSize + avatar + Padding * 2f + 60f;
+            float speed = (_viewportWidth + 60f + widthBudget) / (float)DanmakuPacing.LifetimeSeconds;
+            _active.Add((container, speed, now + DanmakuPacing.LifetimeSeconds));
         }
 
         /// <summary>
@@ -174,7 +177,7 @@ namespace NekoComm.Game
         /// </summary>
         public void Dispose()
         {
-            foreach (var (node, _) in _active)
+            foreach (var (node, _, _) in _active)
             {
                 if (GodotObject.IsInstanceValid(node))
                     node.QueueFree();
@@ -198,19 +201,19 @@ namespace NekoComm.Game
                 var now = (double)Time.GetTicksMsec() / 1000.0;
                 var delta = (float)(now - last);
                 last = now;
-                if (delta <= 0f || delta > 0.5f)
+                if (delta <= 0f)
                     continue;
 
                 for (int i = _active.Count - 1; i >= 0; i--)
                 {
-                    var (node, speed) = _active[i];
+                    var (node, speed, expiresAt) = _active[i];
                     if (!GodotObject.IsInstanceValid(node))
                     {
                         _active.RemoveAt(i);
                         continue;
                     }
                     node.Position += new Vector2(-speed * delta, 0f);
-                    if (node.Position.X < -700f)
+                    if (now >= expiresAt)
                     {
                         node.QueueFree();
                         _active.RemoveAt(i);
@@ -272,12 +275,6 @@ namespace NekoComm.Game
             var value = avatarBase64 ?? "";
             int idx = value.IndexOf("base64,", StringComparison.OrdinalIgnoreCase);
             return idx >= 0 ? value.Substring(idx + 7) : value;
-        }
-
-        private static string Clean(string text)
-        {
-            var t = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
-            return t.Length > 60 ? t.Substring(0, 60) : t;
         }
 
         private static Font? ResolveFont()

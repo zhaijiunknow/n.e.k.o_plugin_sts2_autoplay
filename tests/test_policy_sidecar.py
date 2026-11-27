@@ -112,7 +112,7 @@ def test_release_manifest_pins_every_models_training_catalog():
 
 @pytest.mark.parametrize("failure", [False, True])
 def test_health_attests_alignment_only_after_successful_load(failure):
-    policies = SimpleNamespace(available=Mock(return_value={}), obs_format=Mock(return_value=23))
+    policies = SimpleNamespace(manifest={"upstream": {"game_version": "v0.114.0", "commit": "test"}}, available=Mock(return_value={}), obs_format=Mock(return_value=23))
     if failure:
         policies.obs_format.side_effect = sidecar.ContentAlignmentError("missing legacy catalog")
     handler_class = sidecar.make_handler(policies)

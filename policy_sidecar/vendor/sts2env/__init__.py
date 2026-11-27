@@ -1,1 +1,1 @@
-"""Inference subset of AlphaDefect's sts2env (frame parser only). See ../README.md."""
+"""Inference subset of AlphaDefect sts2env. See ../README.md."""

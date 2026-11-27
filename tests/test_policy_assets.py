@@ -259,6 +259,7 @@ def test_shipped_manifest_is_self_consistent() -> None:
     assert catalog == {
         "engine/catalog/vocab.txt", "engine/catalog/aliases.txt", "engine/catalog/no_downside_relics.txt",
         f"engine/catalog/{version}/catalog.json", "engine/catalog/v0.111.0/catalog.json",
+        "engine/catalog/v0.113.1/catalog.json",
     }
     commit = manifest["upstream"]["commit"]
     assert all(commit in url for item in manifest["runtime"] if item["kind"] == "catalog" for url in item["urls"]), "词表必须钉在同一个上游提交上"

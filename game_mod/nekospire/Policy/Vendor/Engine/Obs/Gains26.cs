@@ -31,7 +31,7 @@ public sealed partial class Observation
         foreach (var l in ls) n += l.ModifyDamageAdditive(t, n, props, dealer, c, null);
         foreach (var l in ls) n *= l.ModifyDamageMultiplicative(t, n, props, dealer, c, null);
         foreach (var l in ls) n *= l.ModifyDamageMultiplicativeLate(t, n, props, dealer, c, null);
-        foreach (var l in ls) { var x = l.ModifyDamageCap(t, props, dealer, c, null); if (n > x) n = x; }
+        foreach (var l in ls) { var x = l.ModifyDamageCap(t, props, dealer, c, null); if (n > x) n = x; } n = Math.Min(n, OldHtkCap(t));      // v0.114.0：难杀照旧口径封顶（见 Damage.cs OldHtkCap）
         return MathF.Floor((float)Math.Max(0m, n));
     }
 
@@ -88,7 +88,7 @@ public sealed partial class Observation
     static float CardBlockTotal(CardModel c, float pb, int plays) =>
         plays <= 1 ? pb * plays * BlockGains(c) : BlockGains(c) * (pb + (plays - 1) * PbNoStretch(c, pb));
 
-    static bool IsFreePower(AbstractModel l) => NekoComm.Game.GameApiCompat.IsFreeCardPower(l) || l is FreeAttackPower or FreeSkillPower or FreePowerPower;
+    static bool IsFreePower(AbstractModel l) => l is FreeAttackPower or FreeSkillPower or FreePowerPower;
 
     /// <summary>不算“免费出牌”时这张牌的费用（照 CardEnergyCost.GetWithModifiers：Local 之后过 TryModifyEnergyCostInCombat、再过 Late，Late 跳过 Free*Power）。X 费为 −1。</summary>
     static int CostNoFree(CardModel c)
@@ -106,14 +106,13 @@ public sealed partial class Observation
         catch { return -1; }
     }
 
-    /// <summary>“免费出牌”还剩几张（FreeCardPower 不限类型；FreeAttack / Skill / Power 按类型，BeforeCardPlayed 每张扣一层），封顶 3。</summary>
+    /// <summary>“免费出牌”还剩几张（v0.114.0 起没有不限类型的 FreeCardPower（调音重做时删掉）；FreeAttack / Skill / Power 按类型，BeforeCardPlayed 每张扣一层），封顶 3。</summary>
     static int FreeLayersFor(Player me, CardModel c)
     {
         int n = 0;
         foreach (var pw in me.Creature.Powers)
             n += pw switch
             {
-                _ when NekoComm.Game.GameApiCompat.IsFreeCardPower(pw) => pw.Amount,
                 FreeAttackPower when c.Type == CardType.Attack => pw.Amount,
                 FreeSkillPower when c.Type == CardType.Skill => pw.Amount,
                 FreePowerPower when c.Type == CardType.Power => pw.Amount,
@@ -125,6 +124,9 @@ public sealed partial class Observation
     static bool IsMelody(CardModel c) { try { return c.Tags.Contains(CardTag.Wah) || c.Tags.Contains(CardTag.Cho) || c.Tags.Contains(CardTag.Ki); } catch { return false; } }
 
     static readonly CardTag[] MelodyTags = { CardTag.Wah, CardTag.Cho, CardTag.Ki };
+
+    /// <summary>叽 诗句多打一次的牌：v0.114.0 起只有带哇或啾的（KiVersePower.ModifyCardPlayCount 去掉了 Ki）。</summary>
+    static bool KiVerseCard(CardModel c) { try { return c.Tags.Contains(CardTag.Wah) || c.Tags.Contains(CardTag.Cho); } catch { return false; } }
 
     /// <summary>这张牌打出后本回合第一次出现的旋律标签数（曲中意、失落鲁特琴：CardPlaysStarted 里本回合、自己开始的、带这个标签的恰好是这一张）。</summary>
     static int NewMelodyTags(Player me, CardModel c)
@@ -140,7 +142,7 @@ public sealed partial class Observation
 
     /// <summary>
     /// 这一步拔出几支你的箭（合股线、呀！、取箭神技用；与合股线原来的模拟同一口径）：对被你扎穿的目标逐段数 HitCounter，到 0 拔出一支；
-    /// 射击牌每次打出（有箭时）再扎进一支，寂灭标过的第一支扎穿即摧毁（QuietusPower.AfterArrowShot 设 DestroyAfterImpaled，第一次箭攻击后移除）；
+    /// 射击牌每次打出（有箭时）再扎进一支（v0.114.0 起寂灭不再摧毁箭：QuietusPower.AfterArrowShot 删掉）；
     /// 目标被打死时扎着的全部拔出。召回、连根拔起、拧下：目标身上你的箭全部拔出。hit 为攻击段拔出的，death 为目标死亡拔出的。只看有目标的。
     /// </summary>
     static (int hit, int death, int shots) ArrowsOut(CardModel card, Creature? tgt, Player me, bool tgtDead)
@@ -159,12 +161,12 @@ public sealed partial class Observation
             var (pd, _, h) = Preview(card, tgt);
             Preview(card, null);
             if (pd < 0) return (0, 0, shots);
-            bool quietus = NekoComm.Game.GameApiCompat.SupportsArrowDestruction && me.Creature.HasPower<QuietusPower>();
             for (int r = 0; r < plays; r++)
             {
                 if (shoot && r >= shots) continue;
                 for (int i = 0; i < (int)h && n > 0; i++) { if (--ctr <= 0) { ctr = ImpaleHits; n--; d++; } }
-                if (shoot && !(quietus && r == 0)) n++;
+                // v0.114.0：寂灭不再摧毁它射出的箭（QuietusPower.AfterArrowShot 删掉，ArrowSlot.DestroyAfterImpaled、ArrowStatus.Destroyed 一并删掉），每次射出都扎进一支
+                if (shoot) n++;
             }
             return (d, tgtDead ? n : 0, shots);
         }
@@ -177,8 +179,11 @@ public sealed partial class Observation
     /// 一串自动打出的牌的确定部分。sure：打全体的、或只剩一个可攻击敌人时的单体，逐段记下；多个可攻击敌人时单体按期望摊进 exp（不算击杀）。
     /// 格挡：卡面预览 × CardBlockTotal；能量、进手：CardGains（无目标）。没箭的射击牌不攻击。旋律之间的连锁（暴力和弦、歌之道等）不另算。
     /// </summary>
-    (Dictionary<Creature, List<Hit>> sure, Dictionary<Creature, float> exp, float block, float energy, float cards) AutoPlayEffect(IEnumerable<CardModel> cards, Player me)
+    (Dictionary<Creature, List<Hit>> sure, Dictionary<Creature, float> exp, float block, float energy, float cards) AutoPlayEffect(IEnumerable<CardModel> cards, Player me, CardModel? outer = null)
     {
+        // v0.114.0：MelodyCmd.PlayedThisTurn 改按 CardPlaysStarted 判断，正在结算的外层牌（啾 副歌）与先自动打出的牌都已“开始”，
+        // 后面自动打出的哇 爆破看得到它们的旋律（补丁说明“Fixed Cho Chorus not triggering the autoplayed Wah Blast double hit effect”）
+        bool choOrKi = PlayedCho(me) || PlayedKi(me) || (outer != null && (outer.Tags.Contains(CardTag.Cho) || outer.Tags.Contains(CardTag.Ki)));
         var cs = me.Creature.CombatState!;
         var foes = cs.Creatures.Where(c => !c.IsPlayer && c.Side != me.Creature.Side && c.IsAlive).ToList();
         var sure = foes.ToDictionary(f => f, _ => new List<Hit>());
@@ -201,6 +206,7 @@ public sealed partial class Observation
                     {
                         var (pd, _, h) = Preview(ac, f);
                         if (pd <= 0) continue;
+                        if (ac is WahBlast && choOrKi) h = ModHits(ac, 2);      // WahBlast.HitsTwice：本回合（已开始的出牌里）有啾或叽
                         float pdx = plays > 1 ? PdNoAim(ac, f, pd) : pd;
                         if (aoe || hittable.Count == 1)
                             for (int r = 0; r < plays; r++) for (int i = 0; i < (int)h; i++) sure[f].Add(new Hit(r == 0 ? pd : pdx, true, move, me.Creature, ac));
@@ -212,6 +218,7 @@ public sealed partial class Observation
                 energy += ge; drawn += gc;
             }
             catch { }
+            try { if (ac.Tags.Contains(CardTag.Cho) || ac.Tags.Contains(CardTag.Ki)) choOrKi = true; } catch { }
         }
         return (sure, exp, block, energy, drawn);
     }
@@ -268,21 +275,21 @@ public sealed partial class Observation
                     break;
                 case TheFool:
                 {
+                    // v0.114.0：没有能打出的牌时不再改挑“不能打出”的牌（TheFool.OnPlay 删掉了回退分支），不能打出的牌留在手里
                     int n = card.DynamicVars.Cards.IntValue;
                     var ok = others.Where(c => !Kw(c).Contains(CardKeyword.Unplayable)).ToList();
-                    var bad = others.Where(c => Kw(c).Contains(CardKeyword.Unplayable)).ToList();
-                    hd = -Math.Min(n, others.Count);
-                    if (ok.Count <= n)
-                    {
-                        res.AddRange(ok); gone = new List<CardModel>(ok);
-                        if (n - ok.Count >= bad.Count) gone.AddRange(bad);
-                    }
+                    hd = -Math.Min(n, ok.Count);
+                    if (ok.Count <= n) { res.AddRange(ok); gone = new List<CardModel>(ok); }
                     else if (ok.All(c => SameCard(c, ok[0]))) { res.AddRange(ok.Take(n)); gone = new List<CardModel>(res); }
                     break;
                 }
                 case TheDevil:
                     gone = others; hd = -others.Count;
                     res.AddRange(KnownTop(pcs, others.Count));
+                    break;
+                // v0.114.0 新牌乐观：消耗手里所有悲伤（Optimism.OnPlay：Hand 里 c is Sadness 的逐张 CardCmd.Exhaust），之后每张抽 1（见 CardGains）
+                case Optimism:
+                    gone = others.Where(c => c is Sadness).ToList(); hd = -gone.Count;
                     break;
             }
             if (me.Creature.GetPower<LostLutePower>() is { } lute && lute.Amount > 0 && IsMelody(card))
@@ -322,10 +329,10 @@ public sealed partial class Observation
     /// 能量：无条件的 × 打出次数；双倍能量（付费之后的能量，重放时翻倍再加）；持弓猛击（目标打之前被箭扎着，每次）；分离（打死目标）；
     ///   心神不宁（是唯一的手牌）；被遗忘的仪式（本回合消耗过牌）；取箭神技（攻击拔出你的箭，每支 Energy）；呀！（这一步拔出你的箭、本回合还没触发，层数）。
     /// 进手：无条件抽牌 × 打出次数（编译冲击、平稳韵律按 CalculatedCards）；投掷匕首、逃脱计划各 1；叽 跳跃（目标被箭扎着，每次）；拧下（目标被你扎着）；心神不宁；
-    ///   曲中意（打出本回合第一张某种旋律，每个新旋律抽层数张）；花样射击（打完还有箭，回手）；呼哨箭矢（这一步射出箭时弃牌堆里的每张回手）；
-    ///   箭矢戳击（打完还有箭、弃牌堆有射击牌，选 1 张）；叽 唱诵（抽牌堆 + 弃牌堆不空，选 1 张）；怒放、遮天蔽日各 1；活跃气氛（悲伤 + 喜悦）；
+    ///   曲中意（打出本回合第一张某种旋律，每个新旋律抽层数张）；花样射击（v0.114.0 起：每次射出箭抽 Cards 张）；呼哨箭矢（这一步射出箭时弃牌堆里的每张回手）；
+    ///   叽 唱诵（抽牌堆 + 弃牌堆不空，选 1 张）；遮天蔽日 1；活跃气氛（悲伤 + 喜悦）；乐观（手里的悲伤张数）；自嘲（悲伤张数）；塔罗“教皇”（Cards 张）；
     ///   说笑、哀伤打击、刻薄、翻找塞进手里的悲伤，悲痛一击变成悲伤回手，凝神选进手的射击牌。
-    /// 花样射击“打出时有可用的箭就回手”：游戏在 OnPlay 之前就定了结算位置（OnPlayWrapper → GetResultLocationForCardPlay）。
+    /// v0.114.0 删掉的：箭矢戳击不再从弃牌堆拿射击牌，怒放改成手里一张牌变化成神射（手牌张数不变），花样射击不再回手。
     /// </summary>
     static (float energy, float cards) CardGains(CardModel c, Creature? tgt, Player me, List<Creature>? killed)
     {
@@ -362,12 +369,21 @@ public sealed partial class Observation
                 case KiHop when arrowed: cards += Var("Cards") * plays; break;
                 case Wrest when mine: cards += Var("Cards"); break;
                 case KiChant when pcs.DrawPile.Cards.Count + pcs.DiscardPile.Cards.Count > 0: cards += 1; break;
-                case Florescence or BlotOutTheSky: cards += 1; break;
+                // v0.114.0：怒放改成把手里一张牌变化成神射（Florescence.OnPlay：CardSelectCmd.FromHand → CardCmd.Transform），手牌张数不变，不再算进手
+                case BlotOutTheSky: cards += 1; break;
+                // v0.114.0 新牌乐观：消耗手里所有悲伤，消耗了几张就抽几张（Optimism.OnPlay：cardCount > 0 时 CardPileCmd.Draw(cardCount)）；
+                // 只算第一次打出（重放时悲伤已经消耗光，抽到的是不是悲伤不知道）。离手的悲伤在 AutoPlays 里记进 _autoHand，封顶按它算
+                case Optimism: cards += pcs.Hand.Cards.Count(x => x is Sadness && !ReferenceEquals(x, c)); break;
                 case BrightenUp: cards += Var("Sadness") + Var("Joy"); break;
+                // 自嘲：自己手里塞 "Sadness" 张悲伤（喜悦只给队友，单人局没有）；塔罗“教皇”：从无色卡池挑 Cards 张进手（v0.114.0 起不再减费，TheHierophant.OnPlay）
+                case SelfDeprecate: cards += Var("Sadness") * plays; break;
+                case TheHierophant: cards += Var("Cards") * plays; break;
                 // 往手里塞悲伤（AddGeneratedCardsToCombat 到手牌）：说笑、哀伤打击 Cards 张，刻薄、翻找 1 张（翻找另抽 Cards 张，在 DrawCards 里）；
                 // 悲痛一击最后一次打出后整张变成悲伤回手（GetResultLocationForCardPlay 改成手牌）；凝神从抽牌堆选一张射击牌进手
                 case Jest or SorrowfulStrike: cards += Var("Cards") * plays; break;
-                case Vitriol or Rummage: cards += plays; break;
+                // v0.114.0：刻薄塞 Cards（2）张悲伤（Vitriol.OnPlay 循环 DynamicVars.Cards 次），翻找仍是 1 张
+                case Vitriol: cards += Var("Cards") * plays; break;
+                case Rummage: cards += plays; break;
                 case MourningBlow: cards += 1; break;
                 case LockedIn when pcs.DrawPile.Cards.Any(IsShoot): cards += 1; break;
             }
@@ -375,10 +391,11 @@ public sealed partial class Observation
             var (rh, rd, shots) = c.Type == CardType.Attack || c is Recall or Uproot or Wrest ? ArrowsOut(c, tgt, me, tgtDead) : (0, 0, 0);
             if (c is EpicRetrieval) en += Var("Energy") * (rh + rd);      // 目标被打死时拔出的箭，来源也是这张牌（ImpaledPower.AfterDeath）
             if (rh + rd > 0 && me.Creature.GetPower<YahPower>() is { } yah && !InternalFlag(yah, "triggeredThisTurn")) en += yah.Amount;
-            int after = pcs.AvailableArrowCount - shots + rh + rd;
             if (shots > 0) cards += pcs.DiscardPile.Cards.Count(x => x is WhistlingArrows);
-            if (c is TrickShot && pcs.AvailableArrowCount >= 1) cards += 1;      // 回手看打出前（OnPlayWrapper 在 OnPlay 之前定结算位置）
-            if (c is ArrowStab && after >= 1 && pcs.DiscardPile.Cards.Any(IsShoot)) cards += 1;
+            // v0.114.0：花样射击不再回手，改为射出箭时抽 Cards（2/3）张（TrickShot.OnPlay：ShootArrowAtTarget 返回真才 CardPileCmd.Draw）；
+            // 每次打出各抽一次，只有前“可用箭数”次射得出箭（目标在前一次被打死时后面几次返回假，这里不细分）
+            if (c is TrickShot) cards += Var("Cards") * shots;
+            // v0.114.0：箭矢戳击不再从弃牌堆拿射击牌（ArrowStab.OnPlay 改成伤害 + 瞄准），不进手
             // 曲中意
             if (IsMelody(c) && me.Creature.GetPower<MotifPower>() is { } motif) cards += motif.Amount * NewMelodyTags(me, c);
         }

@@ -18,7 +18,7 @@
 用法
 ----
     & "D:\\NekoClaw\\N.E.K.O\\.venv\\Scripts\\python.exe" \
-        ".dsh-artifacts\\reflection_metrics.py" --label baseline \
+        "tools\\reflection_metrics.py" --label baseline \
         --out ".dsh-artifacts\\reflection-metrics-baseline.json"
 
     # 确定性自检：同名同参两次调用必须输出一致（G7）

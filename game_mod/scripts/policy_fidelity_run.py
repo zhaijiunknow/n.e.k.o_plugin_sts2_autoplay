@@ -49,7 +49,7 @@ def main() -> int:
     a = ap.parse_args()
 
     upstream = Path(a.upstream)
-    sys.path.insert(0, str(upstream / "python"))
+    sys.path.insert(0, str(upstream / "game-v0.114.0" / "python"))
     import numpy as np
     import sts2env.env as envmod
     import torch

@@ -1,1 +1,1 @@
-"""Inference subset of AlphaDefect's sts2rl (features + network). See ../README.md."""
+"""Inference subset of AlphaDefect sts2rl. See ../README.md."""

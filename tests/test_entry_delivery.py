@@ -67,9 +67,12 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
     entries = collect_entries()
     entry_ids = {entry_id for entry_id, _ in entries}
 
-    assert len(entries) == 26
+    assert len(entries) == len(entry_ids)  # No duplicate entry IDs; exact inventory below.
     # 有本机副作用的下载入口不进实机冒烟（参数组为空表 = 一次都不调用）。
     assert [SPECIAL_ARGS[e] for e in ("sts2_policy_prepare_runtime", "sts2_policy_download_model", "sts2_policy_remove_model")] == [[], [], []]
+    assert SPECIAL_ARGS["sts2_set_map_policy"] == []
+    assert SPECIAL_ARGS["sts2_set_livestream"] == []
+    assert SPECIAL_ARGS["sts2_update_settings"] == []
     assert entry_ids == {
         # 策略网络的下载前端（static/policy.html）用的四个入口。
         "sts2_policy_status",
@@ -79,6 +82,8 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
         "sts2_health_check",
         "sts2_read_state",
         "sts2_get_status",
+        "sts2_get_settings",
+        "sts2_update_settings",
         "sts2_set_standby",
         "sts2_set_host_digest",
         "sts2_set_run_reflection",
@@ -94,6 +99,7 @@ def test_live_entry_smoke_collects_all_plugin_entries() -> None:
         "sts2_apply_user_override",
         # 弹幕总开关（关掉插件侧的 /danmaku 推送并清屏）与"回到存档"补救入口。
         "sts2_set_danmaku",
+        "sts2_set_livestream",
         "sts2_continue_run",
         # 对话式地图协作：定路线 / 跟自己 / 按指定位置投票。
         "sts2_set_route",

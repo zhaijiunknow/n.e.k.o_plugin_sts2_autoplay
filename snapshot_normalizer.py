@@ -107,6 +107,10 @@ def normalize_snapshot(state_payload: Dict[str, Any], actions_payload: Dict[str,
         state_payload = {}
     actions = normalize_actions(actions_payload)
     run = state_payload.get("run") if isinstance(state_payload.get("run"), dict) else {}
+    combat = state_payload.get("combat") if isinstance(state_payload.get("combat"), dict) else {}
+    turn = state_payload.get("turn")
+    if turn is None:
+        turn = combat.get("turn")
     screen = state_payload.get("screen") or state_payload.get("screen_type")
     if not screen:
         # `/state` 不可用时**不**把 screen 判成"未知界面"，而是显式标出降级，
@@ -118,6 +122,7 @@ def normalize_snapshot(state_payload: Dict[str, Any], actions_payload: Dict[str,
         "floor": _safe_int(state_payload.get("floor") or state_payload.get("act_floor") or run.get("floor")),
         "act": _safe_int(state_payload.get("act") or run.get("act") or run.get("act_id")),
         "in_combat": bool(state_payload.get("in_combat", False)),
+        "turn": _safe_int(turn) if turn is not None else None,
         "run_id": state_payload.get("run_id"),
         "character": state_payload.get("character") or state_payload.get("character_id") or run.get("character_id") or "",
         "available_actions": actions,

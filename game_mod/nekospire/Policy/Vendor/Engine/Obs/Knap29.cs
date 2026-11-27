@@ -218,7 +218,7 @@ public sealed partial class Observation
                     k.Sc = k.IsStarX ? 0 : Math.Max(0, StarCost(card));
                     k.Attack = card.Type == CardType.Attack;
                     k.Shoot = arrowDim && IsShoot(card);
-                    k.Melody = IsMelody(card);
+                    k.Melody = KiVerseCard(card);      // 只用于叽 诗句：v0.114.0 起只有带哇或啾的牌多打一次（KiVersePower.ModifyCardPlayCount 去掉了 Ki）
                     k.Wah = card.Tags.Contains(CardTag.Wah);
                     k.IsMaul = card is Maul;
                     k.IsFiend = card is FiendFire;
@@ -745,7 +745,7 @@ public sealed partial class Observation
                 foreach (var l in ls)
                     n *= l is SlowPower sp && sp.Owner == f && props.IsPoweredAttack() ? 1m + 0.1m * ((decimal)slowS + extra) : l.ModifyDamageMultiplicative(f, n, props, dealer, c, null);
                 foreach (var l in ls) n *= l.ModifyDamageMultiplicativeLate(f, n, props, dealer, c, null);
-                foreach (var l in ls) { var x = l.ModifyDamageCap(f, props, dealer, c, null); if (n > x) n = x; }
+                foreach (var l in ls) { var x = l.ModifyDamageCap(f, props, dealer, c, null); if (n > x) n = x; } n = Math.Min(n, OldHtkCap(f));      // v0.114.0：难杀照旧口径封顶（见 Damage.cs OldHtkCap）
                 return MathF.Floor((float)Math.Max(0m, n));
             }
             catch { return -1; }

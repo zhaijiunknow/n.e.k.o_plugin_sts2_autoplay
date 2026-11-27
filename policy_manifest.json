@@ -3,8 +3,9 @@
  "runtime_version": "py3.12.9-torch2.15.0-cpu-1",
  "upstream": {
   "repository": "https://github.com/hmty-CHEN/AlphaDefect-Public",
-  "commit": "068953d3f62278ab36cac62850b437f33a5ad3b3",
-  "game_version": "v0.113.1"
+  "commit": "f77831b6ea77b8ece32daf1912154ae081da875c",
+  "game_version": "v0.114.0",
+  "source_root": "game-v0.114.0"
  },
  "runtime": [
   {
@@ -131,44 +132,22 @@
    "name": "engine__catalog__vocab.txt",
    "kind": "catalog",
    "dest": "engine/catalog/vocab.txt",
-   "size": 64831,
-   "sha256": "b9ba21326c3d90dc85284eb51bc6cd1b95739c56cabd458d502019dc7c6ab0a1",
+   "size": 64860,
+   "sha256": "a6fa3596e6e4e570f3bd00ab596fcc6e5dd595d472a3ec08f9bc24aba8079c8b",
    "urls": [
-    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/vocab.txt",
-    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/vocab.txt"
-   ]
-  },
-  {
-   "name": "engine__catalog__v0.113.1__catalog.json",
-   "kind": "catalog",
-   "dest": "engine/catalog/v0.113.1/catalog.json",
-   "size": 658101,
-   "sha256": "e6f949f74d79cf1507e96dcf3b1c10ba7952a2707d5cf09fadbc80330915cc91",
-   "urls": [
-    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/v0.113.1/catalog.json",
-    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/v0.113.1/catalog.json"
-   ]
-  },
-  {
-   "name": "engine__catalog__v0.111.0__catalog.json",
-   "kind": "catalog",
-   "dest": "engine/catalog/v0.111.0/catalog.json",
-   "size": 572346,
-   "sha256": "fda991c75d9cd9efc10194d564d74a15a2cc3fcbaaf44ab3147b29ef0d084b69",
-   "urls": [
-    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/v0.111.0/catalog.json",
-    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/v0.111.0/catalog.json"
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@f77831b6ea77b8ece32daf1912154ae081da875c/game-v0.114.0/engine/catalog/vocab.txt",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/f77831b6ea77b8ece32daf1912154ae081da875c/game-v0.114.0/engine/catalog/vocab.txt"
    ]
   },
   {
    "name": "engine__catalog__aliases.txt",
    "kind": "catalog",
    "dest": "engine/catalog/aliases.txt",
-   "size": 1521,
-   "sha256": "0a9ff41a14e58b998901cae8d4157c4e8763892dbb1cec1e9dae2fae050ff85a",
+   "size": 2166,
+   "sha256": "9d76e3b2eacbeb2dba032553c3f53b4532ea8b2aa2f2cb6e273cdd874a3dce78",
    "urls": [
-    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/aliases.txt",
-    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/aliases.txt"
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@f77831b6ea77b8ece32daf1912154ae081da875c/game-v0.114.0/engine/catalog/aliases.txt",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/f77831b6ea77b8ece32daf1912154ae081da875c/game-v0.114.0/engine/catalog/aliases.txt"
    ]
   },
   {
@@ -178,8 +157,41 @@
    "size": 1754,
    "sha256": "66a465343a09b5e48675816631a83e31320fa0193d992ffa9f198aead4339935",
    "urls": [
-    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/no_downside_relics.txt",
-    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/068953d3f62278ab36cac62850b437f33a5ad3b3/engine/catalog/no_downside_relics.txt"
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@f77831b6ea77b8ece32daf1912154ae081da875c/game-v0.114.0/engine/catalog/no_downside_relics.txt",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/f77831b6ea77b8ece32daf1912154ae081da875c/game-v0.114.0/engine/catalog/no_downside_relics.txt"
+   ]
+  },
+  {
+   "name": "engine__catalog__v0.114.0__catalog.json",
+   "kind": "catalog",
+   "dest": "engine/catalog/v0.114.0/catalog.json",
+   "size": 657909,
+   "sha256": "73e884b582817bdb4ef70bc01c0ad11e1e0989dc1c00c370468b52c8fefb8929",
+   "urls": [
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@f77831b6ea77b8ece32daf1912154ae081da875c/game-v0.114.0/engine/catalog/v0.114.0/catalog.json",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/f77831b6ea77b8ece32daf1912154ae081da875c/game-v0.114.0/engine/catalog/v0.114.0/catalog.json"
+   ]
+  },
+  {
+   "name": "engine__catalog__v0.111.0__catalog.json",
+   "kind": "catalog",
+   "dest": "engine/catalog/v0.111.0/catalog.json",
+   "size": 572346,
+   "sha256": "fda991c75d9cd9efc10194d564d74a15a2cc3fcbaaf44ab3147b29ef0d084b69",
+   "urls": [
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@f77831b6ea77b8ece32daf1912154ae081da875c/engine/catalog/v0.111.0/catalog.json",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/f77831b6ea77b8ece32daf1912154ae081da875c/engine/catalog/v0.111.0/catalog.json"
+   ]
+  },
+  {
+   "name": "engine__catalog__v0.113.1__catalog.json",
+   "kind": "catalog",
+   "dest": "engine/catalog/v0.113.1/catalog.json",
+   "size": 658101,
+   "sha256": "e6f949f74d79cf1507e96dcf3b1c10ba7952a2707d5cf09fadbc80330915cc91",
+   "urls": [
+    "https://cdn.jsdelivr.net/gh/hmty-CHEN/AlphaDefect-Public@f77831b6ea77b8ece32daf1912154ae081da875c/engine/catalog/v0.113.1/catalog.json",
+    "https://raw.githubusercontent.com/hmty-CHEN/AlphaDefect-Public/f77831b6ea77b8ece32daf1912154ae081da875c/engine/catalog/v0.113.1/catalog.json"
    ]
   }
  ],

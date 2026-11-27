@@ -15,7 +15,7 @@
 默认档（`serious`）下 `service.py:793` 早退，`ordered_candidates`（唯一调用点 `:804`）不可达，
 所以本文件里的 `_ranked_option_indices` 直调**绕过了那道闸**。这些测试只证明
 "`_apply_run_lessons` 这一层是对的"，**不能**当作"决策被改变了"的证据。
-真正的位移判据在 `.dsh-artifacts/reflection_metrics.py` 的 `e2e` 段（`plan()` 端到端）。
+真正的位移判据在 `tools/reflection_metrics.py` 的 `e2e` 段（`plan()` 端到端）。
 
 `_apply_run_lessons` 的**直接**契约（降权/不删除/纯函数）已在
 `tests/test_run_lessons_affect_decision.py` 钉牢，本文件不重复，只做**跨屏扩展**。
@@ -979,12 +979,12 @@ def test_ranking_layer_is_not_the_decision_layer() -> None:
     #   用 realpath 是为了让临时目录里的 junction/符号链接副本也能回溯到真实仓库。
     _here = Path(os.path.realpath(__file__)).resolve()
     candidates = [
-        str(parent / ".dsh-artifacts" / "reflection_metrics.py")
+        str(parent / "tools" / "reflection_metrics.py")
         for parent in _here.parents
     ]
     metrics_path = next((path for path in candidates if os.path.exists(path)), None)
     assert metrics_path, (
-        "找不到度量脚手架 `.dsh-artifacts/reflection_metrics.py`。"
+        "找不到度量脚手架 `tools/reflection_metrics.py`。"
         "它是 t10 交付物，也是 t11/t13 前后对照的唯一判据来源 —— 缺了它本仓库的"
         "『提升』就无法度量。探测过：" + " | ".join(candidates)
     )

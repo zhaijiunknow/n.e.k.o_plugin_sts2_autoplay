@@ -30,6 +30,9 @@ internal static class PolicyHooks
         if (Installed) return;
         var h = new Harmony("nekospire.policy");
         Observation.DrawTop.Install(h);
+        // v0.114.0 damage previews already include HP-loss hooks. The encoder applies
+        // them itself; scope the upstream raw preview hook to encoding only.
+        Observation.RawPreview.Install(h);
         foreach (var m in typeof(CardSelectCmd).GetMethods(BindingFlags.Public | BindingFlags.Static)
                      .Where(m => !m.ContainsGenericParameters && m.Name.StartsWith("From", StringComparison.Ordinal)))
         {

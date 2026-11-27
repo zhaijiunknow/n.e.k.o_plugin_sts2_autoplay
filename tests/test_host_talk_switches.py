@@ -185,3 +185,30 @@ def test_startup_reads_the_switch_config() -> None:
 
     assert service._state.host_digest_enabled is False
     assert service._state.run_reflection_enabled is False
+
+
+@pytest.mark.parametrize("kind", ["situation_digest", "autoplay_commentary", "character_announcement", "stuck_alert"])
+def test_digest_final_gate_blocks_all_digest_paths(kind):
+    calls = []
+    service = STS2AutoplayService(DummyLogger(), lambda payload: None, lambda **k: calls.append(k))
+    service.set_host_digest_enabled(False)
+    assert not service._is_host_commentary_enabled()
+    assert not service._push_host_commentary("这回合先防御", scene_key="combat-1")
+    service._push_proactive_to_host("迟到的点评", kind=kind)
+    assert not calls
+    # The review switch remains independent of the digest switch.
+    service._push_proactive_to_host("复盘", kind="run_review")
+    assert len(calls) == 1
+    service.set_host_digest_enabled(True)
+    assert service._push_host_commentary("这回合先防御", scene_key="combat-1")
+    assert len(calls) == 2
+
+
+def test_reflection_final_gate_preserves_digest_channel():
+    calls = []
+    service = STS2AutoplayService(DummyLogger(), lambda payload: None, lambda **k: calls.append(k))
+    service.set_run_reflection_enabled(False)
+    service._push_proactive_to_host("迟到的复盘", kind="run_review")
+    assert not calls
+    service._push_proactive_to_host("速报", kind="situation_digest")
+    assert len(calls) == 1

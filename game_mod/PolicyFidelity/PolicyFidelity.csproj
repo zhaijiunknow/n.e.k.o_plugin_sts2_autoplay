@@ -29,8 +29,8 @@
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CS0162;CS0168;CS0219;CS0414;CS0649;CS1998</NoWarn>
     <AlphaDefectUpstream Condition="'$(AlphaDefectUpstream)' == ''">D:/NekoClaw/_refs/AlphaDefect-Public</AlphaDefectUpstream>
-    <HeadlessDir>$(AlphaDefectUpstream)/engine/Sts2Headless</HeadlessDir>
-    <Sts2GameVersion Condition="'$(Sts2GameVersion)' == ''">v0.113.1</Sts2GameVersion>
+    <HeadlessDir>$(AlphaDefectUpstream)/game-v0.114.0/engine/Sts2Headless</HeadlessDir>
+    <Sts2GameVersion Condition="'$(Sts2GameVersion)' == ''">v0.114.0</Sts2GameVersion>
     <!-- Upstream's layout: a copy of the game's data directory plus the localization extracted from the pck. -->
     <Sts2GameDir Condition="'$(Sts2GameDir)' == ''">$(USERPROFILE)/.local/share/sls2/game/$(Sts2GameVersion)</Sts2GameDir>
     <NekospireDll Condition="'$(NekospireDll)' == ''">$(MSBuildThisFileDirectory)../nekospire/bin/Release/net9.0/nekospire.dll</NekospireDll>
@@ -53,8 +53,8 @@
   <ItemGroup>
     <RuntimeHostConfigurationOption Include="Sts2GameDir" Value="$(Sts2GameDir)" />
     <RuntimeHostConfigurationOption Include="Sts2GameVersion" Value="$(Sts2GameVersion)" />
-    <RuntimeHostConfigurationOption Include="Sts2Vocab" Value="$(AlphaDefectUpstream)/engine/catalog/vocab.txt" />
-    <RuntimeHostConfigurationOption Include="Sts2NoDownsideRelics" Value="$(AlphaDefectUpstream)/engine/catalog/no_downside_relics.txt" />
+    <RuntimeHostConfigurationOption Include="Sts2Vocab" Value="$(AlphaDefectUpstream)/game-v0.114.0/engine/catalog/vocab.txt" />
+    <RuntimeHostConfigurationOption Include="Sts2NoDownsideRelics" Value="$(AlphaDefectUpstream)/game-v0.114.0/engine/catalog/no_downside_relics.txt" />
     <RuntimeHostConfigurationOption Include="NekoPolicyData" Value="$(NekoPolicyData)" />
   </ItemGroup>
 

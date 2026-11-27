@@ -50,7 +50,7 @@ public sealed partial class Observation
         foreach (var l in ls) n += l.ModifyDamageAdditive(t, n, props, dealer, c, null);
         foreach (var l in ls) n *= l.ModifyDamageMultiplicative(t, n, props, dealer, c, null);
         foreach (var l in ls) n *= l.ModifyDamageMultiplicativeLate(t, n, props, dealer, c, null);
-        foreach (var l in ls) { var x = l.ModifyDamageCap(t, props, dealer, c, null); if (n > x) n = x; }
+        foreach (var l in ls) { var x = l.ModifyDamageCap(t, props, dealer, c, null); if (n > x) n = x; } n = Math.Min(n, OldHtkCap(t));      // v0.114.0：难杀照旧口径封顶（见 Damage.cs OldHtkCap）
         return MathF.Floor((float)Math.Max(0m, n));
     }
 

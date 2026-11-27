@@ -133,7 +133,9 @@ _PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
 
 def _code_files() -> list[Path]:
     out = []
-    for path in _PLUGIN_ROOT.rglob("*.py"):
+    # A/B user-facing strings live in root plugin modules, not generated backups,
+    # vendored inference code or developer tools. Never scan the whole checkout.
+    for path in _PLUGIN_ROOT.glob("*.py"):
         if "__pycache__" in path.parts or "tests" in path.parts:
             continue
         out.append(path)

@@ -292,6 +292,8 @@ def test_host_digest_needs_a_scene_change_and_is_throttled() -> None:
 
     service._state.last_host_digest_at = 0.0  # 越过节流窗
     service._push_host_situation_digest(_combat_snapshot(turn=4), payload)
+    assert len(calls) == 1  # 只变回合号，不应重报同一组事实。
+    service._push_host_situation_digest(_combat_snapshot(turn=4), _combat_payload(hp=45))
     assert len(calls) == 2
 
 

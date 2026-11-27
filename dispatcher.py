@@ -61,7 +61,9 @@ class STS2Dispatcher:
             "priority": priority,
             "metadata": dict(metadata),
         }
-        host_content = _host_reply_text(content)
+        # 速报含事实与生成约束；截到 30 字可能只剩开场，增加本体拿旧记忆补写的风险。
+        proactive = metadata.get("prompt_ephemeral") is True and metadata.get("delivery_semantics") == "proactive"
+        host_content = str(content or "").strip() if proactive else _host_reply_text(content)
         if visibility is not None or ai_behavior is not None:
             kwargs.update(
                 {
@@ -72,7 +74,7 @@ class STS2Dispatcher:
             )
             kwargs["metadata"]["description"] = description
             kwargs["metadata"]["message_type"] = message_type
-            kwargs["metadata"]["delivery_semantics"] = "passive"
+            kwargs["metadata"]["delivery_semantics"] = "proactive" if proactive else "passive"
         else:
             kwargs.update(
                 {

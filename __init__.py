@@ -197,16 +197,9 @@ class STS2AutoplayPlugin(NekoPluginBase):
     )
     @_ui.action(id="sts2_get_status", label=tr("entries.sts2_get_status.name", default="sts2_get_status"), tone="default", group="status", order=20)
     async def sts2_get_status(self, **_: Any):
-        async def action() -> JsonObject:
-            payload = await self._service.get_status()
-            self._get_dispatcher().push_status_feedback(
-                str(payload.get("summary") or payload.get("message") or self.i18n.t("messages.get_status.done", default="已获取尖塔状态。")),
-                entry_id="sts2_get_status",
-                ai_behavior="respond",
-            )
-            return payload
-
-        return await self._run_entry(action)
+        # 状态页每 5 秒轮询；查询只返回数据，不能绕过速报开关/节流触发本体开口。
+        # 对话中的主动查询由 llm_get_status 的工具返回值回答，无需另发主动消息。
+        return await self._run_entry(self._service.get_status)
 
     @plugin_entry(
         id="sts2_read_state",
@@ -379,6 +372,41 @@ class STS2AutoplayPlugin(NekoPluginBase):
         return await self._run_entry(lambda: self._service.neko.set_companion_mode(False))
 
     @plugin_entry(
+        id="sts2_get_settings", name="读取参数配置",
+        description="只读取可公开的参数及取值范围，不启动游戏、不下载模型、不修改设置。",
+        input_schema={"type": "object", "properties": {}}, metadata={"agent_auto": False},
+    )
+    @_ui.action(id="sts2_get_settings", label="读取参数配置", group="settings", order=10)
+    async def sts2_get_settings(self, **_: Any):
+        async def read() -> JsonObject:
+            return self._service.get_settings()
+        return await self._run_entry(read)
+
+    @plugin_entry(
+        id="sts2_update_settings", name="保存参数配置",
+        description="只保存提交的参数；先校验并持久化，再应用。启动偏好下次启动生效。",
+        input_schema={"type": "object", "properties": {"patch": {"type": "object"}},
+                      "required": ["patch"], "additionalProperties": False},
+        metadata={"agent_auto": False},
+    )
+    @_ui.action(id="sts2_update_settings", label="保存参数配置", group="settings", order=20)
+    async def sts2_update_settings(self, patch: JsonObject, **extra: Any):
+        from .settings_config import validate_patch
+
+        async def apply() -> JsonObject:
+            if extra:
+                raise ValueError("包含不支持的请求参数")
+            clean = validate_patch(patch)
+            if not hasattr(self, "_settings_lock"):
+                self._settings_lock = asyncio.Lock()
+            async with self._settings_lock:
+                # Host merges this section by key. Never persist a whole UI snapshot.
+                await self.config.update({"sts2": clean})
+                self._cfg.update(clean)
+                return await self._service.apply_settings(clean)
+        return await self._run_entry(apply)
+
+    @plugin_entry(
         id="sts2_set_map_policy",
         name="联机地图等待设置",
         description="保存地图策略和联机跟票等待秒数；0 表示不等待，默认 20 秒。wait 无限等指令，auto 立即选路。",
@@ -413,6 +441,34 @@ class STS2AutoplayPlugin(NekoPluginBase):
         return await self._run_entry(apply)
 
     @plugin_entry(
+        id="sts2_set_livestream",
+        name="尖塔直播模式",
+        description="开关直播模式，延长战斗外选择并通过 NEKO Live 接相关评论。focused 认真、casual 随性、chaotic 整活；不改变战斗求解器，也不自动开启直播间。",
+        llm_result_fields=["summary"],
+        input_schema={"type": "object", "properties": {
+            "enabled": {"type": "boolean"},
+            "profile": {"type": "string", "enum": ["focused", "casual", "chaotic"], "default": "casual"},
+            "wait_scale": {"type": "number", "minimum": 0.25, "maximum": 3, "default": 1},
+        }, "required": ["enabled"]},
+        metadata={"agent_auto": False},
+    )
+    @_ui.action(id="sts2_set_livestream", label="直播模式", tone="default", group="companion", order=35)
+    async def sts2_set_livestream(self, enabled: bool = True, profile: str = "casual", wait_scale: float = 1, **_: Any):
+        from .livestream import settings
+
+        async def apply() -> JsonObject:
+            patch = settings(enabled, profile, wait_scale)
+            await self.config.update({"sts2": patch})
+            self._cfg.update(patch)
+            result = await self._service.set_livestream(patch)
+            result["saved"] = True
+            if not result["mod_sync"].get("applied"):
+                result["summary"] += " 设置已保存；mod 尚未同步，重新连接时重试。"
+            return result
+
+        return await self._run_entry(apply)
+
+    @plugin_entry(
         id="sts2_set_danmaku",
         name=tr("entries.sts2_set_danmaku.name", default="开关游戏内弹幕"),
         description=tr(
@@ -432,6 +488,20 @@ class STS2AutoplayPlugin(NekoPluginBase):
     @_ui.action(id="sts2_set_danmaku", label=tr("entries.sts2_set_danmaku.name", default="sts2_set_danmaku"), tone="default", group="companion", order=30)
     async def sts2_set_danmaku(self, enabled: bool = True, **_: Any):
         return await self._run_entry(lambda: self._service.neko.set_danmaku(enabled))
+
+    async def _save_host_talk_switch(self, key: str, enabled: bool) -> JsonObject:
+        """Persist before changing runtime; share the parameter page's write lock."""
+        from .settings_config import validate_patch
+
+        patch = validate_patch({key: enabled})
+        if not hasattr(self, "_settings_lock"):
+            self._settings_lock = asyncio.Lock()
+        async with self._settings_lock:
+            await self.config.update({"sts2": patch})
+            self._cfg.update(patch)
+            setter = (self._service.set_host_digest_enabled if key == "host_digest_enabled"
+                      else self._service.set_run_reflection_enabled)
+            return setter(enabled) | {"saved": True}
 
     @plugin_entry(
         id="sts2_set_host_digest",
@@ -454,7 +524,7 @@ class STS2AutoplayPlugin(NekoPluginBase):
     @_ui.action(id="sts2_set_host_digest", label=tr("entries.sts2_set_host_digest.name", default="sts2_set_host_digest"), tone="default", group="companion", order=40)
     async def sts2_set_host_digest(self, enabled: bool = True, **_: Any):
         async def action() -> JsonObject:
-            payload = self._service.set_host_digest_enabled(bool(enabled))
+            payload = await self._save_host_talk_switch("host_digest_enabled", enabled)
             self._push_silent_mode_change("sts2_set_host_digest", payload)
             return payload
 
@@ -481,7 +551,7 @@ class STS2AutoplayPlugin(NekoPluginBase):
     @_ui.action(id="sts2_set_run_reflection", label=tr("entries.sts2_set_run_reflection.name", default="sts2_set_run_reflection"), tone="default", group="companion", order=50)
     async def sts2_set_run_reflection(self, enabled: bool = True, **_: Any):
         async def action() -> JsonObject:
-            payload = self._service.set_run_reflection_enabled(bool(enabled))
+            payload = await self._save_host_talk_switch("run_reflection_enabled", enabled)
             self._push_silent_mode_change("sts2_set_run_reflection", payload)
             return payload
 
@@ -652,7 +722,7 @@ class STS2AutoplayPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def llm_set_host_digest(self, enabled: bool = True, **_: Any) -> JsonObject:
-        result = self._service.set_host_digest_enabled(bool(enabled))
+        result = await self._save_host_talk_switch("host_digest_enabled", enabled)
         return {"ok": result.get("status") == "ok", "enabled": bool(result.get("enabled"))}
 
     @llm_tool(
@@ -676,7 +746,7 @@ class STS2AutoplayPlugin(NekoPluginBase):
         timeout=20.0,
     )
     async def llm_set_run_reflection(self, enabled: bool = True, **_: Any) -> JsonObject:
-        result = self._service.set_run_reflection_enabled(bool(enabled))
+        result = await self._save_host_talk_switch("run_reflection_enabled", enabled)
         return {"ok": result.get("status") == "ok", "enabled": bool(result.get("enabled"))}
 
 

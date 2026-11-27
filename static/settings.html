@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>NekoSpire · 参数配置</title><link rel="stylesheet" href="ui.css?v=20261127-parameters2"><script src="ui.js?v=20261127-parameters2" defer></script><script src="settings.js?v=20261127-parameters2" defer></script></head>
+<body><div class="wrap"><header class="masthead" id="masthead"></header><main>
+<div class="page-heading"><div><div class="eyebrow">PREFERENCES / 参数配置</div><h1>调整同行的节奏。</h1><p class="sub">策略网络、操作节奏、弹幕速报、直播与复盘，统一在这里配置。<br>游玩控制页保留常用快捷按钮，与这里共享设置；打开本页不会修改参数。</p></div><span class="chapter" aria-hidden="true">04</span></div>
+<section class="panel preferences-overview" aria-labelledby="preferences-title">
+<div class="setting-label"><h2 id="preferences-title">全部参数</h2><span class="badge" id="preferences-load-state" role="status" aria-live="polite">正在读取</span></div>
+<p class="note" id="preferences-overview-note">除联机地图外，还有以下 5 组通用参数。加载完成后可编辑，未读取时不会填入默认值。</p>
+<nav class="preferences-nav" aria-label="参数分组"><a href="#settings-map">联机地图</a><a href="#settings-policy">策略网络</a><a href="#settings-pace">操作节奏</a><a href="#settings-commentary">弹幕与解说</a><a href="#settings-live">直播模式</a><a href="#settings-records">复盘、记录与启动</a></nav>
+<button type="button" id="preferences-retry" hidden>重新读取通用参数</button>
+</section>
+<div class="setting-grid">
+<section class="setting wide" id="settings-map"><div class="setting-label"><h3>联机地图协作</h3><span class="setting-number">01</span></div><p class="note">跟随队友时，有人投票就立即跟票；无人投票则等待指定秒数，超时后自己选。单人局不受影响。</p><form class="map-form" id="map-form"><label>地图策略<select id="map-policy" disabled><option value="follow">跟随队友 · 超时自己选</option><option value="wait">等待玩家指令 · 无限等待</option><option value="auto">自动选路 · 不等待</option></select></label><label>等待秒数<input id="map-wait" type="number" min="0" max="86400" step="any" required disabled></label><button class="primary" type="submit" id="map-save" disabled>保存并应用</button><button type="button" id="map-refresh">读取设置</button></form><p class="note" id="map-note">读取后再修改，不会用默认值覆盖已保存的设置。等待 0 秒表示立即自己选；保存会重新计时。</p><div class="action-feedback" id="feedback" role="status" aria-live="polite"></div></section>
+</div>
+<form id="preferences-form" aria-busy="false">
+<div class="section-head"><h2>通用参数</h2><span>仅保存修改项 · 不包含连接凭据</span></div>
+<div id="preferences-fields" class="setting-grid">
+<section class="setting" id="settings-policy"><h3>策略网络</h3><p class="note">网络开关、推理超时。正在读取…</p></section>
+<section class="setting" id="settings-pace"><h3>操作节奏</h3><p class="note">出牌间隔、活跃与空闲轮询、事件流兜底。正在读取…</p></section>
+<section class="setting" id="settings-commentary"><h3>弹幕与解说</h3><p class="note">弹幕、尖塔速报、模型点评、点评频率与概率。正在读取…</p></section>
+<section class="setting" id="settings-live"><h3>直播模式</h3><p class="note">直播开关、玩法与等待倍率。正在读取…</p></section>
+<section class="setting" id="settings-records"><h3>记录与启动偏好</h3><p class="note">局末复盘、记录采集、诊断日志、启动时自动游玩。正在读取…</p></section>
+</div>
+<div class="preferences-actions"><p class="note" id="preferences-note">运行参数保存后生效；启动偏好将在下次启动读取。</p><div class="btn-row"><button class="primary" type="submit" id="preferences-save" disabled>保存修改</button><button type="button" id="preferences-refresh">读取参数</button></div></div>
+<p id="preferences-feedback" class="action-feedback" role="status" aria-live="polite"></p>
+</form>
+<details class="advanced"><summary>查看最近一次返回结果</summary><pre id="result">等待查询…</pre></details>
+</main><footer class="footer"><span>NEKOSPIRE / 你的协作偏好</span><a href="sts2.html?v=20261127-parameters2">返回游玩控制 ↗</a></footer></div></body></html>

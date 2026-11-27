@@ -97,6 +97,9 @@ class STS2LoopRunner:
 
     def __init__(self, service: Any) -> None:
         self._service = service
+        self._decision_engine: dict[str, Any] = {}
+        self._decision_engine_generation = 0
+        self._decision_tick = 0
         self._poll_task: asyncio.Task[Any] | Future[Any] | None = None
         self._autoplay_task: asyncio.Task[Any] | Future[Any] | None = None
         # ★ t52：内存自检任务（每 N 秒一行 `[sts2_mem]`；`memory_report_interval_seconds<=0` 时不起）
@@ -153,7 +156,50 @@ class STS2LoopRunner:
         # ★★ t14/D4（批 2）业务事件静默检测的起算时刻（0.0 = 已收到过业务事件）。
         self._business_silence_since = 0.0
 
+    def _set_decision_engine(
+        self, engine: str, phase: str, detail: str, snapshot: dict[str, Any], *, tick_id: int,
+    ) -> dict[str, Any]:
+        advisor = getattr(self._service, "_policy_advisor", None)
+        record = {
+            "engine": engine, "phase": phase, "detail": detail,
+            "character": str(snapshot.get("character") or ""),
+            "screen": str(snapshot.get("screen") or "unknown"),
+            "updated_at": time(), "generation": self._decision_engine_generation,
+            "policy_enabled": bool(getattr(advisor, "enabled", False)),
+        }
+        # Polling and autoplay can overlap: an older tick must not overwrite newer routing.
+        if tick_id == self._decision_tick:
+            self._decision_engine = record
+        return record
+
+    def decision_engine_status(self) -> dict[str, Any]:
+        """Actual tick routing, never inferred from cumulative counts or review recommendations."""
+        state = self._service._state
+        record = dict(self._decision_engine)
+        reason = ""
+        phase = "inactive"
+        if getattr(state, "transport_state", "") != "connected":
+            reason = "游戏未连接，无法确认当前主脑"
+        elif getattr(state, "standby", False):
+            reason = "当前待机，未接管游戏"
+        elif getattr(state, "autoplay_state", "") != "running":
+            reason = "自动游玩未运行；陪玩建议不代表正在接管"
+        elif not self._service._mode_controller.describe(state.control_mode).get("allows_planner"):
+            reason = "当前控制模式未启用自动规划"
+        elif not record or record.get("generation") != self._decision_engine_generation:
+            reason = "等待本轮决策"
+            phase = "checking"
+        elif record.get("policy_enabled") != bool(getattr(getattr(self._service, "_policy_advisor", None), "enabled", False)):
+            reason = "策略网络开关已变更，等待下一轮决策"
+            phase = "checking"
+        if reason:
+            return {"engine": "unknown", "phase": phase, "detail": reason}
+        return record
+
     async def tick(self) -> dict[str, Any]:
+        self._decision_tick += 1
+        tick_id = self._decision_tick
+        decision_engine = self._set_decision_engine("unknown", "checking", "正在读取局面并确认决策来源", {}, tick_id=tick_id)
         client = self._service._require_client()
         # ★★ D10（t26）修复：`/state` 失败时**降级**到 `/actions/available`，而不是中止整个 tick。
         #
@@ -263,6 +309,24 @@ class STS2LoopRunner:
         policy_operation = await self._policy_operation(client, mode_info, snapshot)
         # 「归网络管但现在动不了」（policy_hold）：这一 tick 不出任何动作，也不让后备接手。
         policy_hold = is_policy_hold(policy_operation)
+        advisor = getattr(self._service, "_policy_advisor", None)
+        if policy_operation is not None:
+            forced = bool((policy_operation.get("policy") or {}).get("forced"))
+            phase = "waiting" if policy_hold else "forced" if forced else "ready"
+            detail = (
+                "网络流程等待：" + str(policy_operation.get("reason") or "等待可行动时机")
+                if policy_hold else "网络流程直接执行确定选项（本步无需模型推理）" if forced
+                else "AlphaDefect 模型已完成本步推理"
+            )
+            decision_engine = self._set_decision_engine("policy", phase, detail, snapshot, tick_id=tick_id)
+        elif mode_info.get("allows_planner"):
+            reason = (
+                "策略网络未启用" if not getattr(advisor, "enabled", False)
+                else "当前界面没有对局角色，不使用角色模型" if not snapshot.get("character")
+                else str(getattr(advisor, "last_fallback_reason", "") or "当前步骤由原有规划器处理")
+            )
+            engine = "solver" if classification.get("state_name") == "combat" else "heuristic"
+            decision_engine = self._set_decision_engine(engine, "planning", reason, snapshot, tick_id=tick_id)
         if policy_hold:
             policy_operation = None
         in_combat_decision = (
@@ -534,6 +598,17 @@ class STS2LoopRunner:
             # 校验与执行按注册表找动作，所以在这里补上。
             action_registry = [*action_registry, dict(POLICY_REGISTRY_ENTRY)]
 
+        if policy_operation is None and not policy_hold and mode_info.get("allows_planner"):
+            source = str((planned_operation_dict or {}).get("source") or "")
+            # Noncombat rules and explicit heuristic fallbacks are not CombatSolver searches.
+            if source == "heuristic":
+                decision_engine["engine"] = "heuristic"
+            elif source in {"mod_solver", "solver_deadlock_breaker"}:
+                decision_engine["engine"] = "solver"
+            decision_engine["phase"] = "ready" if planned_operation_dict else "waiting"
+            decision_engine["operation_source"] = source
+            decision_engine["updated_at"] = time()
+
         agent_operation = planned_operation_dict
 
         executable_operation = self._service._action_engine.validate({**snapshot, "action_registry": action_registry}, agent_operation)
@@ -585,6 +660,7 @@ class STS2LoopRunner:
                 "summary_context": summary_context,
                 "strategy_context": strategy_context,
                 "mode": mode_info,
+                "decision_engine": dict(decision_engine),
                 "planned_operation": planned_operation_dict,
                 "agent_operation": agent_operation,
                 "executable_operation": executable_operation,
@@ -660,6 +736,7 @@ class STS2LoopRunner:
             return 300.0
 
     def start_autoplay(self) -> None:
+        self._decision_engine_generation += 1
         self._shutdown = False
         # ★ 注意：``_autoplay_task`` 的复活是本函数的传统职责；**刷新通路**
         #   （``_event_task`` / ``_poll_task``）的复活由下方 ``start_background()`` 负责。
@@ -885,12 +962,14 @@ class STS2LoopRunner:
                 self._business_silence_since = time()
                 self._mark_sse_connected(True)
                 self._hb_log("event-loop stream_ready (backoff reset)")
-                await self._maybe_event_refresh(force=True)
+                # Sync the live ownership gate before a potentially slow policy refresh.
                 # 连接上 mod 后把其自身 LLM/弹幕交给本插件（mod 可能晚于插件启动），失败静默。
                 try:
                     await self._service._require_client().set_config(llm_enabled=False, danmaku_enabled=False)
+                    await self._service.sync_livestream_to_mod()
                 except Exception:
                     pass
+                await self._maybe_event_refresh(force=True)
                 continue
             if event_type in self._RELEVANT_EVENT_TYPES:
                 # 战斗弹幕只认三个战斗事件（见 _COMBAT_DANMAKU_EVENTS）；非战斗事件清空，
@@ -930,6 +1009,14 @@ class STS2LoopRunner:
                     await asyncio.wait({sub}, timeout=self._BUSINESS_SILENCE_CHECK_EVERY)
                     if sub.done():
                         break
+                    # 没有 SSE 变化事件（包括手动游玩/暂停自动游玩）也能低频陪伴。
+                    # 复用订阅监视时钟，不增加消息队列或另起常驻任务。
+                    idle_tick = getattr(self._service, "_idle_danmaku_tick", None)
+                    if idle_tick is not None:
+                        try:
+                            await idle_tick()
+                        except Exception as exc:
+                            self._hb_log("idle-danmaku refresh failed: %r" % (exc,))
                     if await self._business_silence_expired():
                         self._hb_log("event-loop 因业务静默被强制重置（wakes=%d）" % wakes)
                         sub.cancel()

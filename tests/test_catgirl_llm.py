@@ -188,7 +188,7 @@ def test_catgirl_llm_async_falls_back_when_llm_produces_nothing() -> None:
     async def fake_combat_prompt(snapshot, payload):
         return "本轮: 打打击"
 
-    async def fake_push(text):
+    async def fake_push(text, **kwargs):
         pushed.append(text)
 
     service._catgirl_llm = SilentGenerator()

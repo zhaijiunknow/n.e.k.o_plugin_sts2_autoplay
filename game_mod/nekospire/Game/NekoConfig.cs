@@ -3,15 +3,23 @@
 // (System.Text.Json, atomic write). Loaded on mod init; edited via NekoConfigWindow.
 using System;
 using System.IO;
-using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Godot;
 
 namespace NekoComm.Game
 {
     internal sealed class NekoConfig
     {
+        private const int CurrentSchemaVersion = 1;
+        public int schema_version { get; set; } = CurrentSchemaVersion;
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? Extra { get; set; }
+        private static readonly object FileGate = new();
+        private static bool _saveBlocked;
         public bool coop_enabled { get; set; }
+        // The plugin owns noncombat presentation windows; standalone co-op must not race it.
+        public bool livestream_enabled { get; set; }
         // Port of the catgirl (co-op client) instance. Autoplay drives the local player when this
         // process's own API port (STS2_API_PORT, else HttpServer.DefaultPort) equals coop_client_port.
         // Override with the STS2_COOP_PORT env var; see NekoAutoplayDriver.ResolveCoopClientPort().
@@ -34,6 +42,10 @@ namespace NekoComm.Game
         public bool danmaku_push_enabled { get; set; } = true;
         // Co-op map votes: when true the catgirl follows a vote the other player already cast instead of
         // racing to vote its own preferred node; it only votes on its own after vote_wait_seconds.
+        // Plugin policy is a lease, not a standalone preference. Never persist it in the
+        // shared settings file: a crashed plugin must not leave standalone co-op waiting forever.
+        [JsonIgnore]
+        public string coop_map_policy { get; set; } = "wait";
         public bool coop_map_follow_player { get; set; } = true;
         public int coop_map_vote_wait_seconds { get; set; } = 20;
         // When the main menu shows a resumable run (Continue enabled), the catgirl refuses to click
@@ -74,35 +86,96 @@ namespace NekoComm.Game
 
         private static string ConfigPath => ProjectSettings.GlobalizePath("user://NekoSpire/settings.json");
 
-        public static void Load()
+        public static void Load() => LoadFromPath(ConfigPath);
+
+        internal static void LoadFromPath(string path)
         {
-            try
+            lock (FileGate)
             {
-                var path = ConfigPath;
-                if (File.Exists(path))
-                    Current = JsonSerializer.Deserialize<NekoConfig>(File.ReadAllText(path), Options) ?? new NekoConfig();
-            }
-            catch
-            {
+                _saveBlocked = false;
                 Current = new NekoConfig();
+                if (!File.Exists(path))
+                    return;
+                try
+                {
+                    var json = File.ReadAllText(path);
+                    using var document = JsonDocument.Parse(json);
+                    if (document.RootElement.ValueKind != JsonValueKind.Object)
+                        throw new JsonException("Settings must be an object.");
+                    // Match deserializer case-insensitivity; never silently downgrade future data.
+                    foreach (var property in document.RootElement.EnumerateObject())
+                    {
+                        if (property.Name.Equals("schema_version", StringComparison.OrdinalIgnoreCase)
+                            && (property.Value.ValueKind != JsonValueKind.Number
+                                || !property.Value.TryGetInt32(out var version)
+                                || version < 0 || version > CurrentSchemaVersion))
+                        {
+                            _saveBlocked = true;
+                            GD.PrintErr("[NekoSpire] unsupported settings schema; saving disabled to preserve the file.");
+                            return;
+                        }
+                    }
+                    Current = JsonSerializer.Deserialize<NekoConfig>(json, Options)
+                        ?? throw new JsonException("Empty settings object.");
+                    Current.schema_version = CurrentSchemaVersion;
+                }
+                catch (JsonException ex)
+                {
+                    // Do not allow the next automatic /config sync to destroy an unrecoverable file.
+                    try
+                    {
+                        var backup = $"{path}.corrupt-{Guid.NewGuid():N}.bak";
+                        File.Copy(path, backup, overwrite: false);
+                        GD.PrintErr($"[NekoSpire] invalid settings; preserved backup at {backup}: {ex.Message}");
+                    }
+                    catch (Exception backupEx)
+                    {
+                        _saveBlocked = true;
+                        GD.PrintErr($"[NekoSpire] settings backup failed; saving disabled: {backupEx.Message}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _saveBlocked = true;
+                    GD.PrintErr($"[NekoSpire] settings load failed; saving disabled: {ex.Message}");
+                }
             }
         }
 
-        public void Save()
+        public void Save() => SaveToPath(ConfigPath);
+
+        internal void SaveToPath(string path)
         {
-            try
+            lock (FileGate)
             {
-                var path = ConfigPath;
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir))
-                    Directory.CreateDirectory(dir);
-                var tmp = path + ".new";
-                File.WriteAllText(tmp, JsonSerializer.Serialize(this, Options), new UTF8Encoding(false));
-                File.Move(tmp, path, overwrite: true);
-            }
-            catch (Exception ex)
-            {
-                GD.PrintErr("[NekoSpire] config save failed: " + ex.Message);
+                if (_saveBlocked)
+                {
+                    GD.PrintErr("[NekoSpire] settings save blocked; repair/reload the preserved file first.");
+                    return;
+                }
+                var tmp = $"{path}.{Guid.NewGuid():N}.new";
+                try
+                {
+                    schema_version = CurrentSchemaVersion;
+                    var dir = Path.GetDirectoryName(path);
+                    if (!string.IsNullOrEmpty(dir))
+                        Directory.CreateDirectory(dir);
+                    using (var stream = new FileStream(tmp, FileMode.CreateNew, System.IO.FileAccess.Write))
+                    {
+                        JsonSerializer.Serialize(stream, this, Options);
+                        stream.Flush(flushToDisk: true);
+                    }
+                    File.Move(tmp, path, overwrite: true);
+                }
+                catch (Exception ex)
+                {
+                    GD.PrintErr("[NekoSpire] config save failed: " + ex.Message);
+                }
+                finally
+                {
+                    try { if (File.Exists(tmp)) File.Delete(tmp); }
+                    catch (Exception ex) { GD.PrintErr("[NekoSpire] config temp cleanup failed: " + ex.Message); }
+                }
             }
         }
     }

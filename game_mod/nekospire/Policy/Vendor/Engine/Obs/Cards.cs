@@ -228,7 +228,9 @@ public sealed partial class Observation
         ok = true;
         try
         {
-            c.UpdateDynamicVarPreview(CardPreviewMode.Normal, target, c.DynamicVars);
+            RawDamagePreview = target != null;
+            try { c.UpdateDynamicVarPreview(CardPreviewMode.Normal, target, c.DynamicVars); }
+            finally { RawDamagePreview = false; }
             foreach (var (name, v) in c.DynamicVars)
             {
                 if (name is "Damage" or "CalculatedDamage") dmg = (float)v.PreviewValue;
@@ -276,6 +278,9 @@ public sealed partial class Observation
             // 格式 20：取整同界面（DynamicVar 显示 (int)PreviewValue）与实际结算（Creature.LoseHpInternal、GainBlockInternal 都截掉小数），虚弱的 13.5 实际是 13
             // v0.113.0 修正第六轮（F113）：格式 19（故障机器人）也取整。原来只有格式 20 起取整，脆弱下防御记成 3.75、实际 3（GainBlockInternal 的 (int)），
             // 候选 8 多记、候选 10 少算掉血；虚弱下伤害同样（LoseHpInternal 的 (int)）
+            // v0.114.0：难杀从伤害上限（ModifyDamageCap）改成掉血钩子，Hook.ModifyDamage 里不再封顶；单段伤害照 v0.113.1 的口径按层数封顶
+            // （难杀只有外骨骼虫有，它没有格挡，与游戏界面的新预览相同）。掉血仍由 FoeHpLoss / SeqHpLoss 经 Hook.ModifyHpLost 算
+            if (dmg > 0 && target != null && target.GetPowerAmount<MegaCrit.Sts2.Core.Models.Powers.HardToKillPower>() is var htk && htk > 0) dmg = Math.Min(dmg, htk);
             if (V20 || F113) { if (dmg > 0) dmg = MathF.Floor(dmg); if (block > 0) block = MathF.Floor(block); }
         }
         catch { ok = false; }

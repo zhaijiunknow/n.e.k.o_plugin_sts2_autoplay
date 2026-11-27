@@ -119,10 +119,17 @@ public sealed partial class Observation
                 case KiHop when arrowed: draw += Var("Cards") * plays; break;
                 case Wrest when mine: draw += Var("Cards"); break;
                 case KiChant when D + R > 0: gen += 1; break;
-                case Florescence or BlotOutTheSky: gen += 1; break;
+                // v0.114.0：怒放改成把手里一张牌变化成全力射击（Florescence.OnPlay：FromHand → Transform），手牌张数不变，不再算进手
+                case BlotOutTheSky: gen += 1; break;
+                // v0.114.0 新牌乐观：消耗手里所有悲伤，消耗几张抽几张（Optimism.OnPlay：cardCount > 0 时 CardPileCmd.Draw）；悲伤离手在 AutoPlays 里记
+                case Optimism: draw += pcs.Hand.Cards.Count(x => x is Sadness && !ReferenceEquals(x, c)); break;
+                // 自嘲：给自己手里塞 "Sadness" 张悲伤（SelfDeprecate.OnPlay，喜悦只给队友；旧遗漏，v0.114.0 复核时补）
+                case SelfDeprecate: gen += Var("Sadness") * plays; break;
                 case BrightenUp: gen += Var("Sadness") + Var("Joy"); break;
                 case Jest or SorrowfulStrike: gen += Var("Cards") * plays; break;
-                case Vitriol or Rummage: gen += plays; break;
+                // v0.114.0：刻薄塞 Cards（2）张悲伤（Vitriol.OnPlay 循环 DynamicVars.Cards 次），翻找仍是 1 张
+                case Vitriol: gen += Var("Cards") * plays; break;
+                case Rummage: gen += plays; break;
                 case MourningBlow: gen += 1; break;
                 case LockedIn when draws.Any(IsShoot): gen += 1; break;
                 // 微光、光子切割、深谋远虑：抽 Cards 张之后从手里选 1 张放回抽牌堆顶，净进手少 1（R1-储君；Glimmer.cs:29-34、PhotonCut.cs:35-36、ThinkingAhead.cs），在封顶之后扣
@@ -198,10 +205,10 @@ public sealed partial class Observation
             var (rh, rd, shots) = c.Type == CardType.Attack || c is Recall or Uproot or Wrest ? ArrowsOut(c, tgt, me, tgtDead) : (0, 0, 0);
             if (c is EpicRetrieval) en += Var("Energy") * (rh + rd);
             if (rh + rd > 0 && me.Creature.GetPower<YahPower>() is { } yah && !InternalFlag(yah, "triggeredThisTurn")) en += yah.Amount;
-            int after = pcs.AvailableArrowCount - shots + rh + rd;
             if (shots > 0) gen += discards.Count(x => x is WhistlingArrows);
-            if (c is TrickShot && pcs.AvailableArrowCount >= 1) gen += 1;
-            if (c is ArrowStab && after >= 1 && discards.Any(IsShoot)) gen += 1;
+            // v0.114.0：花样射击不再回手，改为射出箭时抽 Cards（2/3）张（TrickShot.OnPlay：ShootArrowAtTarget 返回真才 Draw）；
+            // 箭矢戳击不再从弃牌堆拿射击牌（ArrowStab.OnPlay 改成伤害 + 瞄准）
+            if (c is TrickShot) draw += Var("Cards") * shots;
             if (IsMelody(c) && me.Creature.GetPower<MotifPower>() is { } motif) draw += motif.Amount * NewMelodyTags(me, c);
 
             // ---- 能力带出的（G14） ----

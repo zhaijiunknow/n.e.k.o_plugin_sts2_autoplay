@@ -10,8 +10,8 @@ encoder as-is so the frames nekospire emits are the frames the network was train
     python game_mod/scripts/vendor-alphadefect.py --apply    # replace Policy/Vendor + Policy/Data
 
 What it does (--apply):
-  1. deletes every *.cs under Policy/Vendor (stale files would keep compiling otherwise),
-  2. copies the encoder closure and upstream's LICENSE from upstream's HEAD commit (never its working
+  1. deletes stale *.cs under Policy/Vendor (stale files would keep compiling otherwise),
+  2. copies the encoder closure and upstream's LICENSE from upstream's HEAD commit or a fixed-commit GitHub ZIP (never its working
      tree; LF, no BOM),
   3. applies nekospire's own patches below — each carries the number of hits it must produce, so an
      upstream change that moves the patched code fails the script instead of silently dropping a patch,
@@ -28,9 +28,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 from pathlib import Path
+
+from alphadefect_source import UpstreamSource
 
 GAME_MOD = Path(__file__).resolve().parents[1]
 POLICY = GAME_MOD / "nekospire" / "Policy"
@@ -38,7 +39,8 @@ VENDOR = POLICY / "Vendor"
 DATA = POLICY / "Data"
 MANIFEST_PATH = POLICY / "VENDORING-MANIFEST.json"
 
-UPSTREAM_ROOT = "engine/Sts2Headless"
+SOURCE_PREFIX = "game-v0.114.0/"
+UPSTREAM_ROOT = SOURCE_PREFIX + "engine/Sts2Headless"
 # Whole subtrees and single files of the encoder closure, relative to UPSTREAM_ROOT.
 SUBTREES = ["Engine/Obs", "Engine/Compat"]
 FILES = [
@@ -48,9 +50,9 @@ FILES = [
     "Engine/Vocab.cs",
 ]
 DATA_FILES = {
-    "engine/catalog/vocab.txt": "vocab.txt",
-    "engine/catalog/aliases.txt": "aliases.txt",
-    "engine/catalog/no_downside_relics.txt": "no_downside_relics.txt",
+    SOURCE_PREFIX + "engine/catalog/vocab.txt": "vocab.txt",
+    SOURCE_PREFIX + "engine/catalog/aliases.txt": "aliases.txt",
+    SOURCE_PREFIX + "engine/catalog/no_downside_relics.txt": "no_downside_relics.txt",
 }
 
 # --- nekospire patches ----------------------------------------------------------------------------
@@ -74,41 +76,21 @@ LOCAL_PATCHES += [
 ]
 
 
-# Optional 0.113.x APIs: preserve the training frame on the pinned game and use the
-# installed game's non-destructive arrow rules when those members no longer exist.
+# v0.114.0 upstream now handles removed arrow/melody/free-card APIs itself.
+# Keep the one remaining local API bridge; every patch still has an exact hit count.
 LOCAL_PATCHES += [
     ("Engine/Obs/Cards.cs", "copy.UpgradeInternal();",
      "NekoComm.Game.GameApiCompat.UpgradeInternal(copy);", 1, "binary-compatible upgrade preview across game versions"),
-    ("Engine/Obs/Characters/Fool.cs", "a.Status == ArrowStatus.Destroyed",
-     "NekoComm.Game.GameApiCompat.IsDestroyedArrow(a.Status)", 1, "optional destroyed arrow state"),
-    ("Engine/Obs/Characters/Fool.cs", "MegaCrit.Sts2.Core.Commands.MelodyCmd.MelodyCardsPlayedThisTurn(me)",
-     "NekoComm.Game.GameApiCompat.MelodyCardsPlayedThisTurn(me)", 1, "count finished melody plays"),
-    ("Engine/Obs/Gains26.cs", "l is FreeCardPower or FreeAttackPower or FreeSkillPower or FreePowerPower",
-     "NekoComm.Game.GameApiCompat.IsFreeCardPower(l) || l is FreeAttackPower or FreeSkillPower or FreePowerPower",
-     1, "optional general free-card power; retain typed free powers"),
-    ("Engine/Obs/Gains26.cs", "FreeCardPower => pw.Amount,",
-     "_ when NekoComm.Game.GameApiCompat.IsFreeCardPower(pw) => pw.Amount,", 1, "optional free-card layers"),
-    ("Engine/Obs/Gains26.cs", "bool quietus = me.Creature.HasPower<QuietusPower>();",
-     "bool quietus = NekoComm.Game.GameApiCompat.SupportsArrowDestruction && me.Creature.HasPower<QuietusPower>();",
-     1, "Quietus no longer destroys arrows on games without arrow destruction"),
 ]
 
 
-def git(upstream: Path, *args: str) -> bytes:
-    return subprocess.run(["git", "-C", str(upstream), *args], check=True, capture_output=True).stdout
-
-
-def upstream_files(upstream: Path) -> dict[str, str]:
-    """Closure files (relative to UPSTREAM_ROOT) -> text at upstream HEAD."""
-    rels: list[str] = list(FILES)
-    for sub in SUBTREES:
-        listing = git(upstream, "-c", "core.quotepath=false", "ls-tree", "-r", "--name-only", "HEAD",
-                      f"{UPSTREAM_ROOT}/{sub}").decode("utf-8")
-        rels += [line[len(UPSTREAM_ROOT) + 1:] for line in listing.splitlines() if line.endswith(".cs")]
-    out: dict[str, str] = {}
-    for rel in sorted(set(rels)):
-        raw = git(upstream, "show", f"HEAD:{UPSTREAM_ROOT}/{rel}")
-        out[rel] = raw.decode("utf-8-sig").replace("\r\n", "\n")
+def upstream_files(source: UpstreamSource) -> dict[str, str]:
+    out = {}
+    for path in source.files(UPSTREAM_ROOT + "/"):
+        rel = path[len(UPSTREAM_ROOT) + 1:]
+        if not rel.endswith(".cs") or not (rel in FILES or any(rel.startswith(d + "/") for d in SUBTREES)):
+            continue
+        out[rel] = source.read(path).decode("utf-8-sig").replace("\r\n", "\n")
     return out
 
 
@@ -129,26 +111,28 @@ def apply_patches(files: dict[str, str]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--upstream", default=r"D:\NekoClaw\_refs\AlphaDefect-Public")
+    parser.add_argument("--archive", type=Path, help="Official GitHub ZIP for an immutable commit (alternative to git)")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     upstream = Path(args.upstream)
-    if not (upstream / ".git").exists():
+    if not args.archive and not (upstream / ".git").exists():
         print(f"upstream checkout not found: {upstream}", file=sys.stderr)
         return 2
 
-    head = git(upstream, "rev-parse", "HEAD").decode().strip()
-    game_version = git(upstream, "show", "HEAD:engine/game_version.txt").decode().strip()
-    files = upstream_files(upstream)
+    source = UpstreamSource(upstream, args.archive)
+    head = source.commit
+    game_version = source.read(f"{SOURCE_PREFIX}engine/game_version.txt").decode().strip()
+    files = upstream_files(source)
     problems = apply_patches(files)
     if problems:
         print("local patches no longer match upstream:", file=sys.stderr)
         for p in problems:
             print("  " + p, file=sys.stderr)
         return 1
-    data = {dst: git(upstream, "show", f"HEAD:{src}") for src, dst in DATA_FILES.items()}
+    data = {dst: source.read(src) for src, dst in DATA_FILES.items()}
 
     planned = {VENDOR / rel: text.encode("utf-8") for rel, text in files.items()}
-    planned[VENDOR / "LICENSE-AlphaDefect.txt"] = git(upstream, "show", "HEAD:LICENSE")
+    planned[VENDOR / "LICENSE-AlphaDefect.txt"] = source.read("LICENSE")
     planned.update({DATA / name: blob for name, blob in data.items()})
     stale = [p for p in VENDOR.rglob("*.cs") if p not in planned] if VENDOR.exists() else []
     changed = [p for p, blob in planned.items() if not p.exists() or p.read_bytes() != blob]

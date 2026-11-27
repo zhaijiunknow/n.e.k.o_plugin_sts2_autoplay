@@ -24,7 +24,13 @@ public static class Vocab
         Ids.Clear(); Keys.Clear();
         Add("<pad>"); Add("<unk>");
         path ??= DefaultPath;
-        if (!File.Exists(path)) return;
+        if (!File.Exists(path))
+        {
+            // 找不到词表时所有内容都编成 <unk>，网络照样能跑、只是在瞎打，不报错就查不出来（2026-11-25：编译后移动了工作区，
+            // runtimeconfig 里 Sts2Vocab 的绝对路径失效，铁甲战士第 24,782 版 4 局全在第 12–33 层输掉）。至少在标准错误里说清楚；serve 另外直接退出
+            Console.Error.WriteLine($"[vocab] 找不到词表 {path}（runtimeconfig 的 Sts2Vocab 指向编译时的工程目录，移动过工作区要重新编译）");
+            return;
+        }
         foreach (string line in File.ReadLines(path).Skip(2))
             if (line.Length > 0) Add(line);
         LoadAliases(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".", "aliases.txt"));

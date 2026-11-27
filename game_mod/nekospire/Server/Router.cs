@@ -28,6 +28,11 @@ internal static class Router
         try
         {
             Log.Info($"{LogPrefix} {requestId} {request.HttpMethod} {request.Url?.AbsolutePath}");
+            LocalRequestPolicy.Validate(request.HttpMethod, request.Headers["Host"],
+                request.Headers["Origin"], request.ContentType, request.Headers["Sec-Fetch-Site"],
+                request.LocalEndPoint.Port);
+            if (request.Headers[ExternalControl.HeaderName] == "1")
+                ExternalControl.Touch();
 
             if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath == "/health")
@@ -279,9 +284,11 @@ internal static class Router
                     data = new
                     {
                         coop_enabled = cfg.coop_enabled,
+                        livestream_enabled = cfg.livestream_enabled,
                         llm_enabled = cfg.llm_enabled,
                         danmaku_enabled = cfg.danmaku_enabled,
                         danmaku_push_enabled = cfg.danmaku_push_enabled,
+                        coop_map_policy = cfg.coop_map_policy,
                         coop_map_follow_player = cfg.coop_map_follow_player,
                         coop_map_vote_wait_seconds = cfg.coop_map_vote_wait_seconds,
                         coop_yield_to_saved_run = cfg.coop_yield_to_saved_run,
@@ -300,24 +307,28 @@ internal static class Router
                 // The NEKO plugin drives the mod by switching its own LLM off: POST /config with
                 // llm_enabled=false (plus any other config fields) so the mod defers MAP/reward/deck/event
                 // decisions to the plugin driver instead of its own OpenAI-compatible LLM. Only the fields
-                // the request provides are applied; the api_key is written but never echoed back.
+                // the request provides are applied. Credentials/endpoints are local-UI-only.
                 var cfgWrite = await JsonHelper.DeserializeAsync<ConfigWriteRequest>(request.InputStream, cancellationToken);
                 if (cfgWrite == null)
                     throw new ApiException(400, "invalid_request", "Request body must be a JSON object.");
 
+                cfgWrite.Validate();
                 var cfg = NekoConfig.Current;
                 var pushWasEnabled = cfg.danmaku_push_enabled;
                 cfg.llm_enabled = cfgWrite.llm_enabled ?? cfg.llm_enabled;
                 cfg.danmaku_enabled = cfgWrite.danmaku_enabled ?? cfg.danmaku_enabled;
                 cfg.danmaku_push_enabled = cfgWrite.danmaku_push_enabled ?? cfg.danmaku_push_enabled;
                 cfg.coop_enabled = cfgWrite.coop_enabled ?? cfg.coop_enabled;
+                cfg.livestream_enabled = cfgWrite.livestream_enabled ?? cfg.livestream_enabled;
                 cfg.coop_client_port = cfgWrite.coop_client_port ?? cfg.coop_client_port;
                 cfg.coop_map_follow_player = cfgWrite.coop_map_follow_player ?? cfg.coop_map_follow_player;
                 cfg.coop_map_vote_wait_seconds = cfgWrite.coop_map_vote_wait_seconds ?? cfg.coop_map_vote_wait_seconds;
-                cfg.llm_base_url = cfgWrite.llm_base_url ?? cfg.llm_base_url;
                 cfg.llm_model = cfgWrite.llm_model ?? cfg.llm_model;
-                cfg.llm_api_key = cfgWrite.llm_api_key ?? cfg.llm_api_key;
                 cfg.llm_max_tokens = cfgWrite.llm_max_tokens ?? cfg.llm_max_tokens;
+                if (cfgWrite.coop_map_policy is not null)
+                {
+                    cfg.coop_map_policy = cfgWrite.coop_map_policy;
+                }
                 cfg.Save();
                 // Turning the push gate off should also clear what is already on screen: a line takes up to
                 // ~20s to scroll out, so gating alone still looks like "关不掉".
@@ -331,6 +342,9 @@ internal static class Router
                     data = new
                     {
                         status = "updated",
+                        coop_map_policy = cfg.coop_map_policy,
+                        coop_map_vote_wait_seconds = cfg.coop_map_vote_wait_seconds,
+                        livestream_enabled = cfg.livestream_enabled,
                         llm_enabled = cfg.llm_enabled,
                         danmaku_push_enabled = cfg.danmaku_push_enabled,
                         llm_model = cfg.llm_model,
@@ -487,22 +501,4 @@ internal static class Router
         return response.OutputStream.WriteAsync(bytes);
     }
 }
-
-/// <summary>
-/// Write request for POST /config. Only the fields present (nullable) are applied to
-/// <see cref="NekoComm.Game.NekoConfig"/>; the NEKO plugin sends { "llm_enabled": false } to hand the
-/// MAP/reward/deck/event decision screens to the plugin driver instead of the mod's own LLM.
-/// </summary>
-internal sealed record ConfigWriteRequest(
-    bool? llm_enabled,
-    bool? danmaku_enabled,
-    bool? danmaku_push_enabled,
-    bool? coop_enabled,
-    int? coop_client_port,
-    bool? coop_map_follow_player,
-    int? coop_map_vote_wait_seconds,
-    string? llm_base_url,
-    string? llm_model,
-    string? llm_api_key,
-    int? llm_max_tokens);
 

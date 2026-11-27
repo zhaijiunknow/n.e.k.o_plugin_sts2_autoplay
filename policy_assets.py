@@ -159,11 +159,15 @@ class PolicyAssets:
         return self.runtime_ready() and self.model_ready(character)
 
     def status(self) -> dict[str, Any]:
+        # Use the host clock for both entry results and the polled file. The UI
+        # must not replace a new action result with an older on-disk snapshot.
+        updated_at = time()
         runtime_size = sum(int(item["size"]) for item in self.manifest["runtime"])
         missing = self._missing_catalog()
         repair_needed = self._interpreter_ready() and bool(missing)
         return {
             "root": str(self.root),
+            "updated_at": updated_at,
             "runtime": {
                 "ready": self.runtime_ready(), "download_bytes": runtime_size,
                 "version": self.manifest["runtime_version"], **self._runtime_job.as_dict(),
@@ -189,7 +193,7 @@ class PolicyAssets:
             self._published_at = time()
             try:
                 tmp = self.status_path.with_name(self.status_path.name + ".tmp")
-                tmp.write_text(json.dumps({**self.status(), "updated_at": time()}, ensure_ascii=False), encoding="utf-8")
+                tmp.write_text(json.dumps(self.status(), ensure_ascii=False), encoding="utf-8")
                 os.replace(tmp, self.status_path)
             except OSError:
                 pass

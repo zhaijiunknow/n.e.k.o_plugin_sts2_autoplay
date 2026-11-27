@@ -69,7 +69,6 @@ class DummyConfig:
                 "poll_interval_idle_seconds": 3,
                 "poll_interval_active_seconds": 1,
                 "action_interval_seconds": 1.5,
-                "post_action_delay_seconds": 0.5,
                 "autoplay_on_start": False,
                 "character_strategy": "defect",
                 "max_consecutive_errors": 3,
@@ -156,6 +155,7 @@ class LiveEntryPlugin(STS2AutoplayPlugin):
 
 
 SPECIAL_ARGS: dict[str, list[dict[str, Any]]] = {
+    "sts2_update_settings": [],  # Never persist settings during a live smoke run.
     "sts2_set_standby": [{"standby": True}, {"standby": False}],
     "sts2_enable_companion_mode": [{}],
     "sts2_disable_companion_mode": [{}],
@@ -166,6 +166,7 @@ SPECIAL_ARGS: dict[str, list[dict[str, Any]]] = {
     # 策略网络的下载入口有本机副作用（下几百 MB、删模型文件），冒烟不调用它们：参数组为空表。
     # 只读的 sts2_policy_status 照常调用。
     "sts2_set_map_policy": [],  # 会保存用户配置，实机冒烟不要改。
+    "sts2_set_livestream": [],  # 同样会持久化设置，不在实机冒烟中开关直播。
     "sts2_policy_prepare_runtime": [],
     "sts2_policy_download_model": [],
     "sts2_policy_remove_model": [],

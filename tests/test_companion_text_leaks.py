@@ -288,5 +288,10 @@ def test_instant_line_speaks_intent_in_chinese() -> None:
     assert "攻击 12" in text, text
     assert "FRAIL_SPORE" not in text, text
     assert "UNSET_MOVE" not in text, text
-    # 「还没决定」的敌人只留名字，不念一个哨兵值出来。
-    assert "蛮兽" in text and "蛮兽/" not in text, text
+    # 短句只报伤害意图最高的一只，不堆满全部敌人。
+    assert "飞蝇菌子" in text and "蛮兽" not in text, text
+    # 只剩「还没决定」的敌人时仍只留名字，不念哨兵值。
+    payload["enemies"] = payload["enemies"][1:]
+    snapshot["raw_state"]["combat"]["enemies"] = snapshot["raw_state"]["combat"]["enemies"][1:]
+    text = service._instant_line_text(snapshot, {}, payload)
+    assert "蛮兽" in text and "蛮兽/" not in text and "UNSET_MOVE" not in text, text

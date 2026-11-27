@@ -1,137 +1,21 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>尖塔2陪玩 · 自动游玩历史</title>
-<style>
-/* ===== neko-kit:tokens 起
-   主题 token 全部取自 N.E.K.O 本体（只读基准）：
-   frontend/plugin-manager/src/components/plugin/hosted/ui-kit/styles.css:1-32
-   frontend/plugin-manager/src/assets/styles/variables.css:5-11 ===== */
-:root{
-  color-scheme:light dark;
-  --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
-  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  --radius-sm:8px;--radius-md:12px;--radius-lg:16px;--radius-xl:20px;
-  --bg:#f7f9fc;--surface:rgba(255,255,255,.84);--surface-strong:rgba(255,255,255,.96);
-  --text:#1f2937;--muted:#667085;--border:rgba(148,163,184,.36);
-  --primary:#409eff;--success:#67c23a;--warning:#e6a23c;--danger:#f56c6c;--info:#14b8a6;
-  --primary-bg:rgba(64,158,255,.12);--primary-border:rgba(64,158,255,.38);
-  --success-bg:rgba(103,194,58,.10);--success-border:rgba(103,194,58,.38);
-  --warning-bg:rgba(230,162,60,.11);--warning-border:rgba(230,162,60,.32);
-  --danger-bg:rgba(245,108,108,.10);--danger-border:rgba(245,108,108,.38);
-  --alert-bg:rgba(64,158,255,.08);--alert-border:rgba(64,158,255,.26);
-  --ghost-bg:rgba(148,163,184,.10);--subtle:rgba(148,163,184,.08);--hover:rgba(64,158,255,.06);
-  --shadow-soft:0 12px 36px rgba(15,23,42,.12);--focus:#40c5f1;
-  --page-max:560px;--page-pad:18px;--gap:12px;
-}
-@media (prefers-color-scheme:dark){:root{
-  --bg:#0f172a;--surface:rgba(15,23,42,.78);--surface-strong:rgba(17,24,39,.94);
-  --text:#e5e7eb;--muted:#94a3b8;--border:rgba(148,163,184,.22);
-  --subtle:rgba(148,163,184,.12);--shadow-soft:0 18px 48px rgba(0,0,0,.22);
-}}
-/* ===== neko-kit:tokens 止 ===== */
-/* ===== neko-kit:base 起（骨架：reset / body / .wrap / 顶栏三件套 / 焦点环）===== */
-*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-body{font-family:var(--font);font-size:14px;line-height:1.65;background:var(--bg);color:var(--text);padding:var(--page-pad) var(--page-pad) 40px;-webkit-font-smoothing:antialiased}
-.wrap{width:100%;max-width:var(--page-max);margin:0 auto}
-.top{margin-bottom:var(--gap)}
-.back-btn{display:inline-flex;align-items:center;min-height:32px;padding:6px 12px;background:var(--surface-strong);color:var(--muted);border:1px solid var(--border);border-radius:var(--radius-md);font-size:12px;font-weight:650;text-decoration:none;transition:background-color .14s ease,border-color .14s ease,color .14s ease}
-.back-btn:hover{color:var(--primary);border-color:var(--primary-border)}
-h1{font-size:22px;font-weight:760;letter-spacing:.3px;line-height:1.35;margin:0 0 4px}
-.sub{color:var(--muted);font-size:12px;line-height:1.6;margin:0 0 18px}
-a:focus-visible,button:focus-visible,summary:focus-visible,[tabindex]:not([tabindex="-1"]):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-.muted{color:var(--muted)}
-.loss{color:var(--danger)}
-.safe{color:var(--success)}
-::-webkit-scrollbar{width:9px;height:9px}
-::-webkit-scrollbar-thumb{background:var(--subtle);border-radius:999px}
-@media (max-width:520px){body{padding:16px 12px 40px}}
-@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
-/* ===== neko-kit:base 止 ===== */
-
-/* ===== neko-kit:ui 起（组件：面板卡 / 统计卡 / 徽标 / 按钮三档 / 表格 / 提示 / 空态 / 折叠 / 结果框）===== */
-.card,.run{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:12px 14px 14px;margin-bottom:var(--gap)}
-.card>h3,.run>h2{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:15px;font-weight:720;color:var(--text);line-height:1.4;margin:0 0 10px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:var(--gap);margin-bottom:var(--gap)}
-.cards>.card{display:grid;gap:6px;padding:14px;border-radius:var(--radius-lg);margin-bottom:0}
-.cards>.card .k{color:var(--muted);font-size:12px;font-weight:650}
-.cards>.card .v{color:var(--text);font-size:24px;font-weight:780;line-height:1.1;font-variant-numeric:tabular-nums}
-.k{color:var(--muted);font-size:12px;font-weight:650}
-.box .k{margin-bottom:6px}
-.reflect .k{margin-bottom:4px}
-.grp-title{color:var(--text);font-size:12px;font-weight:720;margin-bottom:6px}
-.grp+.grp{margin-top:var(--gap)}
-.note{color:var(--muted);font-size:12px;line-height:1.6;margin-top:6px}
-button{min-height:36px;padding:8px 14px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--ghost-bg);color:var(--text);font:inherit;font-size:13px;font-weight:650;cursor:pointer;transition:transform .14s ease,background-color .14s ease,border-color .14s ease,color .14s ease,box-shadow .14s ease}
-button:hover{transform:translateY(-1px);background:var(--hover);border-color:var(--primary-border);color:var(--primary)}
-button:active:not(:disabled){transform:none}
-button:disabled{opacity:.55;cursor:not-allowed;transform:none;box-shadow:none}
-button.primary{background:var(--primary-bg);border-color:var(--primary-border);color:var(--primary)}
-button.primary:hover{background:rgba(64,158,255,.18);border-color:var(--primary-border);color:var(--primary);box-shadow:0 8px 18px rgba(64,158,255,.14)}
-button.ghost{background:var(--ghost-bg);border-color:var(--border);color:var(--text)}
-button.ghost:hover{background:var(--hover);border-color:var(--primary-border);color:var(--primary);box-shadow:none}
-button.danger{background:var(--danger-bg);border-color:var(--danger-border);color:var(--danger)}
-button.danger:hover{background:rgba(245,108,108,.16);border-color:var(--danger-border);color:var(--danger);box-shadow:0 8px 18px rgba(245,108,108,.16)}
-.btn-row{display:flex;gap:8px;flex-wrap:wrap}
-.tag{display:inline-flex;align-items:center;gap:6px;width:fit-content;padding:4px 9px;border:1px solid var(--border);border-radius:999px;background:var(--surface-strong);color:var(--muted);font-size:12px;font-weight:650;line-height:1.6;white-space:nowrap}
-.tag::before{content:"";width:7px;height:7px;border-radius:999px;background:var(--primary)}
-.tag.victory{border-color:var(--success-border);background:var(--success-bg);color:var(--success)}
-.tag.victory::before{background:var(--success)}
-.tag.defeat{border-color:var(--danger-border);background:var(--danger-bg);color:var(--danger)}
-.tag.defeat::before{background:var(--danger)}
-.toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:var(--gap)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:var(--gap);margin-top:10px}
-.box{background:var(--subtle);border:1px solid var(--border);border-radius:var(--radius-md);padding:10px 12px;overflow-x:auto}
-ul{margin:0;padding-left:17px}
-li{margin:3px 0}
-table{border-collapse:separate;border-spacing:0;width:100%;margin-top:10px;font-size:12px;overflow:hidden;background:var(--surface-strong);border:1px solid var(--border);border-radius:var(--radius-lg)}
-th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:top}
-th{color:var(--muted);font-weight:650;background:var(--subtle);white-space:nowrap}
-tbody tr{transition:background-color .14s ease}
-tbody tr:hover{background:var(--hover)}
-tbody tr:last-child td{border-bottom:none}
-.rooms td:nth-child(1),.rooms td:nth-child(3),.rooms td:nth-child(5){text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-.rooms th:nth-child(1),.rooms th:nth-child(3),.rooms th:nth-child(5){text-align:right}
-.route{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:8px}
-.route .step{background:var(--subtle);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 9px;font-size:12px;white-space:nowrap}
-.route .step.safe{border-color:var(--success-border);color:var(--success)}
-.route .arrow{color:var(--muted);font-size:12px}
-.reflect,.alert{border:1px solid var(--alert-border);border-radius:var(--radius-lg);padding:12px 14px;background:var(--alert-bg);color:var(--text);line-height:1.65;margin-top:var(--gap)}
-.empty{display:grid;gap:8px;place-items:center;padding:26px;color:var(--muted);text-align:center;border:1px dashed var(--border);border-radius:var(--radius-lg);background:var(--surface)}
-code{background:var(--subtle);border:1px solid var(--border);color:var(--primary);padding:1px 6px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono)}
-details{margin-top:var(--gap)}
-details summary{cursor:pointer;display:inline-flex;align-items:center;min-height:36px;padding:8px 14px;background:var(--ghost-bg);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text);font-size:13px;font-weight:700;transition:background-color .14s ease,border-color .14s ease,color .14s ease}
-details summary:hover{background:var(--hover);border-color:var(--primary-border);color:var(--primary)}
-#result{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:var(--radius-md);padding:12px 14px;margin-top:14px;font-family:var(--mono);font-size:12px;line-height:1.65;color:var(--muted);white-space:pre-wrap;max-height:200px;overflow:auto}
-@media (max-width:520px){.cards{grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:9px}.cards>.card{padding:12px}.cards>.card .v{font-size:20px}.card,.run{padding:12px 12px 14px}th,td{padding:8px 10px}.btn-row button,.toolbar button{flex:1 1 auto}}
-/* ===== neko-kit:ui 止 ===== */
-</style>
-</head>
-<body>
-<div class="wrap">
-    <div class="top"><a class="back-btn" href="index.html">← 返回</a></div>
-    <h1>自动游玩历史</h1>
-    <p class="sub">每一局的选择、损血归因与结束状态。数据来自插件落盘的猫娘记忆。</p>
-
-    <div class="cards" id="cards"></div>
-    <div class="toolbar">
-        <button id="refresh">刷新</button>
-        <span class="muted" id="status">加载中…</span>
-    </div>
-    <div id="runs"></div>
-</div>
-
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NekoSpire · 游玩历史</title><link rel="stylesheet" href="ui.css?v=20261127-parameters2"><script src="ui.js?v=20261127-parameters2"></script></head>
+<body><div class="wrap"><header class="masthead" id="masthead"></header><main>
+<div class="page-heading"><div><div class="eyebrow">EXPEDITION RECORDS / 游玩历史</div><h1><span class="keep">每次攀登，</span><span class="keep">都有回响。</span></h1><p class="sub">回望走过的路线、做出的选择，以及那些值得再想一次的回合。</p></div><span class="chapter" aria-hidden="true">03</span></div>
+<div class="stats" id="cards" aria-label="全部历史统计"><div class="card"><div class="k">正在读取记录</div><div class="v">—</div></div></div>
+<div class="archive-tools"><input id="search" type="search" placeholder="搜索角色或对局编号…" aria-label="搜索角色或对局编号"><select id="filter-character" aria-label="筛选角色"><option value="">全部角色</option></select><select id="filter-outcome" aria-label="筛选结局"><option value="">全部结局</option><option value="victory">通关</option><option value="defeat">阵亡</option><option value="other">其他</option></select><button id="refresh">刷新记录 ↻</button></div>
+<div class="archive-meta" id="status" role="status" aria-live="polite">加载中…</div>
+<div class="archive-layout" id="archive-layout"><aside aria-label="对局列表"><div class="archive-list" id="run-list"></div><div class="pagination" id="pagination" hidden><button id="prev" aria-label="上一页">←</button><span id="page-label"></span><button id="next" aria-label="下一页">→</button></div></aside><section id="runs" class="archive-detail" aria-label="所选对局详情"><div class="empty">正在读取历史快照…</div></section></div>
+</main><footer class="footer"><span>NEKOSPIRE / 记录每一次出发</span><span>历史快照 · 每局结束后更新</span></footer></div>
 <script>
+Spire.shell('history');
+
 function fmtTime(ts) {
   if (!ts) return "—";
   try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return "—"; }
 }
-function esc(text) {
-  return String(text == null ? "" : text)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+const esc = Spire.esc;
 function outcomeTag(outcome) {
   const label = outcome === "victory" ? "通关" : (outcome === "defeat" ? "阵亡" : (outcome || "未知"));
   const cls = outcome === "victory" ? "victory" : (outcome === "defeat" ? "defeat" : "");
@@ -228,39 +112,85 @@ function renderRun(run) {
     "</div>";
 }
 
+
+let historyPayload=null, filtered=[], selectedKey='', currentPage=0;
+const PAGE_SIZE=12;
+const keyOf=run=>String(run.run_id||'')+'|'+String(run.ended_at||'');
+const charName=run=>Spire.characters[Spire.character(run.character)]?.name || run.character || '未知角色';
 function render(payload) {
-  const summary = payload.summary || {};
-  document.getElementById("cards").innerHTML =
-    '<div class="card"><div class="k">总局数</div><div class="v">' + esc(summary.runs || 0) + "</div></div>" +
-    '<div class="card"><div class="k">通关</div><div class="v">' + esc(summary.victories || 0) + "</div></div>" +
-    '<div class="card"><div class="k">阵亡</div><div class="v">' + esc(summary.defeats || 0) + "</div></div>" +
-    '<div class="card"><div class="k">最深层级</div><div class="v">' + esc(summary.best_floor || 0) + "</div></div>" +
-    '<div class="card"><div class="k">累计损血</div><div class="v">' + esc(summary.total_hp_lost || 0) + "</div></div>";
-
-  const runs = payload.runs || [];
-  document.getElementById("runs").innerHTML = runs.length
-    ? runs.map(renderRun).join("")
-    : '<div class="empty">还没有打完的局。猫娘每结束一局（阵亡或通关）就会在这里留一条记录。</div>';
-  document.getElementById("status").textContent = "共 " + runs.length + " 局 · " + fmtTime(Date.now() / 1000);
+  if(!Array.isArray(payload.runs))throw new Error('历史快照格式不正确');
+  historyPayload=payload;
+  const s=payload.summary||{};
+  document.getElementById('cards').innerHTML=[['记录局数',s.runs??payload.runs.length],['通关',s.victories??0],['阵亡',s.defeats??0],['最深层级',s.best_floor??0],['累计损血',s.total_hp_lost??0]].map(([k,v])=>'<div class="card"><div class="k">'+esc(k)+'</div><div class="v">'+esc(v)+'</div></div>').join('');
+  const select=document.getElementById('filter-character'),previous=select.value;
+  select.replaceChildren(new Option('全部角色',''));
+  [...new Set(payload.runs.map(run=>run.character||'未知角色'))].sort().forEach(name=>select.add(new Option(Spire.characters[Spire.character(name)]?.name||name,name)));
+  if([...select.options].some(o=>o.value===previous))select.value=previous;
+  filterRuns(false);
 }
-
-async function load() {
-  const status = document.getElementById("status");
-  status.textContent = "加载中…";
-  try {
-    const res = await fetch("autoplay_history.json?t=" + Date.now(), { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    render(await res.json());
-  } catch (err) {
-    document.getElementById("runs").innerHTML =
-      '<div class="empty">读不到历史快照：' + esc(err.message) +
-      "<br /><span class='muted'>插件还没写过历史（每局结束才写一次），或者快照文件被插件升级清掉了。</span></div>";
-    status.textContent = "读取失败";
+function filterRuns(reset=true){
+  if(!historyPayload)return;
+  const query=document.getElementById('search').value.trim().toLowerCase();
+  const character=document.getElementById('filter-character').value;
+  const outcome=document.getElementById('filter-outcome').value;
+  filtered=historyPayload.runs.filter(run=>{
+    const matchesText=(String(run.run_id||'')+' '+charName(run)+' '+String(run.character||'')).toLowerCase().includes(query);
+    return matchesText&&(!character||(run.character||'未知角色')===character)&&(!outcome||(outcome==='other'?!['victory','defeat'].includes(run.outcome):run.outcome===outcome));
+  }).sort((a,b)=>(Number(b.ended_at)||0)-(Number(a.ended_at)||0));
+  if(reset)currentPage=0;
+  currentPage=Math.min(currentPage,Math.max(0,Math.ceil(filtered.length/PAGE_SIZE)-1));
+  showPage();
+}
+function showPage(){
+  const list=document.getElementById('run-list');list.replaceChildren();
+  const visible=filtered.slice(currentPage*PAGE_SIZE,(currentPage+1)*PAGE_SIZE);
+  if(!visible.some(run=>keyOf(run)===selectedKey))selectedKey=visible[0]?keyOf(visible[0]):'';
+  for(const run of visible){
+    const button=document.createElement('button');button.className='run-choice';button.type='button';
+    button.setAttribute('aria-pressed',String(keyOf(run)===selectedKey));
+    button.setAttribute('aria-controls','runs');
+    const art=Spire.art(Spire.character(run.character));
+    const outcome=run.outcome==='victory'?'通关':run.outcome==='defeat'?'阵亡':run.outcome||'未知';
+    button.innerHTML=(art?'<img alt="" src="'+esc(art)+'">':'<span class="unknown-avatar" aria-hidden="true">◇</span>')+'<span><strong>'+esc(charName(run))+'</strong><small>'+esc(outcome)+' · '+esc(fmtTime(run.ended_at))+'</small></span><span class="floor">'+esc(run.floor??'—')+'<small>FLOOR</small></span>';
+    button.addEventListener('click',()=>{
+      selectedKey=keyOf(run);
+      [...list.children].forEach(el=>el.setAttribute('aria-pressed',String(el===button)));
+      showDetail(run);
+    });list.append(button);
   }
+  const selected=visible.find(run=>keyOf(run)===selectedKey);
+  if(selected)showDetail(selected);
+  else document.getElementById('runs').innerHTML='<div class="empty"><strong>'+(!historyPayload.runs.length?'旅程尚未落笔':'没有匹配的对局')+'</strong>'+(!historyPayload.runs.length?'每结束一局，插件就会在这里留下记录。':'试试其他角色、结局，或清空搜索。')+'</div>';
+  if(!visible.length)list.innerHTML='<div class="empty">暂无记录</div>';
+  document.getElementById('pagination').hidden=filtered.length<=PAGE_SIZE;
+  document.getElementById('prev').disabled=currentPage===0;
+  document.getElementById('next').disabled=(currentPage+1)*PAGE_SIZE>=filtered.length;
+  document.getElementById('page-label').textContent=(currentPage+1)+' / '+Math.max(1,Math.ceil(filtered.length/PAGE_SIZE));
+  document.getElementById('status').textContent='显示 '+filtered.length+' / '+historyPayload.runs.length+' 局 · 按结束时间倒序 · 上方统计为全部记录';
 }
-
-document.getElementById("refresh").addEventListener("click", load);
+function showDetail(run){
+  const detail=document.getElementById('runs');
+  detail.innerHTML=renderRun({...run,character:charName(run)});
+  detail.querySelectorAll('table').forEach(table=>{
+    const wrap=document.createElement('div');wrap.className='table-scroll';wrap.tabIndex=0;wrap.setAttribute('role','region');wrap.setAttribute('aria-label','可滚动的对局明细表格');
+    table.replaceWith(wrap);wrap.append(table);
+  });
+}
+async function load(){
+  const status=document.getElementById('status'),refresh=document.getElementById('refresh');
+  refresh.disabled=true;status.textContent='正在读取历史快照…';
+  try {render(await Spire.request('autoplay_history.json?t='+Date.now()));}
+  catch(error){
+    status.textContent=historyPayload?'刷新失败，保留上次读取的历史':'读取失败';
+    if(!historyPayload){document.getElementById('cards').innerHTML='';document.getElementById('runs').innerHTML='<div class="empty"><strong>还读不到历史快照</strong>'+esc(error.message)+'<br>插件在每局结束时生成记录；首次使用可能尚无历史。</div>';}
+    else status.textContent+='：'+error.message;
+  }finally{refresh.disabled=false;}
+}
+document.getElementById('refresh').addEventListener('click',load);
+document.getElementById('search').addEventListener('input',()=>filterRuns());
+document.getElementById('filter-character').addEventListener('change',()=>filterRuns());
+document.getElementById('filter-outcome').addEventListener('change',()=>filterRuns());
+document.getElementById('prev').addEventListener('click',()=>{currentPage--;showPage();});
+document.getElementById('next').addEventListener('click',()=>{currentPage++;showPage();});
 load();
-</script>
-</body>
-</html>
+</script></body></html>

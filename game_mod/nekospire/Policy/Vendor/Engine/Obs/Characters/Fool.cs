@@ -9,7 +9,7 @@ using MegaCrit.Sts2.Core.Models;
 namespace Sts2Headless;
 
 // Fool（游戏 v0.113.0 的第六个角色）专属的观测：格式 24（Obs/Format.cs）。机制依据见适配报告与 fool_analysis（新版反编译源码）：
-// - 箭矢：玩家战斗状态里的箭位（PlayerCombatState.Arrows，每支只差状态 Retrieved / Away / Destroyed），射击牌（标签 Shoot）射出最后一支可用的箭，
+// - 箭矢：玩家战斗状态里的箭位（PlayerCombatState.Arrows，每支只差状态 Retrieved / Away；v0.114.0 删掉了 Destroyed），射击牌（标签 Shoot）射出最后一支可用的箭，
 //   先结算这张牌的伤害再让目标获得扎穿（ImpaledPower：扎着的箭、HitCounter 初值 3）；之后对它每打中一段有力攻击 HitCounter − 1，到 0 拔出最早的一支、
 //   重置为 3；目标死亡或逃跑时箭全部回来。没有可用的箭时射击牌照样打出、花能量，但攻击不执行（ArrowCmd.ShootArrowAtTarget）。
 // - 旋律：本回合打出过带哇 / 啾 / 叽（CardTag.Wah / Cho / Ki）标签的牌，没有专门字段，按战斗历史现算（MelodyCmd）。
@@ -21,7 +21,7 @@ public sealed partial class Observation
 
     /// <summary>
     /// 格式 24：玩家的 Fool 战斗计数（战斗计数记录，特征 0 子类型为 4，所属记录为玩家），玩家看得到或数得出来：
-    /// 1 箭位总数（含已摧毁），2 可用的箭，3 扎在敌人身上的箭，4 已摧毁的箭，5 本回合射出的箭，6 本场射出的箭，
+    /// 1 箭位总数，2 可用的箭，3 扎在敌人身上的箭，4 已摧毁的箭（v0.114.0 起恒为 0），5 本回合射出的箭，6 本场射出的箭，
     /// 7–9 本回合哇、啾、叽是否已激活（0/1），10 旋律种类数（0–3），11 本回合打出的旋律牌张数，12 本场你生成的悲伤张数（苦恼的口径）。
     /// 其他角色因为拿到射击牌而有箭位时同样适用，但只有格式 24（Fool）输出。
     /// </summary>
@@ -35,7 +35,7 @@ public sealed partial class Observation
             _f[1] = arrows.Count;
             _f[2] = arrows.Count(a => a.Status == ArrowStatus.Retrieved);
             _f[3] = arrows.Count(a => a.Status == ArrowStatus.Away);
-            _f[4] = arrows.Count(a => NekoComm.Game.GameApiCompat.IsDestroyedArrow(a.Status));
+            _f[4] = 0;      // v0.114.0：ArrowStatus.Destroyed 删掉了（寂灭不再摧毁箭，QuietusPower 改写），这一项恒为 0，位置保留
             foreach (var e in CombatManager.Instance.History.Entries)
             {
                 switch (e)
@@ -52,10 +52,22 @@ public sealed partial class Observation
             _f[8] = PlayedCho(me) ? 1 : 0;
             _f[9] = PlayedKi(me) ? 1 : 0;
             _f[10] = MegaCrit.Sts2.Core.Commands.MelodyCmd.MelodiesThisTurn(me);
-            _f[11] = NekoComm.Game.GameApiCompat.MelodyCardsPlayedThisTurn(me);
+            _f[11] = MelodyCardsPlayedThisTurn(me);
             Emit(null, TokenKind.CombatStat, 0, Zone.Ally, playerTok, 0);
         }
         catch { }
+    }
+
+    /// <summary>本回合打出（打完）的旋律牌张数，一张多标签的牌只算一次。v0.114.0 删掉了 MelodyCmd.MelodyCardsPlayedThisTurn，这里照 v0.113.1 的原样实现，口径不变。</summary>
+    static int MelodyCardsPlayedThisTurn(Player me)
+    {
+        try
+        {
+            var cs = me.Creature.CombatState!;
+            return CombatManager.Instance.History.CardPlaysFinished.Count(e => e.HappenedThisTurn(cs) && e.CardPlay.Player == me
+                && (e.CardPlay.Card.Tags.Contains(CardTag.Wah) || e.CardPlay.Card.Tags.Contains(CardTag.Cho) || e.CardPlay.Card.Tags.Contains(CardTag.Ki)));
+        }
+        catch { return 0; }
     }
 
     /// <summary>格式 24：扎穿的能力记录 12 扎着几支箭，13 全部拔出还要打几段有力攻击（当前这支还差 HitCounter 段，之后每支 3 段；扎着的箭先进先出）。</summary>
@@ -143,9 +155,12 @@ public sealed partial class Observation
         {
             return c switch
             {
-                MegaCrit.Sts2.Core.Models.Cards.Jest or MegaCrit.Sts2.Core.Models.Cards.SorrowfulStrike => c.DynamicVars.Cards.IntValue,
-                MegaCrit.Sts2.Core.Models.Cards.Rummage or MegaCrit.Sts2.Core.Models.Cards.Vitriol => 1,
+                // v0.114.0：刻薄改成塞 Cards（2）张悲伤（Vitriol.OnPlay：循环 DynamicVars.Cards 次 CreateCard<Sadness>，AddGeneratedCardsToCombat 到手牌）
+                MegaCrit.Sts2.Core.Models.Cards.Jest or MegaCrit.Sts2.Core.Models.Cards.SorrowfulStrike or MegaCrit.Sts2.Core.Models.Cards.Vitriol => c.DynamicVars.Cards.IntValue,
+                MegaCrit.Sts2.Core.Models.Cards.Rummage => 1,
                 MegaCrit.Sts2.Core.Models.Cards.BrightenUp => c.DynamicVars["Sadness"].IntValue,
+                // 自嘲：给自己手里塞 "Sadness" 张悲伤（SelfDeprecate.OnPlay：AddGeneratedCardsToCombat 到手牌；喜悦只给队友）
+                MegaCrit.Sts2.Core.Models.Cards.SelfDeprecate => c.DynamicVars["Sadness"].IntValue,
                 _ => 0,
             };
         }
@@ -155,7 +170,7 @@ public sealed partial class Observation
     /// <summary>一段伤害只过伤害上限钩子（ModifyDamageHookType.Cap，散雨射击的溅射这样打），截掉小数。只读。</summary>
     static float CapDmg(ICombatState cs, Creature target, Creature? dealer, decimal amount, MegaCrit.Sts2.Core.ValueProps.ValueProp props, CardModel? card)
     {
-        try { return MathF.Floor((float)MegaCrit.Sts2.Core.Hooks.Hook.ModifyDamage(cs.RunState, cs, target, dealer, amount, props, card, null, MegaCrit.Sts2.Core.Hooks.ModifyDamageHookType.Cap, CardPreviewMode.None, out _)); }
+        try { return MathF.Floor((float)Math.Min(MegaCrit.Sts2.Core.Hooks.Hook.ModifyDamage(cs.RunState, cs, target, dealer, amount, props, card, null, MegaCrit.Sts2.Core.Hooks.ModifyDamageHookType.Cap, CardPreviewMode.None, out _), OldHtkCap(target))); }
         catch { return MathF.Floor((float)amount); }
     }
 
@@ -252,7 +267,7 @@ public sealed partial class Observation
                 if (apGone != null) _autoGone = _autoGone == null ? apGone : _autoGone.Concat(apGone.Where(g => !_autoGone.Contains(g))).ToList();
             }
             else { _autoHand = apHand; _autoGone = apGone; }
-            var ap = apList.Count > 0 ? AutoPlayEffect(apList, me) : default;
+            var ap = apList.Count > 0 ? AutoPlayEffect(apList, me, card) : default;
             if (apList.Count > 0) { block += ap.block; _autoGain = V29 ? (_autoGain.energy + ap.energy, _autoGain.cards + ap.cards) : (ap.energy, ap.cards); }
             bool aimReplay = plays > 1 && per.Any(kv => perX[kv.Key] < kv.Value.pd);
             bool dmgRiders = (shots > 0 && (explo > 0 || rain || shots < plays)) || chord > 0 || timber
@@ -323,7 +338,7 @@ public sealed partial class Observation
                 killed = dead.Count > 0 ? dead : null;
             }
 
-            // 合股线：这一步拔出几支你的箭（第五轮：改用 ArrowsOut，寂灭标过的第一支扎穿即摧毁、目标死了也不回来）
+            // 合股线：这一步拔出几支你的箭（第五轮：改用 ArrowsOut；v0.114.0 起寂灭不再摧毁箭，射出的每一支都照常扎穿、拔出）
             if (twine != null && tgt != null)
             {
                 var (dh, dd, _) = ArrowsOut(card, tgt, me, tgtDead);

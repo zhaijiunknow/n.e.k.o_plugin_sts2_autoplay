@@ -186,7 +186,8 @@ def make_handler(policies: Policies):
             if path != "/health":
                 self._send(404, {"ok": False, "error": "unknown path"})
                 return
-            reply = {"ok": True, "service": "alphadefect_policy", "characters": policies.available()}
+            reply = {"ok": True, "service": "alphadefect_policy", "characters": policies.available(),
+                     "policy_upstream": policies.manifest["upstream"]}
             character = dict(p.split("=", 1) for p in query.split("&") if "=" in p).get("character", "").upper()
             if character:
                 # Loading tells the caller the frame format it must ask the mod for.

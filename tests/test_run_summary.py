@@ -415,3 +415,50 @@ def test_non_terminal_screen_does_not_record_a_run(tmp_path) -> None:
     asyncio.run(service._maybe_record_run_memory(snapshot) or asyncio.sleep(0))
 
     assert service._catgirl_memory.runs == []
+
+
+@pytest.mark.parametrize("reenable", [False, True])
+def test_review_disabled_during_generation_discards_pending_explanation(tmp_path, reenable):
+    host = []
+    service = STS2AutoplayService(DummyLogger(), lambda payload: None, lambda **k: host.append(k))
+    service._catgirl_memory = CatgirlMemoryStore(path=str(tmp_path / "mem.json"), logger=DummyLogger())
+    record = service._catgirl_memory.add_run("run-a", character="C", outcome="defeat", floor=3, act=1, decision_memory=[])
+    service._catgirl_memory.attach_review("run-a", _review())
+
+    class Gen:
+        available = True
+
+        async def generate(self, **kw):
+            service.set_run_reflection_enabled(False)
+            if reenable:
+                service.set_run_reflection_enabled(True)
+            await asyncio.sleep(0)
+            return "This pending explanation must not be delivered."
+
+    service._catgirl_llm = Gen()
+    asyncio.run(service._explain_review(dict(record), _review()))
+    assert host == []
+    assert service._catgirl_memory.runs[-1]["review"]["explanation"] == ""
+    assert service._catgirl_memory.runs[-1]["review"]["steps"]
+
+
+def test_review_disabled_before_task_starts_never_calls_llm():
+    from unittest.mock import AsyncMock
+
+    service = _service()
+    service._catgirl_llm = AsyncMock(available=True)
+    service.set_run_reflection_enabled(False)
+    asyncio.run(service._explain_review({"run_id": "run-a"}, _review()))
+    service._catgirl_llm.generate.assert_not_called()
+
+
+def test_queued_review_is_invalidated_even_if_reenabled_before_start():
+    from unittest.mock import AsyncMock
+
+    service = _service()
+    service._catgirl_llm = AsyncMock(available=True)
+    generation = service._review_generation
+    service.set_run_reflection_enabled(False)
+    service.set_run_reflection_enabled(True)
+    asyncio.run(service._explain_review({"run_id": "run-a"}, _review(), generation=generation))
+    service._catgirl_llm.generate.assert_not_called()

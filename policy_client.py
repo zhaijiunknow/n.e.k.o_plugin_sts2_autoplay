@@ -67,6 +67,7 @@ class PolicyAdvisor:
         self._logger = logger
         self.assets = assets if assets is not None else PolicyAssets(logger)
         self.enabled = True
+        self.livestream: Any = None
         self._sidecar_url = "http://127.0.0.1:18090"
         self._timeout = 20.0
         #: 各角色网络要的观测格式（问旁路得到；旁路重启后重问）。
@@ -75,6 +76,7 @@ class PolicyAdvisor:
         self._next_data_push_at = 0.0
         self._process: subprocess.Popen[bytes] | None = None
         self._last_note = ""
+        self.last_fallback_reason = ""
         self.last_decision: dict[str, Any] = {}
         self.decisions = 0
         self.fallbacks = 0
@@ -119,9 +121,16 @@ class PolicyAdvisor:
 
         `character` 是本局的角色（来自 /state）；空串 = 不在对局里（主菜单、选人），不归网络管。
         """
+        # Review scoring must not overwrite the current autoplay fallback reason.
+        self.last_fallback_reason = ""
         scored = await self._score(client, character=character, map_policy=map_policy, fail=self._fallback)
         if scored is None or scored.get("policy_hold"):
             return scored
+        network_choice = scored["choice"]
+        if self.livestream is not None:
+            choice = self.livestream.policy_choice(scored)
+            if choice != scored["choice"]:
+                scored = {**scored, "choice": choice, "probability": scored["probs"][choice]}
         kind, candidates, choice = scored["kind"], scored["candidates"], scored["choice"]
         probability, forced = scored["probability"], scored["forced"]
         picked = candidates[choice]
@@ -134,6 +143,8 @@ class PolicyAdvisor:
             "kind": kind, "label": str(picked.get("label") or ""), "choice": choice, "candidates": len(candidates),
             "probability": probability, "value": scored["value"], "forced": forced,
             "multiplayer": scored["multiplayer"], "action": picked.get("action"), "character": scored["character"],
+            "network_choice": network_choice,
+            "livestream_profile": self.livestream.profile if self.livestream is not None and self.livestream.enabled else None,
         }
         self._note(
             "选择 %s（候选 %d 个%s%s）" % (
@@ -186,6 +197,8 @@ class PolicyAdvisor:
             decision = await client.get_policy_decision(obs_format)
         except Exception as exc:  # noqa: BLE001 —— 取不到决策就回落，原因写进日志
             return fail(f"mod /policy/decision 失败：{type(exc).__name__}: {exc}")
+        if isinstance(decision, dict) and decision.get("encoder_game_version") != self.assets.manifest["upstream"]["game_version"]:
+            return fail("mod 策略编码器与插件的目标游戏版本不一致；请同步更新 mod 并重启游戏")
         if isinstance(decision, dict) and decision.get("data_id") != self.assets.mod_data_id():
             # 模组没有词表，或它的词表与网络的不是同一份（编号对不上）：把本机这份交给它，下一轮再问。
             return await self._push_mod_data(client, decision.get("data_id"), fail)
@@ -238,6 +251,7 @@ class PolicyAdvisor:
         }
 
     def _fallback(self, why: str) -> None:
+        self.last_fallback_reason = why
         self.fallbacks += 1
         self._note("回落到原有逻辑：" + why, key="fallback:" + why)
         return None
@@ -297,6 +311,9 @@ class PolicyAdvisor:
             return None
         if info.get("content_alignment_version") != 1:
             fail("推理旁路版本过旧，未验证模型内容特征对齐；请重启插件的推理旁路后重试，当前回落到后备策略")
+            return None
+        if info.get("policy_upstream") != self.assets.manifest["upstream"]:
+            fail("推理旁路的策略数据版本与插件不一致；请重启推理旁路并修复运行环境，当前回落到后备策略")
             return None
         self._formats[character] = int(info["obs_format"])
         self._next_probe_at = 0.0

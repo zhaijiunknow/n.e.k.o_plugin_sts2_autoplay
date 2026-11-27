@@ -226,6 +226,22 @@ public sealed partial class Observation
     static float PoisonNext(Creature f, MegaCrit.Sts2.Core.Models.Powers.PoisonPower pp) => PoisonNextWith(f, pp.Amount, null);
 
     /// <summary>对手（玩家一方）活着的触媒层数合计（毒每回合多结算几次）。</summary>
+    /// <summary>格式 19/20/22 的毒伤预告：游戏的 PoisonPower.CalculateTotalDamageNextTurn（只过 Hook.ModifyDamage）。v0.114.0 起难杀从伤害上限改成掉血钩子
+    /// （HardToKillPower.ModifyHpLostBeforeOstyLate），这个函数对外骨骼虫不再封顶（游戏界面的血条预告也是）；有难杀时照 v0.113.1 的口径逐次封顶，
+    /// 没有时原样调游戏的函数（帧不变）。</summary>
+    static float PoisonGameLike(Creature f, MegaCrit.Sts2.Core.Models.Powers.PoisonPower pp)
+    {
+        int htk = f.GetPowerAmount<MegaCrit.Sts2.Core.Models.Powers.HardToKillPower>();
+        if (htk <= 0) return pp.CalculateTotalDamageNextTurn();
+        var props = MegaCrit.Sts2.Core.ValueProps.ValueProp.Unblockable | MegaCrit.Sts2.Core.ValueProps.ValueProp.Unpowered;
+        int n = Math.Min(pp.Amount, 1 + AccelOf(f));
+        decimal sum = 0;
+        for (int i = 0; i < n; i++)
+            sum += Math.Min(MegaCrit.Sts2.Core.Hooks.Hook.ModifyDamage(f.CombatState!.RunState, f.CombatState, f, null, pp.Amount - i, props, null, null,
+                MegaCrit.Sts2.Core.Hooks.ModifyDamageHookType.All, CardPreviewMode.None, out _), htk);
+        return (int)sum;
+    }
+
     static int AccelOf(Creature f) => f.CombatState!.GetOpponentsOf(f).Where(c => c.IsAlive).Sum(a => a.GetPowerAmount<MegaCrit.Sts2.Core.Models.Powers.AccelerantPower>());
 
     /// <summary>同 PoisonNext，只是毒的层数与触媒层数可以另给（格式 23：这一步加毒、打出触媒之后；accel 为空时按现在的触媒）。</summary>
@@ -236,11 +252,13 @@ public sealed partial class Observation
             var cs = f.CombatState!;
             int n = Math.Min(amount, 1 + (accel ?? AccelOf(f)));
             int slip = f.GetPowerAmount<MegaCrit.Sts2.Core.Models.Powers.SlipperyPower>(), buf = f.GetPowerAmount<MegaCrit.Sts2.Core.Models.Powers.BufferPower>();
+            int htk = f.GetPowerAmount<MegaCrit.Sts2.Core.Models.Powers.HardToKillPower>();      // v0.114.0：难杀改成掉血钩子（ModifyHpLostBeforeOstyLate，先于滑溜），HitDmg 里不再封顶
             float total = 0;
             var props = MegaCrit.Sts2.Core.ValueProps.ValueProp.Unblockable | MegaCrit.Sts2.Core.ValueProps.ValueProp.Unpowered;
             for (int i = 0; i < n; i++)
             {
                 float d = HitDmg(cs, f, null, amount - i, props, null);
+                if (htk > 0 && d > 0) d = Math.Min(d, htk);
                 bool slipped = slip > 0 && d >= 1;
                 if (slipped) d = 1;
                 if (d > 0 && buf > 0) { buf--; continue; }       // 缓冲抵掉的这次没掉血，滑溜也不减层

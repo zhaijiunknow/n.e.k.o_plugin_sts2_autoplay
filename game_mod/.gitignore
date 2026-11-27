@@ -45,3 +45,7 @@ PolicyFidelity/obj/
 # API compatibility fixture checks
 GameApiCompatTests/bin/
 GameApiCompatTests/obj/
+
+# Pure HTTP/config regression checks
+SafetyTests/bin/
+SafetyTests/obj/

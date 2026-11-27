@@ -73,6 +73,8 @@ internal sealed class PolicyDecisionPayload
     public bool wait { get; init; }
     /// <summary>Which vocabulary the mod encodes with (see PolicyService.DataId); null: none installed yet.</summary>
     public string? data_id { get; init; }
+    /// <summary>Target rules of this encoder; reject mixed old-mod/new-plugin installations.</summary>
+    public string encoder_game_version { get; init; } = "v0.114.0";
     /// <summary>Echo back as `command` in policy_act; a changed screen invalidates it.</summary>
     public string? decision_id { get; init; }
     public string? decision_kind { get; init; }

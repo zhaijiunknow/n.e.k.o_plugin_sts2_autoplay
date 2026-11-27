@@ -1,56 +1,15 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>STS2 陪玩</title>
-<style>
-/* token 与 sts2.html / history.html 同一套（本体 ui-kit/styles.css） */
-:root{color-scheme:light dark;--font:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;--radius-lg:16px;--bg:#f7f9fc;--surface:rgba(255,255,255,.84);--text:#1f2937;--muted:#667085;--border:rgba(148,163,184,.36);--primary:#409eff;--focus:#40c5f1;--page-max:560px;--page-pad:18px;--gap:12px}
-@media (prefers-color-scheme:dark){:root{--bg:#0f172a;--surface:rgba(15,23,42,.78);--text:#e5e7eb;--muted:#94a3b8;--border:rgba(148,163,184,.22)}}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:var(--font);font-size:14px;line-height:1.65;background:var(--bg);color:var(--text);padding:var(--page-pad) var(--page-pad) 40px;-webkit-font-smoothing:antialiased}
-.wrap{width:100%;max-width:var(--page-max);margin:0 auto}
-h1{font-size:22px;font-weight:760;letter-spacing:.3px;line-height:1.35;margin:0 0 4px}
-.sub{color:var(--muted);font-size:12px;line-height:1.6;margin:0 0 18px}
-a:focus-visible,[tabindex]:not([tabindex="-1"]):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(208px,1fr));gap:var(--gap)}
-.cards>.card{display:grid;gap:6px;padding:14px;text-align:center;cursor:pointer;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);transition:.14s ease}
-.cards>.card:hover{transform:translateY(-1px);border-color:var(--primary)}
-.icon{font-size:30px;line-height:1}
-.cards h2{font-size:15px;font-weight:720}
-.cards p{font-size:12px;color:var(--muted);line-height:1.7}
-.tag{display:inline-flex;align-items:center;justify-self:center;gap:6px;padding:4px 9px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--muted);font-size:12px;font-weight:650}
-.tag::before{content:"";width:7px;height:7px;border-radius:999px;background:var(--primary)}
-@media (prefers-reduced-motion:reduce){.cards>.card{transition:none}}
-</style>
-</head>
-<body>
-<div class="wrap">
-    <h1>STS2 陪玩</h1>
-    <p class="sub">自动出牌 · 陪玩 · 猫娘解说</p>
-    <div class="cards">
-        <div class="card" onclick="go('sts2.html')">
-            <div class="icon">🎮</div>
-            <h2>STS2 功能</h2>
-            <p>自动打牌 · 陪玩模式<br>状态查询 · 执行动作</p>
-            <span class="tag">游戏</span>
-        </div>
-        <div class="card" onclick="go('policy.html')">
-            <div class="icon">AI</div>
-            <h2>策略网络</h2>
-            <p>下载各角色的模型</p>
-        </div>
-        <div class="card" onclick="go('history.html')">
-            <div class="icon">📜</div>
-            <h2>自动游玩历史</h2>
-            <p>每一局的选择 · 损血归因<br>结束状态 · 复盘反思</p>
-            <span class="tag">记录</span>
-        </div>
-    </div>
-</div>
-<script>
-function go(url) { location.href = url; }
-</script>
-</body>
-</html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>NekoSpire · 尖塔陪玩</title><link rel="stylesheet" href="ui.css?v=20261127-parameters2"><script src="ui.js?v=20261127-parameters2" defer></script><script defer src="index.js?v=20261127-parameters2"></script></head>
+<body><div class="wrap">
+<header class="masthead" id="masthead"></header>
+<main>
+<section class="landing-hero"><div><div class="eyebrow">SLAY THE SPIRE II / COMPANION</div><h1>下一层，<br>一起出发。</h1><p class="sub">从第一张牌，到最后一场战斗。<br>让猫娘陪你攀登，也让每一次选择都有迹可循。</p><div class="btn-row"><a class="link-button primary" href="sts2.html?v=20261127-parameters2">进入游玩控制 <span aria-hidden="true">　↗</span></a><a class="link-button" href="policy.html?v=20261127-parameters2">选择策略网络</a></div></div></section>
+<div class="section-head"><h2>你的尖塔旅程</h2><span>准备 · 攀登 · 回望</span></div>
+<div class="landing-grid">
+<a class="landing-card" href="sts2.html?v=20261127-parameters2"><span class="index">01</span><span class="arrow" aria-hidden="true">↗</span><h2>游玩控制</h2><p>自动游玩、猫娘陪伴与联机协作。<br>把操作交给它，把旅程留给你。</p></a>
+<a class="landing-card" href="policy.html?v=20261127-parameters2"><span class="index">02</span><span class="arrow" aria-hidden="true">↗</span><h2>策略网络</h2><p>为每位角色准备专属模型。<br>检查环境，选择你的同行者。</p></a>
+<a class="landing-card" href="history.html?v=20261127-parameters2"><span class="index">03</span><span class="arrow" aria-hidden="true">↗</span><h2>游玩历史</h2><p>回看路线、每一步选择与损血。<br>胜利或遗憾，都值得记住。</p></a>
+</div></main>
+<footer class="footer"><span>NEKOSPIRE / 尖塔 2 陪玩</span><span>非官方陪玩插件 · 游戏美术归原权利人所有</span></footer>
+</div></body></html>

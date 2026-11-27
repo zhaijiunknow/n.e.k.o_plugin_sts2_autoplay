@@ -138,7 +138,23 @@ def content_table(vocab_size: int, version: str = CATALOG_VERSION, enchant: bool
 # 老检查点的 content_proj 各列就整体错位了，不报错。下面按特征名对齐：检查点记着特征名（content_names，v0.113.0 起保存）就用它，
 # 没记的旧检查点按列数在旧版内容目录里把当时的特征名算回来。
 
-LEGACY_CATALOGS = ("v0.111.0", "v0.107.1")       # 开始保存特征名之前训练用过的内容目录（新的在前）
+LEGACY_CATALOGS = ("v0.111.0", "v0.107.1")       # 开始保存特征名之前训练用过的内容目录（新的在前）；v0.114.0 起改用 legacy_catalogs()，这里留作记录
+
+
+def _ver_key(v: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in v.lstrip("v").split("."))
+    except ValueError:
+        return (-1,)
+
+
+def legacy_catalogs(current: str = CATALOG_VERSION) -> list[str]:
+    """推断特征名时依次试的旧版内容目录：engine/catalog/ 下除当前版本外的所有版本，新的在前。
+    v0.114.0 升级时改（原来只试 LEGACY_CATALOGS 的 v0.111.0、v0.107.1）：评测、推理、直播、工具的约 90 处 load_state 不传检查点的 content_names，
+    在 v0.114.0 目录（1,196 列）下载入 v0.113.x 训练的检查点（1,195 列）时，旧元组里算不出 1,195 列的特征名，只会在末尾补 0 列、整体错位而不报错
+    （愚者第 24,181 版滑动平均 951 帧：首选动作 24% 不同、估值平均差 0.47）。v0.113.0、v0.113.1 两版算出的 1,195 个名字与检查点里存的完全相同。"""
+    vs = [d.name for d in (REPO / "engine" / "catalog").iterdir() if d.is_dir() and (d / "catalog.json").exists() and d.name != current]
+    return sorted(vs, key=_ver_key, reverse=True)
 
 
 @lru_cache(maxsize=32)
@@ -149,7 +165,7 @@ def content_names(vocab_size: int, version: str = CATALOG_VERSION, enchant: bool
 
 def legacy_content_names(n_cols: int, vocab_size: int, enchant: bool, upgrade: bool) -> tuple[str, ...] | None:
     """没记特征名的旧检查点：在旧版内容目录里找列数对得上的特征名（先按现在的附魔、升级开关，再试其余组合），都对不上时为 None。"""
-    for ver in LEGACY_CATALOGS:
+    for ver in legacy_catalogs():
         if not (REPO / "engine" / "catalog" / ver / "catalog.json").exists():
             continue
         for e, u in dict.fromkeys([(enchant, upgrade), (True, True), (True, False), (False, False), (False, True)]):

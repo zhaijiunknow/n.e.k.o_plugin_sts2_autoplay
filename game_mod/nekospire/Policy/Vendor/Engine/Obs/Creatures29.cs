@@ -421,7 +421,7 @@ public sealed partial class Observation
         foreach (var l in ls) n *= l.ModifyDamageMultiplicative(target, n, props, dealer, null, null);
         n *= extraMult;
         foreach (var l in ls) n *= l.ModifyDamageMultiplicativeLate(target, n, props, dealer, null, null);
-        foreach (var l in ls) { var x = l.ModifyDamageCap(target, props, dealer, null, null); if (n > x) n = x; }
+        foreach (var l in ls) { var x = l.ModifyDamageCap(target, props, dealer, null, null); if (n > x) n = x; } n = Math.Min(n, OldHtkCap(target));      // v0.114.0：难杀照旧口径封顶（见 Damage.cs OldHtkCap）
         return Math.Max(0, (int)Math.Max(0m, n));
     }
 

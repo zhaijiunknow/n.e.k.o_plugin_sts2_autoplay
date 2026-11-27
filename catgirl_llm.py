@@ -251,12 +251,29 @@ class CatgirlCommentGenerator(_ChatLLMBase):
                 {"role": "system", "content": system},
                 {"role": "user", "content": f"对照：{context}"},
             ]
+        if scene == "idle":
+            base = (
+                "画面暂时没变化，用自己的人设说一句陪伴闲聊，10～25字。"
+                "可以轻轻感慨或自言自语，不必加喵；不要重报血量、回合、敌人意图。"
+                "没有新事件，不编造出牌、击杀、掉落或胜负，不引用历史连招；"
+                "不把等待说成卡死，不催操作、不反问，不复读最近说过的话。只输出这句。"
+            )
+            persona = self._persona_system()
+            system = persona + "\n\n" + base if persona else "你是《杀戮尖塔2》的陪玩猫娘。\n" + base
+            recent = payload.get("recent_idle_lines")
+            recent = recent[-3:] if isinstance(recent, list) else []
+            return [
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"当前观测（仅作话题背景）：{context}\n避免复读：{' / '.join(str(line)[:32] for line in recent)}"},
+            ]
         if scene == "combat":
             # 战斗：prompt 里已带"本轮: 打<卡>→N；结束回合"这类出牌建议（line），要 LLM 用猫娘口吻
             # 把建议转述出来（先打X再补Y/躲Z），而不是只卖萌噤声。放宽字数，但保留弹幕感。
             base = (
                 "基于你的人设，用一句短小、猫娘口吻的弹幕点评当前战斗，并自然带出下面的出牌建议。"
-                "要求：把给出的『本轮』建议用猫娘话讲清楚（比如：先打痛击再补冷光，躲开诅咒喵！），"
+                "只可转述材料中明确列出的剩余出牌建议，不能编造或沿用历史里的卡名、连招。"
+                "没有出牌建议时只点评当前敌人意图与血线，不猜该出哪张牌。"
+                "建议不是执行结果，不能说成已经打出或已经击杀。"
                 "让人一听就知道该打哪张牌、注意敌人什么；一句话 10~25 字；像直播间弹幕一样活泼、有情绪；"
                 "不要逐字复述卡名编号堆砌，不要用『按X策略』模板；"
                 "句末或句首带你的口癖收尾，简短有力。"

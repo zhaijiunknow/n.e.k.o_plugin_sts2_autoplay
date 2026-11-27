@@ -175,6 +175,15 @@ namespace NekoComm.Game
                 return;
             }
 
+            // Plugin /action calls are still allowed. Only this autonomous driver yields,
+            // so speech/chat windows also work in the catgirl co-op process. Combat stays fast.
+            if (NekoConfig.Current.livestream_enabled && !state.in_combat &&
+                state.screen is ("REWARD" or "CARD_SELECTION_REWARD" or "SHOP" or "SHOP_SHOW" or
+                    "EVENT" or "REST" or "SELECTION" or "CARD_SELECTION" or "CARD_SELECTION_UNUSEFULL" or
+                    "CARD_SELECTION_TRANSFORM" or "CARD_SELECTION_REMOVE" or "CARD_SELECTION_DELET" or
+                    "BUNDLE_SELECTION" or "CAPSTONE_SELECTION" or "RELIC_SELECTION"))
+                return;
+
             ActionRequest? req;
             try
             {
@@ -454,7 +463,14 @@ namespace NekoComm.Game
             // does the catgirl fall back to its own preference, so autoplay can never stall a co-op run.
             // The waiting half only applies to a multiplayer run: with no teammate to wait for, waiting would
             // just slow every single map node down for nothing.
-            if (NekoConfig.Current.coop_map_follow_player)
+            var cfg = NekoConfig.Current;
+            var policy = ExternalControl.MapPolicy(cfg.coop_map_policy, cfg.coop_map_follow_player, ExternalControl.IsActive);
+            if (policy == "wait")
+            {
+                _mapWaitStartedAt = 0;
+                return null;
+            }
+            if (policy == "follow")
             {
                 var follow = FindOtherPlayerVoteIndex(map);
                 if (follow >= 0)
@@ -476,7 +492,7 @@ namespace NekoComm.Game
                     return Req("choose_map_node", option: 0);
                 }
 
-                var waitKey = $"{map.map_generation_count}|{map.available_nodes.Length}|{map.current_node?.row},{map.current_node?.col}";
+                var waitKey = $"{policy}|{cfg.coop_map_vote_wait_seconds}|{map.map_generation_count}|{map.available_nodes.Length}|{map.current_node?.row},{map.current_node?.col}";
                 if (waitKey != _mapWaitKey)
                 {
                     _mapWaitKey = waitKey;
@@ -502,7 +518,7 @@ namespace NekoComm.Game
             }
 
             _mapWaitStartedAt = 0;
-            return Req("choose_map_node", option: 0);
+            return map.local_vote == null ? Req("choose_map_node", option: 0) : null;
         }
 
         /// <summary>
@@ -853,11 +869,10 @@ namespace NekoComm.Game
         /// </summary>
         private static bool ShouldBypassLlm(GameStatePayload s)
         {
-            // A co-op party member already picked the node: mirror the player instead of choosing our own.
+            // Waiting/following is deterministic. Auto may still use the standalone LLM.
             if (s.screen == "MAP"
-                && NekoConfig.Current.coop_map_follow_player
-                && s.map is { available_nodes.Length: > 0 } map
-                && FindOtherPlayerVoteIndex(map) >= 0)
+                && ExternalControl.MapPolicy(NekoConfig.Current.coop_map_policy,
+                    NekoConfig.Current.coop_map_follow_player, ExternalControl.IsActive) != "auto")
                 return true;
 
             // Card choosers: the payload has no per-card picked state and confirm_selection is only advertised

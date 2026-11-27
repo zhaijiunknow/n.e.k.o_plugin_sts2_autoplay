@@ -1,4 +1,11 @@
 [sts2]
+# 直播是独立于 program/advise/standby 的表现层；默认关闭。
+# 战斗外等待：选牌18s、商店25s、事件22s、休息20s、锻造选牌18s，乘以下面的倍率。
+# NEKO Live 需自行连接房间；语音使用宿主当前的 TTS 设置。
+livestream_enabled = false
+livestream_profile = "casual" # focused认真 / casual随性 / chaotic整活（非战斗选牌／购物探索）
+livestream_wait_scale = 1.0
+
 base_url = "http://127.0.0.1:18080"
 connect_timeout_seconds = 5
 request_timeout_seconds = 15
@@ -26,10 +33,6 @@ action_interval_seconds = 1
 #   生效值 = min(action_interval_seconds, 本值)；上一张牌还是 pending 时会自动退回正常节拍。
 #   0.5 ≈ 实机卡牌动画量级；再小多半只会换来 mod 的 `pending` 与退避重试。想更快就往下调。
 combat_replay_interval_seconds = 0.5
-# ⚠️ 本项在插件代码里**没有任何读取点**（全仓 grep `post_action_delay` 只命中这里）。
-#   真正决定节奏的是上面的 action_interval_seconds（经 adaptive_tick_interval）。
-#   保留只为不破坏既有配置文件形状，改它不会有效果。
-post_action_delay_seconds = 0.5
 autoplay_on_start = false
 character_strategy = "defect"
 max_consecutive_errors = 3

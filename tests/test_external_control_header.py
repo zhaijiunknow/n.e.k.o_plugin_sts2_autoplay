@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from transport_client import STS2TransportClient
+from plugin.plugins.sts2_autoplay.transport_client import STS2TransportClient
 
 # 与 C# 侧 ExternalControl.HeaderName 对应，比较时统一小写。
 EXPECTED_CONTROL_HEADER = "x-neko-external-control"

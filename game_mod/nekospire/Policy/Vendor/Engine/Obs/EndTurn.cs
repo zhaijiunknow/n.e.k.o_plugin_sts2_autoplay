@@ -471,7 +471,7 @@ public sealed partial class Observation
                 }
             }
             bool kRecall = arrowDim && kInfo.Values.Any(x => x.recall > 0);
-            bool kSpecial = F113 && (freeMax > 0 || (kvN > 0 && playable.Any(IsMelody)) || aimOn && playable.Any(IsShoot) || kRecall);
+            bool kSpecial = F113 && (freeMax > 0 || (kvN > 0 && playable.Any(KiVerseCard)) || aimOn && playable.Any(IsShoot) || kRecall);
             foreach (var f in foes)
             {
                 var dp = new float[energy + 1];
@@ -564,7 +564,7 @@ public sealed partial class Observation
                 // 版本 15：毒在敌方回合开始时先结算（PoisonPower.AfterSideTurnStart，怪物行动之前；硬化外壳的额度在新回合重置），毒得死就不会出手
                 float pois = 0;
                 // 格式 23：按 PoisonNext（血条预告再补上滑溜、缓冲、硬化外壳的掉血修正），与敌人中毒记录 12–13 一致
-                foreach (var pp in f.Powers.OfType<MegaCrit.Sts2.Core.Models.Powers.PoisonPower>()) { try { pois += V23 ? PoisonNext(f, pp) : pp.CalculateTotalDamageNextTurn(); } catch { } }
+                foreach (var pp in f.Powers.OfType<MegaCrit.Sts2.Core.Models.Powers.PoisonPower>()) { try { pois += V23 ? PoisonNext(f, pp) : PoisonGameLike(f, pp); } catch { } }
                 if (sureOut != null) sureOut[f] = hpS;
                 if (sureHitsOut != null && slip <= 0) sureHitsOut[f] = (sureHits[f], orbN[f]);
                 float capNext = f.Powers.OfType<MegaCrit.Sts2.Core.Models.Powers.HardenedShellPower>().Select(x => (float)x.Amount).DefaultIfEmpty(float.MaxValue).Min();
@@ -980,7 +980,7 @@ public sealed partial class Observation
                 if (pd <= 0 && ac >= 0) continue;
                 float pdx = pd > 0 && aimOn ? PdNoAim(card, f, pd) : pd;
                 bool aimS = aimOn && pd > 0 && pdx < pd;
-                bool kvS = kvN > 0 && IsMelody(card) && plays >= 2;
+                bool kvS = kvN > 0 && KiVerseCard(card) && plays >= 2;
                 int b = chains && card.Affliction is MegaCrit.Sts2.Core.Models.Afflictions.Bound ? 1 : 0;
                 var opts = new List<KOpt>();
                 foreach (var (ce, fu) in ki.free > 0 ? new[] { (ki.cost, 1), (ki.costNF, 0) } : new[] { (ki.cost, 0) })

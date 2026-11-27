@@ -3,6 +3,13 @@ enabled = true
 auto_start = false
 
 [sts2]
+# 直播是独立于 program/advise/standby 的表现层；默认关闭。
+# 战斗外等待：选牌18s、商店25s、事件22s、休息20s、锻造选牌18s，乘以下面的倍率。
+# NEKO Live 需自行连接房间；语音使用宿主当前的 TTS 设置。
+livestream_enabled = false
+livestream_profile = "casual" # focused认真 / casual随性 / chaotic整活（非战斗选牌／购物探索）
+livestream_wait_scale = 1.0
+
 # 游戏内弹幕总开关。false = 插件完全不推 POST /danmaku（也不生成 LLM 点评、不拉头像），
 # 自动游玩与状态读取不受影响。运行时等价动作：sts2_set_danmaku(enabled=false)。
 # 不要再指望 catgirl_llm_enabled=false 来关弹幕——那只是把 LLM 点评降级成启发式文本，弹幕照旧。
@@ -20,5 +27,5 @@ policy_enabled = true
 # 旧的布尔配置 map_follow_player 仍被识别（true -> follow，false -> auto）。
 map_policy = "wait"
 # 仅联机 follow 模式有效；0=不等待，支持小数秒，范围 0～86400。wait/auto 与单人局不受影响。
-# 可在「STS2 功能 → 联机地图等待」中修改并保存，下次启动仍生效。
+# 可在「参数配置 → 联机地图协作」中修改并保存，下次启动仍生效。
 map_vote_wait_seconds = 20

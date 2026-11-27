@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from hashlib import sha1
 from math import ceil
 from pathlib import Path
 from random import random
-from time import time
+from time import monotonic, time
 from typing import Any, Callable
 
 from .action_engine import STS2ActionEngine
@@ -28,7 +29,8 @@ from .heuristic_planner import (
 )
 from .history_view import static_dir, write_history_view
 from .instructions import normalize_guidance_instruction
-from .loop_runner import STS2LoopRunner, _combat_plan_signature, _current_turn_steps
+from .livestream import LivestreamController
+from .loop_runner import STS2LoopRunner, _combat_plan_signature, _current_turn_steps, _reusable_plan
 from .mode_controller import STS2ModeController
 from .neko_interface import STS2NekoInterface
 from .policy_client import PolicyAdvisor, is_policy_operation
@@ -45,6 +47,12 @@ from .transport_client import STS2ActionRejected, STS2TransportClient, STS2Trans
 # 「当前游戏信息状态」面板：状态推送最小间隔（防刷爆 SSE 有界队列）/ 心跳间隔（空闲时也定期刷新）
 STATUS_PUSH_MIN_INTERVAL = 2.0
 STATUS_PUSH_HEARTBEAT = 5.0
+
+# 游戏内弹幕独立于宿主聊天：只发新鲜短句，不补播积压消息。
+DANMAKU_MIN_INTERVAL = 6.0
+DANMAKU_MAX_CHARS = 32
+DANMAKU_GENERATION_TIMEOUT = 8.0
+DANMAKU_IDLE_INTERVAL = 25.0
 
 #: `plugin.toml` 里读不到版本时的兜底标记（绝不假装知道版本）。
 PLUGIN_VERSION_UNKNOWN = "unknown"
@@ -92,6 +100,20 @@ class STS2AutoplayService:
         # 猫娘 LLM 点评生成（catgirl 弹幕真内容来源）
         self._catgirl_llm = CatgirlCommentGenerator(self.logger)
         self._catgirl_llm_enabled = True
+        self._catgirl_llm_task: asyncio.Task | None = None
+        self._last_danmaku_at: float | None = None
+        self._danmaku_sending = False
+        self._recent_danmaku: dict[str, float] = {}
+        # 即时句、LLM、兜底共享事实去重；不随 60 秒文本缓存过期，不包含闲聊。
+        self._reported_danmaku_changes: dict[str, None] = {}
+        self._last_instant_text = ""
+        self._last_instant_change_key = ""
+        self._danmaku_idle_observation = ""
+        self._danmaku_idle_since = 0.0
+        self._danmaku_idle_attempt_at: float | None = None
+        self._recent_idle_lines: list[str] = []
+        # 只存短期指纹，不把内部提示或聊天写入记忆。
+        self._recent_host_reports: dict[str, float] = {}
         # 游戏内弹幕总开关。与 _catgirl_llm_enabled 语义不同：后者只管"点评用 LLM 还是启发式文本"，
         # 关掉它仍会走 _push_catgirl_fallback 推弹幕；本开关是唯一的真闸门（_push_catgirl 收口）。
         self._danmaku_enabled = True
@@ -111,6 +133,7 @@ class STS2AutoplayService:
         self._catgirl_base_url: str = ""
         self._instance_failures: int = 0
         self._cfg: dict[str, Any] = {}
+        self._pending_restart_settings: dict[str, Any] = {}
         self._state = STS2RuntimeState()
         self._state_machine = STS2StateMachine()
         self._summary_builder = STS2SummaryContextBuilder()
@@ -121,6 +144,7 @@ class STS2AutoplayService:
         self._preference_extractor = STS2PreferenceExtractor()
         # 猫娘跨局记忆：run 结束总结教训/偏好，落盘后注入 strategy_directives 影响下一局决策。
         self._catgirl_memory = CatgirlMemoryStore(path=_default_memory_path(), logger=self.logger)
+        self._review_generation = 0
         # 局末复盘的原料：玩家亲手打的每一步与当时推荐的对照（见 choice_review）。
         self._choice_review = ChoiceReview()
         # 对端没有 /choices（旧版模组）时，隔一阵再问，别每个 tick 撞一次 404。
@@ -149,6 +173,9 @@ class STS2AutoplayService:
         self._loop_runner = STS2LoopRunner(self)
         # AlphaDefect 策略网络（默认关）。开着时整步决策先问它，给不出才回落到求解器 / 启发式。
         self._policy_advisor = PolicyAdvisor(logger)
+        self._livestream = LivestreamController()
+        self._policy_advisor.livestream = self._livestream
+        self._planner.configure_livestream(self._livestream)
         self.neko = STS2NekoInterface(self)
 
     def t(self, key: str, *, default: str = "", **params: Any) -> str:
@@ -164,6 +191,8 @@ class STS2AutoplayService:
         except Exception:
             pass
         self._cfg = dict(cfg)
+        self._pending_restart_settings.clear()
+        self._livestream.configure(self._cfg)
         self._policy_advisor.configure(self._cfg)
         # 选人：有已下载模型的角色时只在它们里面选（见 heuristic_planner）；每次进选人界面现查，
         # 所以对局之间新下载的模型不用重启插件就生效。
@@ -248,6 +277,13 @@ class STS2AutoplayService:
 
     async def shutdown(self) -> None:
         await self._loop_runner.stop_background()
+        if self._catgirl_llm_task is not None:
+            self._catgirl_llm_task.cancel()
+            try:
+                await self._catgirl_llm_task
+            except asyncio.CancelledError:
+                pass
+            self._catgirl_llm_task = None
         self._policy_advisor.shutdown()
         if self._client is not None:
             await self._client.close()
@@ -268,6 +304,7 @@ class STS2AutoplayService:
         # "插件在等、mod 照投"这种自相矛盾的局面。失败是良性的（mod 自己的默认也是 wait）。
         map_sync = await self.sync_map_policy_to_mod()
         control_sync = await self.sync_control_mode_to_mod()
+        live_sync = await self.sync_livestream_to_mod()
         self._emit_status()
         message = self.t("status.connected", default="STS2-Agent 已连接: {base_url}", base_url=self._state.base_url)
         return {
@@ -277,6 +314,7 @@ class STS2AutoplayService:
             "health": health,
             "map_policy_sync": map_sync,
             "control_mode_sync": control_sync,
+            "livestream_sync": live_sync,
         }
 
     # 正式联机流程（与 mod 自身一致）：
@@ -353,6 +391,8 @@ class STS2AutoplayService:
             self._client = self._host_client
             await self.sync_map_policy_to_mod()
             standdown = {"applied": False}
+        await self.sync_livestream_to_mod()
+        self._livestream.reset()
         self._state.active_instance = wanted
         self._state.catgirl_base_url = self._catgirl_base_url if wanted == self.INSTANCE_CATGIRL else ""
         self._instance_failures = 0
@@ -638,6 +678,7 @@ class STS2AutoplayService:
         if self._state.standby:
             message = self.t("autoplay.standby_blocked", default="当前处于 standby 模式，不执行动作。")
             return {"status": "idle", "message": message, "summary": message}
+        was_running = self._state.autoplay_state == "running"
         snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
         if not force and self._should_hold_for_orders(snapshot):
             state_name = self._snapshot_state_name(snapshot)
@@ -647,11 +688,17 @@ class STS2AutoplayService:
                 screen=state_name or "当前界面",
             )
             return {"status": "idle", "message": message, "summary": message, "held": True, "state_name": state_name}
-        if self._should_rebuild_operation(snapshot):
+        if (self._livestream.enabled and (self._livestream.key or self._livestream.scene_for(snapshot))) or self._should_rebuild_operation(snapshot):
             await self.refresh_state(trigger_sync=True)
             snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
             # 强制重算的请求到此已兑现，清掉，免得以后每一步都多刷一次 /state。
             self._state.force_replan_requested = False
+        if (self._state.standby or (not force and self._should_hold_for_orders(snapshot))
+                or (not force and was_running and self._state.autoplay_state != "running")):
+            self._livestream.reset()
+            return {"status": "idle", "held": True, "summary": "已停手，等待玩家安排。"}
+        if self._livestream.key and self._livestream.scene_key(snapshot) != self._livestream.key:
+            self._livestream.reset()
         operation = snapshot.get("agent_operation") if isinstance(snapshot.get("agent_operation"), dict) else None
         if operation is None:
             # 跨屏切换（如 reward->map / 战斗结束->奖励 等）时 /state 可能尚未切到下一屏，导致
@@ -660,6 +707,10 @@ class STS2AutoplayService:
             await self.refresh_state(trigger_sync=True)
             snapshot = self._state.snapshot if isinstance(self._state.snapshot, dict) else {}
             operation = snapshot.get("agent_operation") if isinstance(snapshot.get("agent_operation"), dict) else None
+        if (self._state.standby or (not force and self._should_hold_for_orders(snapshot))
+                or (not force and was_running and self._state.autoplay_state != "running")):
+            self._livestream.reset()
+            return {"status": "idle", "held": True, "summary": "已停手，等待玩家安排。"}
         # 玩家口径（2026-10-07）：「还有每次对战如果损血大于8就鼓励使用药水」。这条是**硬规则**：
         #   - **不依赖规划器给出动作** —— 战斗里偶尔规划不出动作时，该保命还是要保命；
         #   - 只在这一步真的能派发 `use_potion`（动作在册 = 在战斗里且手里有能用的药水）时才会 override。
@@ -676,10 +727,19 @@ class STS2AutoplayService:
             # 别静默空转：持续拿不到动作就记一次日志 + 写进状态 + 告诉本体（**不改 autoplay 意图**）。
             self._note_no_operation(snapshot)
             return {"status": "idle", "message": message, "summary": message}
+        if self._livestream.gate(
+            snapshot, operation, force=force,
+            speak=lambda text: self._push_proactive_to_host(text, kind="livestream_decision", priority=4),
+        ):
+            self._emit_status()
+            return {"status": "idle", "held": True, "summary": "直播互动中，暂不执行选择。",
+                    "livestream": self._livestream.status()}
         # 自定义事件屏（水晶球占卜）上按下标依次试，别死盯一个下标空点。
         operation = self._advance_custom_event_cursor(snapshot, operation)
         result = await self.execute_operation(operation)
         if result.get("status") == "ok":
+            if self._mod_action_status(result) == "completed":
+                self._livestream.reset()
             self._state.step_count += 1
             self._clear_stuck()
             self._note_step_progress(snapshot, operation)
@@ -1446,6 +1506,7 @@ class STS2AutoplayService:
         return {
             "summary": summary,
             "message": summary,
+            "livestream": self._livestream.status(),
             "server": {
                 "state": self._state.transport_state,
                 "base_url": self._state.base_url,
@@ -1497,6 +1558,9 @@ class STS2AutoplayService:
                 "host_base_url": self._host_base_url or self._state.base_url,
                 "catgirl_base_url": self._catgirl_base_url,
             },
+            "host_digest": {"enabled": self._state.host_digest_enabled},
+            "run_reflection": {"enabled": self._state.run_reflection_enabled},
+            "decision_engine": self._loop_runner.decision_engine_status(),
             "solver": self.solver_status_payload(),
             "policy": self._policy_advisor.status(),
             "map_policy": {
@@ -1549,6 +1613,7 @@ class STS2AutoplayService:
         return {"status": "ok", "message": message, "summary": message}
 
     def pause_autoplay(self, reason: str = "user") -> dict[str, Any]:
+        self._livestream.reset()
         self._state.autoplay_state = "paused"
         self._state.pause_reason = reason
         self._sync_background_polling()
@@ -1571,6 +1636,7 @@ class STS2AutoplayService:
         return {"status": "ok", "message": message, "summary": message}
 
     def stop_autoplay(self, reason: str = "manual") -> dict[str, Any]:
+        self._livestream.reset()
         self._state.autoplay_state = "standby" if self._state.standby else "idle"
         if self._state.standby:
             # 待机期间玩家明确喊停：这条"停"要活过取消待机（否则一取消待机又自己玩起来了）。
@@ -1582,6 +1648,85 @@ class STS2AutoplayService:
         self._emit_status()
         message = self.t("autoplay.stopped", default="已停止尖塔自动运行。")
         return {"status": "ok", "message": message, "summary": message, "stop_reason": reason}
+
+    async def sync_livestream_to_mod(self) -> dict[str, Any]:
+        try:
+            result = await self._require_client().set_config(livestream_enabled=self._livestream.enabled)
+            applied = result.get("livestream_enabled") is self._livestream.enabled
+            return {"applied": applied, "enabled": self._livestream.enabled,
+                    "reason": "" if applied else "mod 未确认直播控制开关，请更新配套模组"}
+        except Exception as exc:
+            self.logger.info("[sts2_live] mod sync failed: %s", exc)
+            return {"applied": False, "enabled": self._livestream.enabled, "reason": str(exc)}
+
+    def get_settings(self) -> dict[str, Any]:
+        from .settings_config import FIELDS, GROUPS, validate_patch
+
+        values = {key: self._cfg.get(key, spec["default"]) for key, spec in FIELDS.items()}
+        # Read effective switches, including changes made through the control page.
+        values.update(policy_enabled=self._policy_advisor.enabled,
+                      policy_timeout_seconds=self._policy_advisor._timeout,
+                      host_commentary_min_interval_seconds=self._host_commentary_min_interval(),
+                      danmaku_enabled=self._danmaku_enabled,
+                      catgirl_llm_enabled=self._catgirl_llm_enabled,
+                      host_digest_enabled=self._state.host_digest_enabled,
+                      run_reflection_enabled=self._state.run_reflection_enabled,
+                      encounter_memory_enabled=self._encounter_memory_enabled,
+                      livestream_enabled=self._livestream.enabled,
+                      livestream_profile=self._livestream.profile,
+                      livestream_wait_scale=self._livestream.wait_scale)
+        values.update(self._pending_restart_settings)
+        # Do not silently replace a malformed legacy value and then save defaults.
+        validate_patch(values)
+        return {"status": "ok", "settings": values, "fields": FIELDS, "groups": GROUPS}
+
+    async def apply_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        from .settings_config import FIELDS, validate_patch
+
+        patch = validate_patch(patch)
+        # A next-start preference must not affect the current session's standby fallback.
+        self._pending_restart_settings.update({key: value for key, value in patch.items() if FIELDS[key]["restart"]})
+        self._cfg.update({key: value for key, value in patch.items() if not FIELDS[key]["restart"]})
+        sync = {}
+        if {"policy_enabled", "policy_timeout_seconds"} & patch.keys():
+            self._policy_advisor.configure(self._cfg)
+            self._state.force_replan_requested = True
+        for key, attribute in (("catgirl_llm_enabled", "_catgirl_llm_enabled"),
+                               ("encounter_memory_enabled", "_encounter_memory_enabled")):
+            if key in patch:
+                setattr(self, attribute, patch[key])
+        if "host_digest_enabled" in patch:
+            self.set_host_digest_enabled(patch["host_digest_enabled"])
+        if "run_reflection_enabled" in patch:
+            self.set_run_reflection_enabled(patch["run_reflection_enabled"])
+        if "danmaku_enabled" in patch:
+            self.set_danmaku_enabled(patch["danmaku_enabled"], sync_mod=False)
+        if any(key.startswith("livestream_") for key in patch):
+            self._livestream.configure(self._cfg)
+            self._state.force_replan_requested = True
+        # Apply all local values before waiting for a disconnected game.
+        if "danmaku_enabled" in patch:
+            sync["danmaku"] = await self.sync_danmaku_gate_to_mod()
+        if any(key.startswith("livestream_") for key in patch):
+            sync["livestream"] = await self.sync_livestream_to_mod()
+        self._emit_status()
+        restart = [key for key in patch if FIELDS[key]["restart"]]
+        summary = "已保存修改的参数；运行参数已应用。"
+        if restart:
+            summary += " 启动偏好将在下次启动时读取。"
+        if any(not item.get("applied") for item in sync.values()):
+            summary += " mod 尚未同步，重新连接时重试。"
+        return {**self.get_settings(), "saved": True, "summary": summary,
+                "restart_required": restart, "mod_sync": sync}
+
+    async def set_livestream(self, patch: dict[str, Any]) -> dict[str, Any]:
+        self._livestream.configure(patch)
+        self._cfg.update(patch)
+        self._state.force_replan_requested = True
+        sync = await self.sync_livestream_to_mod()
+        self._emit_status()
+        return {"status": "ok", "summary": "已开启直播模式。" if self._livestream.enabled else "已关闭直播模式。",
+                "livestream": self._livestream.status(), "mod_sync": sync}
 
     def set_host_digest_enabled(self, enabled: bool) -> dict[str, Any]:
         """开关「尖塔速报」：是否把局势悄悄交给本体，让它自己主动讲一句。
@@ -1601,6 +1746,8 @@ class STS2AutoplayService:
 
         关掉后**结构化记录照旧写**（损血归因、路线图、对照本身、历史页都能看），只是不再请模型讲解。
         """
+        if not enabled and self._state.run_reflection_enabled:
+            self._review_generation += 1
         self._state.run_reflection_enabled = bool(enabled)
         self._cfg["run_reflection_enabled"] = bool(enabled)
         self._emit_status()
@@ -2045,14 +2192,14 @@ class STS2AutoplayService:
 
     def _cfg_companion_push_probability(self) -> float:
         try:
-            value = float(self._cfg.get("companion_push_probability", 0.2) or 0.2)
+            value = float(self._cfg.get("companion_push_probability", 0.2))
         except Exception:
             return 0.2
         return min(1.0, max(0.0, value))
 
     def _cfg_autoplay_push_probability(self) -> float:
         try:
-            value = float(self._cfg.get("autoplay_push_probability", 0.35) or 0.35)
+            value = float(self._cfg.get("autoplay_push_probability", 0.35))
         except Exception:
             return 0.35
         return min(1.0, max(0.0, value))
@@ -3111,7 +3258,7 @@ class STS2AutoplayService:
                 return
             try:
                 loop = asyncio.get_running_loop()
-                task = loop.create_task(self._explain_review(dict(record), review))
+                task = loop.create_task(self._explain_review(dict(record), review, generation=self._review_generation))
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             except RuntimeError:
                 pass
@@ -3186,12 +3333,18 @@ class STS2AutoplayService:
         except Exception:
             return {"summary": {}, "runs": []}
 
-    async def _explain_review(self, record: dict[str, Any], review: dict[str, Any]) -> None:
+    async def _explain_review(
+        self, record: dict[str, Any], review: dict[str, Any], *, generation: int | None = None,
+    ) -> None:
         """局末复盘：把玩家的选择与推荐差得最多的几步交给**本体**（同一模型 + 本体人设）讲讲为什么。
 
         讲解贴回这一局的记录（历史页可见），并推给本体 NEKO 让它用自己的口吻说。它**不**进教训、
         不影响任何决策，也不暂停自动游玩。
         """
+        if generation is None:
+            generation = self._review_generation
+        if not self._state.run_reflection_enabled or generation != self._review_generation:
+            return
         try:
             digest = review_digest(record, review)
             self.logger.info("[sts2_review] digest=%s", digest.replace("\n", " ‖ "))
@@ -3199,6 +3352,9 @@ class STS2AutoplayService:
                 self.logger.info("[sts2_review] 主系统 LLM 不可用，只留对照记录")
                 return
             text = await self._catgirl_llm.generate(summary_text=digest, summary_kind="run_review", payload={})
+            # A disabled/re-enabled switch must not resurrect an older queued review.
+            if not self._state.run_reflection_enabled or generation != self._review_generation:
+                return
             if not text:
                 self.logger.info("[sts2_review] 讲解未产出，只留对照记录")
                 return
@@ -3321,9 +3477,9 @@ class STS2AutoplayService:
         ★ 玩家口径（2026-10-26）：「关闭弹幕，但是可以用 push_message 让猫娘点评一下」。
         ★ 默认 **True**：与既有的「尖塔速报」（`host_digest_enabled` 默认 True）同一个取向 ——
           插件本来就会在代打时给本体发消息让它开口；这里只是把**本回合的想法**也让它说。
-        ★ 注意它**只在弹幕关着时**生效（见 `_push_catgirl`）：弹幕开着还推宿主 = 一句话说两遍。
+        ★ 还需「尖塔速报」总开关开启；它**只在弹幕关着时**生效（见 `_push_catgirl`）：弹幕开着还推宿主 = 一句话说两遍。
         """
-        return bool(self._cfg.get("host_commentary_when_danmaku_off", True))
+        return self._state.host_digest_enabled and bool(self._cfg.get("host_commentary_when_danmaku_off", True))
 
     def _host_commentary_min_interval(self) -> float:
         """`_is_host_commentary_enabled` 那条通道的最小间隔（秒），配置可覆盖，下限 5s。"""
@@ -3333,6 +3489,22 @@ class STS2AutoplayService:
             return self.HOST_COMMENTARY_MIN_INTERVAL_SECONDS
         return max(5.0, value)
 
+    def _remember_host_report(self, text: str, *, kind: str, run_id: str = "") -> bool:
+        """五分钟内同一情报不重交；返回 False 表示重复，不更新节流时间。"""
+        now = time()
+        self._recent_host_reports = {
+            key: at for key, at in self._recent_host_reports.items() if now - at < 300.0
+        }
+        normalized = "".join(ch for ch in text if ch.isalnum())
+        key = sha1(f"{kind}|{run_id}|{normalized}".encode("utf-8")).hexdigest()
+        if key in self._recent_host_reports:
+            self.logger.info("[sts2_host_push] duplicate report dropped kind=%s", kind)
+            return False
+        if len(self._recent_host_reports) >= 32:
+            del self._recent_host_reports[next(iter(self._recent_host_reports))]
+        self._recent_host_reports[key] = now
+        return True
+
     def _push_host_commentary(self, text: str, *, scene_key: str = "") -> bool:
         """把一段**点评**改走宿主：`push_message` → 猫娘在聊天里用自己的口吻说。
 
@@ -3340,9 +3512,9 @@ class STS2AutoplayService:
         ephemeral，三个开关的理由都写在它的注释里），本方法是**点评这条线的节流壳**。
 
         三道闸（缺一就会变成刷屏或重复）：
-          ① 开关：`host_commentary_when_danmaku_off`；
+          ① 开关：`host_digest_enabled` 与 `host_commentary_when_danmaku_off` 均开启；
           ② 去重：同一个场景键只讲一次（`last_host_commentary_key`）；
-          ③ 节流：距上次 ≥ `host_commentary_min_interval_seconds`（默认 45s）。
+          ③ 节流：距两条速报通道最近一次推送 ≥ `host_commentary_min_interval_seconds`（默认 45s）。
         返回 True 表示真的推了（供测试与日志核对）。
         """
         body = str(text or "").strip()
@@ -3352,7 +3524,7 @@ class STS2AutoplayService:
         if key and key == getattr(self._state, "last_host_commentary_key", ""):
             return False
         now = time()
-        last = float(getattr(self._state, "last_host_commentary_at", 0.0) or 0.0)
+        last = max(self._state.last_host_commentary_at, self._state.last_host_digest_at)
         interval = self._host_commentary_min_interval()
         if last > 0.0 and (now - last) < interval:
             self.logger.info(
@@ -3362,6 +3534,10 @@ class STS2AutoplayService:
                 key[:40],
             )
             return False
+        if not self._remember_host_report(
+            body, kind="commentary", run_id=str(self._state.snapshot.get("run_id") or "")
+        ):
+            return False
         self._state.last_host_commentary_key = key
         self._state.last_host_commentary_at = now
         self.logger.info(
@@ -3370,8 +3546,7 @@ class STS2AutoplayService:
             key[:40],
         )
         self._push_proactive_to_host(
-            "（弹幕关着，所以这句直接在聊天里说给玩家听，用你自己的口吻，别念稿、一两句就够）"
-            + body,
+            self._host_digest_prompt(self._state.snapshot, commentary=body),
             kind="autoplay_commentary",
             priority=4,
         )
@@ -3392,13 +3567,18 @@ class STS2AutoplayService:
 
         另外刻意优先走 SDK 的 `ctx.push_message`：插件的 dispatcher 会把正文截到 **30 字**
         （`_host_reply_text`），战报/速报会被切碎 —— 那 30 字限制是给"状态反馈"用的。
-        拿不到 SDK 上下文时退回 dispatcher（接受截断，但可见性/行为一致）。
+        拿不到 SDK 上下文时退回 dispatcher；ephemeral proactive 消息同样保留完整正文。
         """
         body = str(text or "").strip()
         if not body:
             return
         meta = {"kind": kind, "prompt_ephemeral": True, "delivery_semantics": "proactive"}
         # 留痕：这条是"悄悄交给本体"的，玩家在聊天里看不到正文，所以只有日志能核对三个开关。
+        # Final gate also covers delayed callbacks; livestream interaction has its own switch.
+        if kind == "run_review" and not self._state.run_reflection_enabled:
+            return
+        if kind in {"situation_digest", "autoplay_commentary", "character_announcement", "stuck_alert"} and not self._state.host_digest_enabled:
+            return
         self.logger.info(
             "[sts2_host_push] kind=%s visibility=[] ai_behavior=respond ephemeral=True chars=%s",
             kind,
@@ -3484,9 +3664,13 @@ class STS2AutoplayService:
 
     def _instant_line_key(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> str:
         screen = str(payload.get("screen") or snapshot.get("screen") or "")
-        return f"{screen}|{snapshot.get('floor')}|{snapshot.get('turn')}"
+        raw = snapshot.get("raw_state") or {}
+        run = raw.get("run") or {}
+        run_id = snapshot.get("run_id") or raw.get("run_id") or run.get("run_id") or run.get("id") or ""
+        scope = f"{run_id}|{snapshot.get('act')}|" if run_id else ""
+        return f"{scope}{screen}|{snapshot.get('floor')}|{snapshot.get('turn')}"
 
-    def _schedule_catgirl_push(self, text: str, *, fetch_avatar: bool = True) -> None:
+    def _schedule_catgirl_push(self, text: str, *, fetch_avatar: bool = True, change_key: str = "") -> None:
         """把一条文本异步推到游戏内弹幕（fire-and-forget，异常自取）。
 
         ``fetch_avatar=False`` 用于**即时短句**：拉头像是一次 HTTP（最长 3 秒超时），
@@ -3499,8 +3683,20 @@ class STS2AutoplayService:
         except RuntimeError:
             return
         try:
-            task = loop.create_task(self._push_catgirl(text, fetch_avatar=fetch_avatar))
-            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            task = loop.create_task(self._push_change_catgirl(
+                text, self._commentary_observation_key(self._state.snapshot), change_key, fetch_avatar=fetch_avatar
+            ))
+            def finished(t):
+                try:
+                    sent = False if t.cancelled() else t.result()
+                except Exception:
+                    sent = False
+                # 调度不等于播报成功；限流/过时/网络失败不能永久吃掉本次即时句。
+                if (not sent and change_key and self._last_instant_change_key == change_key
+                        and change_key not in self._reported_danmaku_changes):
+                    self._state.last_instant_line_key = ""
+                    self._last_instant_text = ""
+            task.add_done_callback(finished)
         except Exception:
             pass
 
@@ -3508,20 +3704,25 @@ class STS2AutoplayService:
         """**即时短句**：不调 LLM，用手里已有的信息拼一句立刻推。
 
         这是"弹幕跟不上画面"的解药：点评生成平均要 5~10 秒，等它出来早就换场景了；
-        即时短句走的是"事件一变就发"，所以它才是玩家看到的主要弹幕。
+        即时短句只取当前观测，统一出口至少间隔 6 秒；有新信息才说，不排队补播。
         """
         try:
             key = self._instant_line_key(snapshot, payload)
         except Exception:
             return
-        if not key or key == self._state.last_instant_line_key:
+        if not self._danmaku_enabled or not key or not self._danmaku_ready():
             return
-        text = self._instant_line_text(snapshot, companion_evaluation, payload)
-        if not text:
+        change_key = self._danmaku_change_key(snapshot, payload)
+        if change_key in self._reported_danmaku_changes:
+            return
+        text = self._compact_danmaku(self._instant_line_text(snapshot, companion_evaluation, payload))
+        if not text or (key == self._state.last_instant_line_key and text == self._last_instant_text):
             return
         self._state.last_instant_line_key = key
+        self._last_instant_text = text
+        self._last_instant_change_key = change_key
         # 即时线不等待拉头像（那是一次最长 3 秒的 HTTP），只用缓存里的。
-        self._schedule_catgirl_push(text, fetch_avatar=False)
+        self._schedule_catgirl_push(text, fetch_avatar=False, change_key=change_key)
         self.logger.info("[sts2_instant_line] key=%s text=%s", key, text[:60])
 
     def _instant_line_text(self, snapshot: dict[str, Any], companion_evaluation: dict[str, Any], payload: dict[str, Any]) -> str:
@@ -3531,14 +3732,15 @@ class STS2AutoplayService:
             return str(companion_evaluation.get("primary_message") or payload.get("message") or "").strip()
         bits: list[str] = []
         try:
-            plan_line = self._format_plan_line(getattr(self._loop_runner, "_solver_plan_cached", None))
+            plan_line = self._current_commentary_plan_line(snapshot)
         except Exception:
             plan_line = ""
         if plan_line:
-            bits.append(plan_line)
+            # 弹幕只说下一步，不把整轮出牌列表铺满屏幕；详解仍用完整剩余计划。
+            return "可以先" + plan_line.split("；", 1)[0] + "喵。"
         enemies = payload.get("enemies") if isinstance(payload.get("enemies"), list) else []
         raw_enemies = self._raw_combat_enemies(snapshot)
-        enemy_bits = []
+        enemy_bits: list[tuple[float, str]] = []
         for index, enemy in enumerate(enemies[:3]):
             if not isinstance(enemy, dict):
                 continue
@@ -3546,17 +3748,24 @@ class STS2AutoplayService:
             # 说人话的意图（`攻击 9`），而不是 mod 的招式 id（`STICKY_SHOT`）——见 `_enemy_intent_label`。
             raw_enemy = raw_enemies[index] if index < len(raw_enemies) else None
             intent = _enemy_intent_label(enemy, raw_enemy)
-            enemy_bits.append(f"{name}/{intent}" if intent else name)
+            intents = raw_enemy.get("intents") if isinstance(raw_enemy, dict) else []
+            damage = sum(
+                float(item["total_damage"]) for item in (intents if isinstance(intents, list) else [])
+                if isinstance(item, dict) and isinstance(item.get("total_damage"), (int, float))
+            )
+            enemy_bits.append((damage, f"{name}/{intent}" if intent else name))
         if enemy_bits:
-            bits.append("敌:" + "、".join(enemy_bits))
+            # 只挑伤害意图最高的一只，避免把三只敌人和整轮计划塞成横跨屏幕的清单。
+            bits.append("敌:" + max(enemy_bits, key=lambda item: item[0])[1])
         player = payload.get("player") if isinstance(payload.get("player"), dict) else {}
         if isinstance(player.get("current_hp"), (int, float)):
-            bits.append(f"我{int(player['current_hp'])}/{int(player.get('max_hp') or 0)}")
+            hp = str(int(player["current_hp"]))
+            if isinstance(player.get("max_hp"), (int, float)) and player["max_hp"] > 0:
+                hp += f"/{int(player['max_hp'])}"
+            bits.append("我" + hp)
         if not bits:
             return ""
-        tails = ("喵！", "喵～", "喵。")
-        tail = tails[int(self._state.step_count) % len(tails)]
-        return "｜".join(bits) + " " + tail
+        return "｜".join(bits) + " 喵。"
 
     def _should_emit_long_commentary(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> bool:
         """要不要再让**本体**生成一条长讲解（即时短句之外的第二条线）。
@@ -3788,18 +3997,49 @@ class STS2AutoplayService:
         except Exception:
             pass
 
-    def _situation_digest_text(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> str:
-        """给本体的**局势速报**（它据此主动讲一句）。
+    def _host_digest_prompt(
+        self, snapshot: dict[str, Any], *, facts: str = "", commentary: str = ""
+    ) -> str:
+        """两条速报通道共用事实边界；点评是建议，不是动作执行回执。"""
+        if not facts:
+            summary = snapshot.get("situation_summary")
+            summary = summary if isinstance(summary, dict) else {}
+            details = summary.get("payload")
+            details = details if isinstance(details, dict) else {}
+            facts = self._situation_digest_text(snapshot, {
+                **details, "summary_kind": summary.get("kind"), "screen": snapshot.get("screen"),
+            })
+        control = "自动游玩正在运行" if self._plugin_is_driving(snapshot) else "当前未由插件自动操作"
+        return (
+            "《杀戮尖塔2》临时速报，非提问，不是动作执行回执。"
+            "按人设用1～2句短话点评当前重点或风险，不必加喵。"
+            "仅据最近观测（可能已变化），不要沿用旧局信息或重复已报内容。"
+            "建议不等于已执行；不编造牌或战果，无结算依据不要保证格挡、击杀或安全。"
+            "略去连接、模式、接管套话，不要反问或索要指令；未自动操作勿自称代打。"
+            f"\n控制：{control}"
+            f"\n最近观测：{facts or '信息不足，勿补写战况。'}"
+            + (f"\n点评（仅供参考，观测优先）：{commentary}" if commentary else "")
+        )
 
-        内容给足才有"互动味"：战斗里报敌人+意图+我方血量，其余界面报界面名与层级。
-        以前这里刻意压到 30 字以内 —— 因为 dispatcher 会截断；现在优先走 SDK 的
-        `ctx.push_message`（不截断），所以可以写完整。
-        """
-        kind = str(payload.get("summary_kind") or "")
-        screen = str(payload.get("screen") or snapshot.get("screen") or "?")
+    def _situation_digest_text(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> str:
+        """只报观测事实，不把意图当实际伤害，不把缺失的格挡/生命补成零。"""
+        kind = str(payload.get("summary_kind") or "").lower()
+        screen = str(payload.get("screen") or snapshot.get("screen") or "").lower()
+        raw = snapshot.get("raw_state")
+        raw = raw if isinstance(raw, dict) else {}
+        run = raw.get("run")
+        run = run if isinstance(run, dict) else {}
+        character = str(run.get("character_name") or "")
+        if not character:
+            character = {
+                "IRONCLAD": "铁甲战士", "SILENT": "静默猎手", "DEFECT": "故障机器人",
+                "REGENT": "储君", "NECROBINDER": "亡灵契约师",
+            }.get(str(run.get("character_id") or "").upper(), "")
+        head = f"角色{character}；" if character else ""
         floor = snapshot.get("floor")
-        head = f"第{floor}层 " if floor else ""
-        if kind == "combat":
+        if floor is not None:
+            head += f"第{floor}层 "
+        if kind == "combat" or screen == "combat":
             player = payload.get("player") if isinstance(payload.get("player"), dict) else {}
             enemies = payload.get("enemies") if isinstance(payload.get("enemies"), list) else []
             bits: list[str] = []
@@ -3811,11 +4051,29 @@ class STS2AutoplayService:
                 raw_enemy = raw_enemies[index] if index < len(raw_enemies) else None
                 intent = _enemy_intent_label(enemy, raw_enemy)
                 bits.append(f"{name}({intent})" if intent else name)
-            hp = ""
+            stats = ""
             if isinstance(player.get("current_hp"), (int, float)):
-                hp = f"；我方生命{int(player['current_hp'])}/{int(player.get('max_hp') or 0)}"
-            return f"{head}战斗中，敌人：" + ("、".join(bits) if bits else "未识别") + hp
-        return f"{head}{screen}界面"
+                stats += f"；我方生命{int(player['current_hp'])}"
+                if isinstance(player.get("max_hp"), (int, float)) and player["max_hp"] > 0:
+                    stats += f"/{int(player['max_hp'])}"
+            if isinstance(player.get("block"), (int, float)):
+                stats += f"；当前格挡{int(player['block'])}"
+            turn = snapshot.get("turn")
+            turn_label = f"第{turn}回合 " if turn is not None else ""
+            return f"{head}{turn_label}战斗中，敌人意图：" + ("、".join(bits) if bits else "未识别") + stats
+        labels = {
+            "map": "地图选路", "event": "事件选择", "reward": "战利品选择",
+            "card_reward": "卡牌奖励选择", "selection": "卡牌选择", "card_selection": "卡牌选择",
+            "card_selection_transform": "卡牌变化选择", "card_selection_remove": "删牌选择",
+            "card_selection_delet": "删牌选择", "card_selection_reward": "卡牌奖励选择",
+            "card_selection_unusefull": "卡牌选择", "bundle_selection": "组合奖励选择",
+            "capstone_selection": "顶点奖励选择", "relic_selection": "遗物选择",
+            "shop": "商店", "shop_show": "商店", "rest": "休息处", "chest": "宝箱",
+            "game_over": "本局结束", "victory": "胜利结算",
+        }
+        label = labels.get(screen) or labels.get(kind)
+        # 标题/加载/未知屏幕没有值得播报的战况，不让本体凭空续写上一局。
+        return f"{head}{label}界面" if label else ""
 
     def _push_host_situation_digest(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> None:
         """把局势**悄悄**交给本体，让它自己主动讲一句（不可见、不进记忆）。
@@ -3831,21 +4089,24 @@ class STS2AutoplayService:
         if not getattr(self._state, "host_digest_enabled", True):
             return
         try:
-            key = self._instant_line_key(snapshot, payload)
+            key = f"{snapshot.get('run_id', '')}|{self._instant_line_key(snapshot, payload)}"
         except Exception:
             return
         if not key or key == self._state.last_host_digest_key:
             return
         now = time()
-        if now - self._state.last_host_digest_at < self.HOST_DIGEST_MIN_INTERVAL_SECONDS:
+        if now - max(self._state.last_host_digest_at, self._state.last_host_commentary_at) < self.HOST_DIGEST_MIN_INTERVAL_SECONDS:
             return
         digest = self._situation_digest_text(snapshot, payload)
         if not digest:
             return
+        stable_facts = self._situation_digest_text({**snapshot, "turn": None}, payload)
+        if not self._remember_host_report(stable_facts, kind="digest", run_id=str(snapshot.get("run_id") or "")):
+            return
         self._state.last_host_digest_key = key
         self._state.last_host_digest_at = now
         self._push_proactive_to_host(
-            f"当前对局情况：{digest}。用你自己的口吻说一句，别念稿、一两句就够。",
+            self._host_digest_prompt(snapshot, facts=digest),
             kind="situation_digest",
             priority=4,
         )
@@ -3868,21 +4129,136 @@ class STS2AutoplayService:
             self.logger.info(
                 "[sts2_catgirl_llm] danmaku off ⇒ 改走宿主点评 kind=%s screen=%s", kind, payload.get("screen")
             )
-        # 弹幕高密度：不再用 should_comment / LLM 生成间隔节流拦截。防刷屏统一交给外层
-        # _deliver_catgirl_sync 里的 _should_deliver_sync（指纹+场景/间隔去重）。
+        if self._danmaku_enabled and self._danmaku_change_key(snapshot, payload) in self._reported_danmaku_changes:
+            return
+        # 生成只允许一个在途请求；所有来源最终共用 _push_catgirl 的发送间隔和短句上限。
         enabled = self._catgirl_llm_enabled
         llm_ok = self._catgirl_llm is not None and self._catgirl_llm.available
         if enabled and llm_ok:
+            if self._catgirl_llm_task is not None and not self._catgirl_llm_task.done():
+                return
             self.logger.info("[sts2_catgirl_llm] schedule kind=%s screen=%s", kind, payload.get("screen"))
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 self._push_catgirl_fallback(companion_evaluation, payload)
                 return
-            loop.create_task(self._catgirl_llm_async(snapshot, payload, companion_evaluation, self._instant_line_key(snapshot, payload)))
+            self._catgirl_llm_task = loop.create_task(self._catgirl_llm_async(snapshot, payload, companion_evaluation, self._instant_line_key(snapshot, payload)))
             return
         self.logger.info("[sts2_catgirl_llm] fallback enabled=%s llm_ok=%s kind=%s", enabled, llm_ok, kind)
         self._push_catgirl_fallback(companion_evaluation, payload)
+
+    def _idle_danmaku_allowed(self, snapshot: dict[str, Any]) -> bool:
+        # 闲聊只进游戏弹幕，不因弹幕关闭转成宿主聊天；直播讲解拥有场景时也不抢话。
+        return self._danmaku_enabled and self._client is not None and self._state.transport_state == "connected" and not (
+            self._livestream.enabled and self._state.autoplay_state == "running"
+            and not self._should_hold_for_orders(snapshot) and self._livestream.scene_for(snapshot)
+        )
+
+    def _maybe_emit_idle_catgirl(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> None:
+        """静止观测且一段时间没有弹幕时，补一句陪伴闲聊，而不是重播旧战报。"""
+        kind = str(payload.get("summary_kind") or "")
+        if not self._idle_danmaku_allowed(snapshot) or kind not in {
+            "combat", "map", "event", "reward", "selection", "shop", "rest",
+        }:
+            self._danmaku_idle_observation = ""
+            return
+        now = monotonic()
+        key = self._commentary_observation_key(snapshot)
+        if key != self._danmaku_idle_observation:
+            self._danmaku_idle_observation = key
+            self._danmaku_idle_since = now
+            return
+        last_activity = max(
+            self._danmaku_idle_since,
+            self._last_danmaku_at if self._last_danmaku_at is not None else self._danmaku_idle_since,
+            self._danmaku_idle_attempt_at if self._danmaku_idle_attempt_at is not None else self._danmaku_idle_since,
+        )
+        if now - last_activity < DANMAKU_IDLE_INTERVAL or not self._danmaku_ready():
+            return
+        if self._catgirl_llm_task is not None and not self._catgirl_llm_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        # 与事件点评共用一个生成槽；失败也等下一周期，不在每个 tick 重试。
+        self._danmaku_idle_attempt_at = now
+        self._catgirl_llm_task = loop.create_task(self._idle_catgirl_async(snapshot, payload, key))
+
+    async def _idle_danmaku_tick(self) -> None:
+        """SSE 没有变化事件时也检查陪伴闲聊；到期先取新状态，不对旧快照直接发言。"""
+        snapshot = self._state.snapshot or {}
+        sync = snapshot.get("catgirl_sync") or {}
+        payload = sync.get("payload") or {}
+        if not self._idle_danmaku_allowed(snapshot) or payload.get("summary_kind") not in {
+            "combat", "map", "event", "reward", "selection", "shop", "rest",
+        }:
+            self._danmaku_idle_observation = ""
+            return
+        key = self._commentary_observation_key(snapshot)
+        if key != self._danmaku_idle_observation:
+            self._danmaku_idle_observation = key
+            self._danmaku_idle_since = monotonic()
+            return
+        last_activity = max(
+            self._danmaku_idle_since,
+            self._last_danmaku_at if self._last_danmaku_at is not None else self._danmaku_idle_since,
+            self._danmaku_idle_attempt_at if self._danmaku_idle_attempt_at is not None else self._danmaku_idle_since,
+        )
+        if monotonic() - last_activity < DANMAKU_IDLE_INTERVAL or not self._danmaku_ready():
+            return
+        if self._catgirl_llm_task is not None and not self._catgirl_llm_task.done():
+            return
+        # refresh_state 的同步出口统一处理场景变更、断线、即时点评和闲聊的优先级。
+        await self.refresh_state(trigger_sync=True)
+
+    def _idle_catgirl_fallback(self, kind: str) -> str:
+        scene_lines = {
+            "combat": "这回合我陪你慢慢看喵。",
+            "map": "分岔路总让我想多看一眼喵。",
+            "event": "遇到这种事，我也想多琢磨一会儿。",
+            "reward": "挑奖励这会儿，我还挺期待的喵。",
+            "selection": "我也想把这些牌再看一遍喵。",
+            "shop": "逛商店就忍不住想多看两眼喵。",
+            "rest": "在这里歇一会儿也挺舒服喵。",
+        }
+        choices = (
+            scene_lines.get(kind, "我还在这儿陪着喵。"),
+            "我陪着呢，慢慢来就好喵。",
+            "我先伸个懒腰，耳朵还竖着喵。",
+            "不赶时间，我也想歇口气喵。",
+            "我安静待一会儿，可没溜走喵。",
+        )
+        return next(line for line in choices if line not in self._recent_idle_lines)
+
+    async def _idle_catgirl_async(self, snapshot: dict[str, Any], payload: dict[str, Any], key: str) -> None:
+        if not self._idle_danmaku_allowed(snapshot) or self._commentary_observation_changed(key):
+            return
+        progress = (self._state.step_count, self._state.solver_step_index)
+        last_sent = self._last_danmaku_at
+        text = None
+        if self._catgirl_llm_enabled and self._catgirl_llm is not None and self._catgirl_llm.available:
+            try:
+                text = await asyncio.wait_for(self._catgirl_llm.generate(
+                    summary_text=self._situation_digest_text(snapshot, payload),
+                    summary_kind="idle",
+                    payload={"recent_idle_lines": list(self._recent_idle_lines)},
+                ), timeout=DANMAKU_GENERATION_TIMEOUT)
+            except Exception as exc:
+                self.logger.info("[sts2_danmaku_idle] generation unavailable: %s", exc)
+        if (not self._idle_danmaku_allowed(self._state.snapshot or snapshot)
+                or self._commentary_observation_changed(key)
+                or progress != (self._state.step_count, self._state.solver_step_index)
+                or self._last_danmaku_at != last_sent):
+            return
+        text = self._compact_danmaku(text or "")
+        normalized = "".join(c for c in text if c.isalnum())
+        if not normalized or any(normalized == "".join(c for c in line if c.isalnum()) for line in self._recent_idle_lines):
+            text = self._idle_catgirl_fallback(str(payload.get("summary_kind") or ""))
+        # 最近三句只供短期避重，不写入长期记忆；发送仍走统一限频/去重出口。
+        self._recent_idle_lines = (self._recent_idle_lines + [text])[-3:]
+        await self._push_current_catgirl(text, key, fetch_avatar=False)
 
     @staticmethod
     def _main_server_port() -> int:
@@ -3934,7 +4310,25 @@ class STS2AutoplayService:
             return self._avatar_b64
         return self._avatar_b64
 
-    async def _push_catgirl(self, text: str, *, fetch_avatar: bool = True) -> None:
+    @staticmethod
+    def _compact_danmaku(text: str) -> str:
+        # 一次只展示一句；长度约束放在出口，不能仅靠 LLM 遵守提示词。
+        clean = " ".join(str(text or "").split()).strip()
+        for index, char in enumerate(clean):
+            if char in "。！？!?" and index > 0:
+                clean = clean[:index + 1]
+                break
+        if len(clean) > DANMAKU_MAX_CHARS:
+            clean = clean[:DANMAKU_MAX_CHARS - 1].rstrip("，、；｜ ") + "…"
+        return clean
+
+    def _danmaku_ready(self) -> bool:
+        return not self._danmaku_sending and (
+            self._last_danmaku_at is None
+            or monotonic() - self._last_danmaku_at >= DANMAKU_MIN_INTERVAL
+        )
+
+    async def _push_catgirl(self, text: str, *, fetch_avatar: bool = True) -> bool:
         """推一条猫娘点评到游戏内弹幕（mod /danmaku），带可选头像。
 
         这是插件侧唯一的弹幕出口（LLM 分支与启发式兜底都汇到这里），所以 danmaku_enabled 的闸门
@@ -3959,38 +4353,134 @@ class STS2AutoplayService:
                 text,
                 scene_key=str(getattr(self._state, "last_push_scene_key", "") or ""),
             )
-            return
+            return False
         client = self._client
         if client is None or not text:
-            return
-        avatar = await self._catgirl_avatar_base64() if fetch_avatar else self._cached_avatar_base64()
+            return False
+        text = self._compact_danmaku(text)
+        if not text or not self._danmaku_ready():
+            return False
+        now = monotonic()
+        self._recent_danmaku = {key: at for key, at in self._recent_danmaku.items() if now - at < 60.0}
+        run_id = str(self._state.snapshot.get("run_id") or "")
+        fingerprint = run_id + "|" + "".join(c for c in text if c.isalnum())
+        if fingerprint in self._recent_danmaku:
+            return False
+        # 在第一个 await 前占位；即时句、LLM 和兜底共用出口，不并发等待后一起刷屏。
+        self._danmaku_sending = True
+        observation_key = self._commentary_observation_key(self._state.snapshot)
         try:
-            await client.push_danmaku(text, style="catgirl", avatar=avatar)
-            self.logger.info("[sts2_catgirl_llm] pushed catgirl danmu to mod")
+            avatar = await self._catgirl_avatar_base64() if fetch_avatar else self._cached_avatar_base64()
+            if self._commentary_observation_changed(observation_key) or not self._danmaku_enabled:
+                return False
+            self._last_danmaku_at = monotonic()
+            await asyncio.wait_for(client.push_danmaku(text, style="catgirl", avatar=avatar), timeout=2.0)
+            self._recent_danmaku[fingerprint] = monotonic()
+            self.logger.info("[sts2_catgirl_llm] pushed catgirl danmu to mod chars=%s", len(text))
+            return True
         except Exception as exc:
             self.logger.info("[sts2_catgirl_llm] push failed: %s", exc)
+            return False
+        finally:
+            self._danmaku_sending = False
+
+    def _danmaku_change_key(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> str:
+        """按游戏事实而非触发来源/文案标记一次变化；与更严格的迟到检查分开。"""
+        summary = snapshot.get("situation_summary") or {}
+        facts = summary.get("payload")
+        if not isinstance(facts, dict) or not facts:
+            # 旧快照/精简调用也只取事实，不能把 message、trigger 或上次动作 delta 当新局势。
+            factual_fields = {
+                "player", "enemies", "hand", "current_hp", "max_hp", "gold", "deck", "relics", "potions",
+                "event", "options", "map", "available_nodes", "travelable_nodes", "reward", "reward_cards",
+                "shop", "shop_cards", "rest", "selection", "selection_cards", "selected_count",
+                "min_select", "max_select", "required_count", "can_confirm",
+            }
+            facts = {k: v for k, v in payload.items() if k in factual_fields}
+            raw = snapshot.get("raw_state") or {}
+            facts = {**facts, "scene": {k: raw[k] for k in (
+                "combat", "event", "map", "reward", "shop", "rest", "selection",
+            ) if k in raw}}
+        # 可用操作在动画中短暂消失/恢复，不是新的战况；时钟/版本号也不是。
+        def stable(value):
+            if isinstance(value, dict):
+                return {k: stable(v) for k, v in value.items() if k not in {
+                    "available_actions", "captured_at", "polled_at", "state_version", "request_id",
+                }}
+            if isinstance(value, list):
+                return [stable(v) for v in value]
+            return value
+        recommendation = self._current_commentary_plan_line(snapshot).split("；", 1)[0] if payload.get("summary_kind") == "combat" else ""
+        identity = [self._instant_line_key(snapshot, payload), stable(facts), recommendation]
+        return sha1(json.dumps(identity, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+
+    async def _push_change_catgirl(self, text: str, observation_key: str, change_key: str, *, fetch_avatar: bool = True) -> bool:
+        """所有局势点评共享一次播报名额；闲聊与宿主聊天不使用这个账本。"""
+        if self._commentary_observation_changed(observation_key):
+            return False
+        if self._danmaku_enabled and change_key and change_key in self._reported_danmaku_changes:
+            return False
+        sent = await self._push_catgirl(text) if fetch_avatar else await self._push_catgirl(text, fetch_avatar=False)
+        if sent and change_key:
+            self._reported_danmaku_changes[change_key] = None
+            # 有界指纹窗口：不存文本，不因长时间游玩无限增长。
+            while len(self._reported_danmaku_changes) > 256:
+                self._reported_danmaku_changes.pop(next(iter(self._reported_danmaku_changes)))
+        return bool(sent)
+
+    @staticmethod
+    def _commentary_observation_key(snapshot: dict[str, Any]) -> str:
+        raw = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
+        summary = snapshot.get("situation_summary") if isinstance(snapshot.get("situation_summary"), dict) else {}
+        facts = [snapshot.get("run_id"), snapshot.get("screen"), snapshot.get("floor"),
+                 snapshot.get("turn"), raw.get("combat"), summary.get("payload")]
+        return sha1(json.dumps(facts, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+
+    def _commentary_observation_changed(self, key: str) -> bool:
+        return bool(self._state.snapshot) and key != self._commentary_observation_key(self._state.snapshot)
+
+    async def _push_current_catgirl(self, text: str, observation_key: str, *, fetch_avatar: bool = True) -> None:
+        if not self._commentary_observation_changed(observation_key):
+            await self._push_catgirl(text, fetch_avatar=fetch_avatar)
 
     async def _catgirl_llm_async(self, snapshot: dict[str, Any], payload: dict[str, Any], companion_evaluation: dict[str, Any] | None = None, scene_key: str = "") -> None:
         """异步生成猫娘点评并推 catgirl 弹幕；**LLM 没产出就退回启发式文本**（不能噤声）。
 
-        战斗时给 LLM 的 prompt 精简为三样：当前回合完整 line + 怪物行动意图 + 我方生命，
+        战斗时给 LLM 的 prompt 精简为三样：已核验的剩余计划 + 怪物行动意图 + 我方生命，
         其余界面保持原 summary_text（太长会导致 LLM 抓不住重点、输出变唠叨）。
         """
         kind = str(payload.get("summary_kind") or "")
+        change_key = self._danmaku_change_key(snapshot, payload)
+        if self._danmaku_enabled and change_key in self._reported_danmaku_changes:
+            return
+        observation_key = self._commentary_observation_key(snapshot)
+        step_index = self._state.solver_step_index
+        step_count = self._state.step_count
+        if self._commentary_observation_changed(observation_key):
+            return
         try:
             situation = snapshot.get("situation_summary") if isinstance(snapshot.get("situation_summary"), dict) else {}
             summary_text = str(payload.get("message") or situation.get("text") or "").strip()
             if kind == "combat":
                 summary_text = await self._build_combat_prompt(snapshot, payload)
             self.logger.info("[sts2_catgirl_llm] generate kind=%s text=%s", kind, summary_text[:80])
-            text = await self._catgirl_llm.generate(
-                summary_text=summary_text,
-                summary_kind=kind,
-                payload=payload,
-            )
+            try:
+                text = await asyncio.wait_for(self._catgirl_llm.generate(
+                    summary_text=summary_text,
+                    summary_kind=kind,
+                    payload=payload,
+                ), timeout=DANMAKU_GENERATION_TIMEOUT)
+            except Exception as exc:
+                self.logger.info("[sts2_catgirl_llm] generation unavailable kind=%s error=%s", kind, exc)
+                text = None
             # 迟到丢弃：生成花了几秒，若画面已经换了场景/回合，这条讲解就是"上一个场景的弹幕"
             # —— 玩家抱怨的正是这个。即时短句（_emit_instant_catgirl_line）已经把该说的说过了。
-            stale = bool(scene_key) and bool(self._state.last_instant_line_key) and self._state.last_instant_line_key != scene_key
+            stale = (
+                self._commentary_observation_changed(observation_key)
+                or self._state.step_count != step_count
+                or self._state.solver_step_index != step_index
+                or (bool(scene_key) and bool(self._state.last_instant_line_key) and self._state.last_instant_line_key != scene_key)
+            )
             if text:
                 if stale:
                     self.logger.info(
@@ -4001,7 +4491,7 @@ class STS2AutoplayService:
                     )
                     return
                 self.logger.info("[sts2_catgirl_llm] result=%s", text)
-                await self._push_catgirl(text)
+                await self._push_change_catgirl(text, observation_key, change_key)
                 return
             # LLM **可用但这次没产出**：必须退回启发式文本。
             # 旧代码这里什么都不推，而 _maybe_emit_catgirl_llm 又因为 llm_ok=True 不会走它自己的
@@ -4016,32 +4506,8 @@ class STS2AutoplayService:
             self.logger.info("[sts2_catgirl_llm] exception %s kind=%s", exc, kind)
 
     async def _build_combat_prompt(self, snapshot: dict[str, Any], payload: dict[str, Any]) -> str:
-        """战斗 prompt：怪物行动意图 + 我方生命 + 当前层级；仅 combat_turn_changed 再加当前回合完整 line。
-
-        - 弹幕只响应 combat_started / available_actions_changed / combat_turn_changed 三个战斗事件；
-          只有 combat_turn_changed（回合推进，轮到玩家出牌）才带 line，其余两个只报基础三样，
-          避免 line 生成延迟或行动窗口未开时提示错误打法。其余事件（screen_changed 等）不触发。
-        - line 优先复用 loop_runner 的整回合缓存（_solver_plan_cached，按 run_id+turn 签名），
-          命中则不重复跑 /solver/plan 搜索；未命中/无战斗才回退调用 get_combat_plan()。
-          格式与 Mod 独立版 NekoDanmakuDriver.SolverHintAsync 一致。
-        """
-        steps_text = ""
-        try:
-            if str(payload.get("event_type") or "") == "combat_turn_changed":
-                plan: dict[str, Any] | None = None
-                loop_runner = getattr(self, "_loop_runner", None)
-                if loop_runner is not None:
-                    cache = getattr(loop_runner, "_solver_plan_cached", None)
-                    cache_sig = getattr(loop_runner, "_solver_plan_sig", None)
-                    if cache and cache_sig == _combat_plan_signature(snapshot):
-                        plan = cache
-                if plan is None and self._client is not None:
-                    fetched = await self._client.get_combat_plan()
-                    if fetched and fetched.get("in_combat"):
-                        plan = fetched
-                steps_text = self._format_plan_line(plan)
-        except Exception:
-            steps_text = ""
+        """点评只读已核验的剩余计划，绝不为了说话另跑一次求解器搜索。"""
+        steps_text = self._current_commentary_plan_line(snapshot)
         # 怪物血量+意图 + 我方生命 + 当前层级。敌人带当前血量：payload["enemies"] 只有 name/intent，
         # 血量要从 snapshot.situation_summary.payload.enemies 取。
         enemies_pool = payload.get("enemies") if isinstance(payload.get("enemies"), list) else []
@@ -4075,10 +4541,34 @@ class STS2AutoplayService:
             floor = ""
         enemies_text = " 敌人:" + "、".join(enemy_bits) if enemy_bits else ""
         base = steps_text or ""
-        return f"本轮: {base}{enemies_text}{hp}{floor}".strip()
+        return f"本轮剩余建议: {base or '暂无可核验的出牌计划，不提供具体出牌建议。'}{enemies_text}{hp}{floor}".strip()
+
+    def _current_commentary_plan_line(self, snapshot: dict[str, Any]) -> str:
+        raw = snapshot.get("raw_state") if isinstance(snapshot.get("raw_state"), dict) else {}
+        run = raw.get("run") if isinstance(raw.get("run"), dict) else {}
+        combat = raw.get("combat") if isinstance(raw.get("combat"), dict) else {}
+        run_id = str(raw.get("run_id") or run.get("run_id") or run.get("runId") or run.get("id") or "")
+        turn = raw.get("turn") if raw.get("turn") is not None else combat.get("turn")
+        # 求解器缓存签名取自 raw_state；缺少标识/与归一化快照矛盾时不猜旧计划仍然有效。
+        if not run_id or turn is None:
+            return ""
+        if snapshot.get("run_id") and str(snapshot["run_id"]) != run_id:
+            return ""
+        if snapshot.get("turn") is not None and str(snapshot["turn"]) != str(turn):
+            return ""
+        runner = self._loop_runner
+        if getattr(runner, "_decision_engine", {}).get("engine") == "policy":
+            return ""  # 网络在决策时不能拿旧求解器计划冒充它的想法。
+        index = self._state.solver_step_index
+        plan, _ = _reusable_plan(
+            getattr(runner, "_solver_plan_cached", None),
+            getattr(runner, "_solver_plan_sig", None),
+            _combat_plan_signature(snapshot), index, snapshot,
+        )
+        return self._format_plan_line(plan, start_index=index)
 
     @staticmethod
-    def _format_plan_line(plan: dict[str, Any] | None) -> str:
+    def _format_plan_line(plan: dict[str, Any] | None, *, start_index: int = 0) -> str:
         """把 /solver/plan 的当前回合 line（line[0].steps）拼成一句人类可读指令。
 
         每个动作一步：打<卡名>[→目标N] / 用药水<名> / 结束回合。取不到返回 ""。
@@ -4092,7 +4582,7 @@ class STS2AutoplayService:
         if not steps:
             return ""
         parts: list[str] = []
-        for s in steps:
+        for s in steps[max(0, start_index):]:
             if not isinstance(s, dict):
                 continue
             k = str(s.get("kind") or "")
@@ -4119,13 +4609,20 @@ class STS2AutoplayService:
         ).strip()
         if catgirl_text:
             try:
-                task = asyncio.get_running_loop().create_task(self._push_catgirl(catgirl_text))
+                task = asyncio.get_running_loop().create_task(self._push_change_catgirl(
+                    catgirl_text, self._commentary_observation_key(self._state.snapshot),
+                    self._danmaku_change_key(self._state.snapshot, payload),
+                ))
                 # Fire-and-forget: retrieve any exception so asyncio doesn't warn about an unretrieved task error.
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             except Exception:
                 self.logger.info("[sts2_catgirl_llm] fallback push failed")
 
     def _deliver_catgirl_sync(self, snapshot: dict[str, Any]) -> None:
+        # The live window owns noncombat speech; do not queue ordinary commentary over it.
+        if (self._livestream.enabled and self._state.autoplay_state == "running"
+                and not self._should_hold_for_orders(snapshot) and self._livestream.scene_for(snapshot)):
+            return
         catgirl_sync = snapshot.get("catgirl_sync") if isinstance(snapshot.get("catgirl_sync"), dict) else {}
         payload = catgirl_sync.get("payload") if isinstance(catgirl_sync.get("payload"), dict) else {}
         companion_evaluation = payload.get("companion_evaluation") if isinstance(payload.get("companion_evaluation"), dict) else {}
@@ -4153,6 +4650,11 @@ class STS2AutoplayService:
         if not payload:
             return
         self._state.latest_sync_packet = dict(payload)
+        # 游戏内即时提示有自己的 6 秒节奏，不受宿主聊天概率/点评触发条件压成长期静默。
+        # 静止画面不复读；长讲解和宿主速报仍走下方原有门控。
+        if str(payload.get("summary_kind") or "") in {"combat", "map", "event", "reward", "selection", "shop", "rest"}:
+            self._emit_instant_catgirl_line(snapshot, companion_evaluation, payload)
+        self._maybe_emit_idle_catgirl(snapshot, payload)
         if not bool(catgirl_sync.get("should_sync")):
             if str(companion_evaluation.get("trigger") or payload.get("trigger") or "") == "combat_turn":
                 try:
@@ -4263,7 +4765,6 @@ class STS2AutoplayService:
         #   ② 高风险详解：只有血低/要挨重击时才再用**本体的模型与人设**补一条讲解。
         # 实测点评生成平均 5~10 秒（主系统是推理模型，每次约 450~520 个思考 token），
         # 等它出来画面早换了；所以"及时"只能靠①，"讲得好"才靠②。场景已变的话②直接丢弃。
-        self._emit_instant_catgirl_line(snapshot, companion_evaluation, payload)
         self._push_host_situation_digest(snapshot, payload)
         if self._should_emit_long_commentary(snapshot, payload):
             self._maybe_emit_catgirl_llm(snapshot, companion_evaluation, payload)

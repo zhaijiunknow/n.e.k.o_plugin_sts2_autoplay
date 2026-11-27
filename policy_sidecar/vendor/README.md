@@ -1,12 +1,13 @@
 # AlphaDefect inference subset
 
-Copied from https://github.com/hmty-CHEN/AlphaDefect-Public at commit `068953d3f62278ab36cac62850b437f33a5ad3b3` (MIT, see LICENSE):
-the frame parser (`sts2env/protocol.py`), the batch builder (`sts2rl/features.py`), the network
-(`sts2rl/model.py`) and the content tables they read. Nothing else of upstream is included.
+Copied from https://github.com/hmty-CHEN/AlphaDefect-Public at commit `f77831b6ea77b8ece32daf1912154ae081da875c`,
+`game-v0.114.0/python/` (MIT; see LICENSE). This adapts existing checkpoints to v0.114.0;
+it does not introduce newly trained weights.
 
-Two local changes, both about where files are found (no change to what is computed):
-- `REPO` in `sts2env/gamever.py` and `sts2rl/catalog.py` is the downloaded runtime directory
-  (`STS2_POLICY_ROOT`, holding `engine/catalog/`), not a source checkout.
-- `game_version()` returns `STS2_POLICY_GAME_VERSION` when set.
+Local changes: `REPO` in gamever.py/catalog.py reads `STS2_POLICY_ROOT`,
+`game_version()` honors `STS2_POLICY_GAME_VERSION`, and package initializers omit
+headless/training imports (not distributed here). No inference math is changed.
 
-Do not edit by hand; the copy is reproduced from upstream's commit with these replacements.
+Reproduce with `python game_mod/scripts/vendor-alphadefect-policy.py --upstream <checkout> --apply`
+(or `--archive <official-commit.zip>`), paired with `vendor-alphadefect.py` using the same source.
+Do not edit these generated files by hand.

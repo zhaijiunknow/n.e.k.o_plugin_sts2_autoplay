@@ -29,8 +29,20 @@ public sealed partial class Observation
     /// <summary>一次伤害经游戏的伤害钩子（Hook.ModifyDamage，同 CreatureCmd.Damage 的 All、不预览）之后的数值，截掉小数。只读。</summary>
     static float HitDmg(ICombatState cs, Creature target, Creature? dealer, decimal amount, MegaCrit.Sts2.Core.ValueProps.ValueProp props, CardModel? card)
     {
-        try { return MathF.Floor((float)MegaCrit.Sts2.Core.Hooks.Hook.ModifyDamage(cs.RunState, cs, target, dealer, amount, props, card, null, MegaCrit.Sts2.Core.Hooks.ModifyDamageHookType.All, CardPreviewMode.None, out _)); }
+        try { return MathF.Floor((float)Math.Min(MegaCrit.Sts2.Core.Hooks.Hook.ModifyDamage(cs.RunState, cs, target, dealer, amount, props, card, null, MegaCrit.Sts2.Core.Hooks.ModifyDamageHookType.All, CardPreviewMode.None, out _), OldHtkCap(target))); }
         catch { return MathF.Floor((float)amount); }
+    }
+
+    /// <summary>
+    /// v0.114.0：难杀（HardToKillPower）从伤害上限（v0.113.1 的 ModifyDamageCap：打到自己身上的每次伤害都封顶到层数）改成掉血钩子
+    /// （ModifyHpLostBeforeOstyLate：先过格挡、掉血封顶）。观测里的单段伤害一直是“掉血钩子之前”的数，经 Hook.ModifyDamage 或手动遍历
+    /// ModifyDamageCap 算的地方（HitDmg、溅射 CapDmg、DmgRecalc、格式 29 的几处重算）照 v0.113.1 的口径再按层数封顶，帧与旧版相同。
+    /// 难杀只有外骨骼虫有，它没有格挡，两种口径的最终掉血相同；掉血仍由 FoeHpLoss / SeqHpLoss 经 Hook.ModifyHpLost 算（新版自带难杀）。
+    /// </summary>
+    static decimal OldHtkCap(Creature? t)
+    {
+        try { return t != null && t.GetPowerAmount<MegaCrit.Sts2.Core.Models.Powers.HardToKillPower>() is var a && a > 0 ? a : decimal.MaxValue; }
+        catch { return decimal.MaxValue; }
     }
 
     /// <summary>

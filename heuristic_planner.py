@@ -560,6 +560,9 @@ class STS2HeuristicPlanner:
     # 选牌屏：候选按遍后允许返回 None 的次数，超过就重置光标重按（防死锁，见 _next_selection_option）。
     _SELECTION_EXHAUSTED_RETRIES = 2
 
+    def configure_livestream(self, controller: Any) -> None:
+        self._livestream = controller
+
     def configure_preferred_characters(self, provider: Any) -> None:
         """选人界面只在这些角色里选。`provider()` 返回角色 id 列表（策略网络已下载模型的角色）；
         返回空表 = 照旧用游戏自带的「随机」。每次进选人界面现查，所以新下载的模型不用重启就生效。
@@ -3053,6 +3056,9 @@ class STS2HeuristicPlanner:
             if best_candidate is None or candidate < best_candidate:
                 best_candidate = candidate
         if best_candidate is not None and best_candidate[0] < 0:
+            live = getattr(self, "_livestream", None)
+            if live is not None and live.enabled and live.profile != "focused" and not records and not guidance_override:
+                return live.pick_ranked(self._last_reward_scored, key=reward_cards)
             return best_candidate[1]
         preferred = self._preferred_option_index(preferences)
         if preferred is not None:
@@ -3950,6 +3956,20 @@ class STS2HeuristicPlanner:
                 continue
             if best_blocked is None or entry["score"] > best_blocked["score"]:
                 best_blocked = entry
+
+        live = getattr(self, "_livestream", None)
+        if (live is not None and live.enabled and live.profile != "focused"
+                and not records and not self._guidance_override_from_payload(summary_context)
+                and best is not None and best["kind"] in {"card", "relic"}
+                and best["score"] >= self._entry_threshold(
+                    base_threshold, entry=best, elite_ahead=elite_ahead, policy=policy)):
+            eligible = [(i, entry["score"]) for i, entry in enumerate(entries)
+                        if not entry["blocked"] and entry["kind"] == best["kind"]
+                        and entry["score"] >= self._entry_threshold(
+                            base_threshold, entry=entry, elite_ahead=elite_ahead, policy=policy)]
+            picked = live.pick_ranked(eligible, key=[self._shop_visit_signature(summary_context), entries])
+            if picked is not None:
+                best = entries[picked]
 
         threshold = self._entry_threshold(base_threshold, entry=best, elite_ahead=elite_ahead, policy=policy)
         decision: dict[str, Any] = {"action_type": None, "score": None, "threshold": threshold, "reason": "shop_close"}
