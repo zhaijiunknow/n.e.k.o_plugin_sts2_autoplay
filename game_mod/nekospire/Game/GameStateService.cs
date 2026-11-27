@@ -1955,7 +1955,12 @@ internal static class GameStateService
             return null;
         }
 
-        var backButton = cardsViewScreen.GetNodeOrNull<NButton>("BackButton");
+        // NSimpleCardsViewScreen (e.g. Pandora's Box results) disables BackButton and
+        // wires ConfirmButton to the same OnReturnButtonPressed handler. It is a
+        // read-only results screen, not a card selection: close it through that button.
+        // Keep this type-specific so we never confirm an unrelated selection screen.
+        var buttonPath = cardsViewScreen is NSimpleCardsViewScreen ? "ConfirmButton" : "BackButton";
+        var backButton = cardsViewScreen.GetNodeOrNull<NButton>(buttonPath);
         return backButton != null &&
             GodotObject.IsInstanceValid(backButton) &&
             backButton.IsVisibleInTree() &&
