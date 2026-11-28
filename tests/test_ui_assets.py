@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
+from fnmatch import fnmatchcase
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -123,3 +125,9 @@ def test_coop_ui_separates_create_and_resume_without_autoplay():
     assert "button.dataset.confirm" not in js
     shared = (STATIC / "ui.js").read_text(encoding="utf-8")
     assert "entryId === 'sts2_open_coop_room' ? 120000 : 45000" in shared
+
+
+def test_runtime_snapshots_and_logs_are_excluded_from_distribution():
+    rules = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["neko"]["build"]
+    for name in ("autoplay_history.json", "control_status.json", "policy_status.json", "mod-uploader.log"):
+        assert any(fnmatchcase(name, pattern) for pattern in rules["exclude_files"]), name

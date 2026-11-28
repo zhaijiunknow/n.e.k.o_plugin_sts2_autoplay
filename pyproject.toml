@@ -1,6 +1,6 @@
 [project]
 name = "sts2_autoplay"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = []
 
 # 插件包内容规则：NEKO 打包器（neko_plugin_cli）读 [tool.neko.build]，**不读** .gitignore。
@@ -10,4 +10,4 @@ dependencies = []
 [tool.neko.build]
 exclude_dirs = ["game_mod", ".codegraph", ".dsh-artifacts", ".agent-teams", "tools", "tmp", "local-art"]
 # policy_status.json：下载前端的进度快照，运行时生成，描述的是打包者本机的下载状态。
-exclude_files = ["deploy-all.ps1", "AGENTS.md", "policy_status.json", "control_status.json"]
+exclude_files = ["deploy-all.ps1", "AGENTS.md", "policy_status.json", "control_status.json", "autoplay_history.json", "*.log"]
