@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NekoSpire · 游玩历史</title><link rel="stylesheet" href="ui.css?v=20261127-parameters2"><script src="ui.js?v=20261127-parameters2"></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NekoSpire · 游玩历史</title><link rel="stylesheet" href="ui.css?v=20261128-coop-direct"><script src="ui.js?v=20261128-coop-direct"></script></head>
 <body><div class="wrap"><header class="masthead" id="masthead"></header><main>
 <div class="page-heading"><div><div class="eyebrow">EXPEDITION RECORDS / 游玩历史</div><h1><span class="keep">每次攀登，</span><span class="keep">都有回响。</span></h1><p class="sub">回望走过的路线、做出的选择，以及那些值得再想一次的回合。</p></div><span class="chapter" aria-hidden="true">03</span></div>
 <div class="stats" id="cards" aria-label="全部历史统计"><div class="card"><div class="k">正在读取记录</div><div class="v">—</div></div></div>
@@ -152,6 +152,7 @@ function showPage(){
     const art=Spire.art(Spire.character(run.character));
     const outcome=run.outcome==='victory'?'通关':run.outcome==='defeat'?'阵亡':run.outcome||'未知';
     button.innerHTML=(art?'<img alt="" src="'+esc(art)+'">':'<span class="unknown-avatar" aria-hidden="true">◇</span>')+'<span><strong>'+esc(charName(run))+'</strong><small>'+esc(outcome)+' · '+esc(fmtTime(run.ended_at))+'</small></span><span class="floor">'+esc(run.floor??'—')+'<small>FLOOR</small></span>';
+    const portrait=button.querySelector('img');if(portrait)portrait.addEventListener('error',()=>{portrait.hidden=true;const placeholder=document.createElement('span');placeholder.className='unknown-avatar';placeholder.textContent='◇';placeholder.setAttribute('aria-hidden','true');button.prepend(placeholder);},{once:true});
     button.addEventListener('click',()=>{
       selectedKey=keyOf(run);
       [...list.children].forEach(el=>el.setAttribute('aria-pressed',String(el===button)));

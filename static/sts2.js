@@ -1,6 +1,6 @@
 Spire.shell('sts2');
 const $=id=>document.getElementById(id);
-let busy=false,liveLoaded=false,liveDirty=false;
+let busy=false,liveLoaded=false,liveDirty=false,statusPolling=false,statusGeneration=0,lastStatusStamp=0;
 function feedback(text,failed=false){$('feedback').textContent=text;$('feedback').classList.toggle('is-error',failed);}
 function paintBrain(data) {
   const brain=data.decision_engine;
@@ -19,6 +19,7 @@ function paintBrain(data) {
   $('live-brain-detail').textContent=(engine!=='unknown'&&brain?.character?`${characters[brain.character] || brain.character} · `:'')+detail+(engine==='heuristic'?' · 本步使用规则规划，并非神经网络或战斗搜索。':'');
 }
 function brainUnavailable(message) {
+  $('active-instance').textContent='实例未知';
   paintTalkSwitches();
   $('brain-status').dataset.engine='unknown';
   $('live-brain').textContent='状态未知';
@@ -38,6 +39,8 @@ function paintTalkSwitches(data={}) {
   }
 }
 function paint(data) {
+  $('active-instance').textContent=({host:'当前：主机',catgirl:'当前：猫娘'})[data.instance?.active] || '实例未知';
+  if(Number.isFinite(data.updated_at))lastStatusStamp=Math.max(lastStatusStamp,data.updated_at);
   if(data.server){paintBrain(data);paintTalkSwitches(data);}
   if(data.server){
     const connected=data.server.state==='connected';
@@ -47,7 +50,7 @@ function paint(data) {
   if(data.autoplay){
     const state=data.autoplay.standby?'standby':data.autoplay.state;
     $('autoplay-title').textContent=({running:'正在攀登中',paused:'稍作休息',standby:'正在待机',idle:'准备好，再出发',stopped:'本次自动游玩已停止'})[state] || state || '状态未知';
-    $('autoplay-note').textContent=data.autoplay.pause_reason || data.autoplay.stop_reason || (state==='running'?'自动游玩已开启。当前决策来源和回退原因见「当前主脑」。':'打开面板不会自动开始游玩，点击「开始自动玩」后才会接管。');
+    $('autoplay-note').textContent=data.autoplay.pause_reason || data.autoplay.stop_reason || data.autoplay.waiting_reason || (state==='running'?'自动游玩已开启。当前决策来源和回退原因见「当前主脑」。':'打开面板不会自动开始游玩，点击「开始自动玩」后才会接管。');
   }
   if(data.run){
     $('live-floor').textContent=data.run.floor ?? '—';
@@ -81,7 +84,7 @@ function lock(value){
 }
 async function runEntry(entry,args={},quiet=false){
   if(busy)return;
-  lock(true);if(!quiet){feedback('正在处理，请稍候…');$('result').textContent='执行中…';}
+  statusGeneration++;lock(true);if(!quiet){feedback('正在处理，请稍候…');$('result').textContent='执行中…';}
   try {
     const data=await Spire.entry(entry,args);
     if(!quiet)$('result').textContent=JSON.stringify(data,null,2);
@@ -90,6 +93,9 @@ async function runEntry(entry,args={},quiet=false){
       if(entry==='sts2_set_livestream'){liveDirty=false;paint(data);}
       try {paint(await Spire.entry('sts2_get_status'));}
       catch(e){brainUnavailable(e.message);feedback('操作已返回，但刷新状态失败：'+e.message,true);return;}
+    }
+    if(entry==='sts2_open_coop_room' && args.host!==false && !data.catgirl_adoption?.adopted){
+      feedback(data.message || '房间已打开，但猫娘接管未确认；不要重复建房或在主机上开启自动游玩。',true);return;
     }
     const summary=data.message || data.summary;
     if(!quiet)feedback(typeof summary==='string'&&!summary.startsWith('transport=')?summary:entry==='sts2_get_status'?'状态已刷新；页面可见时每 5 秒自动更新。':'操作已完成，状态已刷新。');
@@ -109,12 +115,21 @@ $('livestream-form').addEventListener('submit',event=>{
 });
 runEntry('sts2_get_status');
 
-// Read-only refresh; never starts autoplay, downloads models or overwrites dirty live settings.
+// Periodic reads use a small static snapshot, not a new host run every five seconds.
 async function pollStatus(){
-  if(!document.hidden&&!busy)await runEntry('sts2_get_status',{},true);
-  setTimeout(pollStatus,5000);
+  if(document.hidden||busy||statusPolling)return;
+  statusPolling=true;
+  const generation=statusGeneration;
+  try{
+    const data=await Spire.request('control_status.json?t='+Date.now());
+    if(generation!==statusGeneration||busy)return;
+    const stamp=Number(data.updated_at);
+    if(!Number.isFinite(stamp)||Date.now()/1000-stamp>45||stamp>Date.now()/1000+5)throw new Error('状态快照已过期，请确认插件运行后点击刷新状态。');
+    if(!data.server||!data.autoplay||!data.run)throw new Error('状态快照不完整，请更新插件。');
+    if(stamp>=lastStatusStamp)paint(data);
+  }catch(e){if(generation===statusGeneration&&!busy)brainUnavailable(e.message);}
+  finally{statusPolling=false;}
 }
-setTimeout(pollStatus,5000);
-document.addEventListener('visibilitychange',()=>{
-  if(!document.hidden&&!busy)runEntry('sts2_get_status',{},true);
-});
+async function scheduleStatusPoll(){await pollStatus();setTimeout(scheduleStatusPoll,5000);}
+setTimeout(scheduleStatusPoll,5000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)pollStatus();});

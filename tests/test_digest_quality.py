@@ -125,7 +125,7 @@ def test_unknown_or_menu_screen_does_not_trigger_empty_chatter(screen):
 def test_switching_danmaku_channels_cannot_bypass_speech_interval(monkeypatch, first):
     service, plugin = _service()
     clock = [1000.0]
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.time", lambda: clock[0])
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_host.time", lambda: clock[0])
     snapshot, payload = _combat_snapshot(), _combat_payload()
     if first == "digest":
         service._push_host_situation_digest(snapshot, payload)
@@ -147,7 +147,7 @@ def test_switching_danmaku_channels_cannot_bypass_speech_interval(monkeypatch, f
 def test_same_floor_and_turn_in_new_run_can_be_reported_after_cooldown(monkeypatch):
     service, plugin = _service()
     clock = [1000.0]
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.time", lambda: clock[0])
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_host.time", lambda: clock[0])
     snapshot, payload = _combat_snapshot(), _combat_payload()
     service._push_host_situation_digest({**snapshot, "run_id": "a"}, payload)
     clock[0] += 80

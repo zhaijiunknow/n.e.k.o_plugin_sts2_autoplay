@@ -36,3 +36,7 @@ static/policy_status.json
 # Local review artifacts and smoke output are not source files.
 tmp/
 tests/live_entry_smoke*.json
+
+# Optional user-extracted game art; never distribute.
+static/local-art/
+static/control_status.json

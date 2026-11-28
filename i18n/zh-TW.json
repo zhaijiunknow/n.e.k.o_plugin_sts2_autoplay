@@ -142,5 +142,12 @@
   "sync.no_summary": "目前暫無局勢摘要。",
   "tools.sts2_get_status.description": "取得殺戮尖塔連接狀態、目前畫面與基礎分類資訊。",
   "tools.sts2_set_control_mode.description": "切換貓娘在遊戲裡的控制檔位。**悄悄切，不要宣告**：換完就照常繼續，別說「好，我等你發話」這種話；玩家問起現在是什麼檔位時才回答。**也可以你自己判斷著切**：玩家的意思透出來就夠了，不必先問。按原話選 mode：玩家讓你自己玩、不用問了（你自己玩／你自己看著辦／隨便打）用 mode=program；玩家要自己拿主意、讓你聽著（聽我安排／你先別動／等我說／這步我來定）用 mode=advise；玩家要你完全停手（停手／別動／待機）用 mode=standby。advise 下你仍然要算，玩家問「你打算怎麼走」時要答得出來；他說「就這個」時用 sts2_execute_planned_operation 走一步。advise 只作用於戰鬥之外的決策介面（選路／獎勵／選卡／遺物／寶箱／事件／商店／休息／雙選／里程碑），戰鬥你會照常打。",
-  "tools.sts2_set_route.description": "在殺戮尖塔的地圖選點介面按玩家的意思投票。預設策略下貓娘不會自己搶路線，只有呼叫本工具才會投。按玩家原話選 mode：玩家讓你自定路線（定個路線／你來定／挑條穩的／你覺得走哪）用 mode=safe；玩家已經選好、讓你跟他一致（我選完了，來選這個／跟我一樣／跟上我）用 mode=mirror；玩家指定了具體位置（你選中間／選第三個／選最左邊／選最右邊）用 mode=pick，並把原話放進 pick。玩家說「不對不對我選錯了，你選中間」時，直接用 mode=pick 再調一次即可改票。不在選點介面時會返回錯誤說明，此時不要謊稱已經投票。"
+  "tools.sts2_set_route.description": "在殺戮尖塔的地圖選點介面按玩家的意思投票。預設策略下貓娘不會自己搶路線，只有呼叫本工具才會投。按玩家原話選 mode：玩家讓你自定路線（定個路線／你來定／挑條穩的／你覺得走哪）用 mode=safe；玩家已經選好、讓你跟他一致（我選完了，來選這個／跟我一樣／跟上我）用 mode=mirror；玩家指定了具體位置（你選中間／選第三個／選最左邊／選最右邊）用 mode=pick，並把原話放進 pick。玩家說「不對不對我選錯了，你選中間」時，直接用 mode=pick 再調一次即可改票。不在選點介面時會返回錯誤說明，此時不要謊稱已經投票。",
+  "entries.sts2_get_settings.name": "讀取參數設定",
+  "entries.sts2_get_settings.description": "只讀取可公開的參數及範圍，不啟動遊戲、不下載模型、不修改設定。",
+  "entries.sts2_update_settings.name": "儲存參數設定",
+  "entries.sts2_update_settings.description": "只儲存提交的參數；先驗證並儲存，再套用。啟動偏好下次啟動生效。",
+  "settings.saved": "已儲存修改的參數；執行參數已套用。",
+  "settings.restart": "啟動偏好將在下次啟動時讀取。",
+  "settings.mod_pending": "模組尚未同步，重新連線時重試。"
 }

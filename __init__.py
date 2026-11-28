@@ -333,19 +333,20 @@ class STS2AutoplayPlugin(NekoPluginBase):
 
     @plugin_entry(
         id="sts2_open_coop_room",
+        timeout=115.0,  # Room reuse may take 60s, then child adoption up to 45s; UI waits 120s.
         name=tr("entries.sts2_open_coop_room.name", default="打开 co-op 房间"),
         description=tr("entries.sts2_open_coop_room.description", default="打开联机房间（host 建房 / 非 host 加入本机 127.0.0.1:33771），猫娘选角 + ready 由自动游玩处理。"),
         llm_result_fields=["summary"],
         input_schema={
             "type": "object",
-            "properties": {"host": {"type": "boolean"}},
+            "properties": {"host": {"type": "boolean"}, "resume": {"type": "boolean", "description": "仅 host：继续本机联机存档；不新开一局"}},
             "required": [],
         },
         metadata={"agent_auto": False},
     )
     @_ui.action(id="sts2_open_coop_room", label=tr("entries.sts2_open_coop_room.name", default="sts2_open_coop_room"), tone="default", group="coop", order=10)
-    async def sts2_open_coop_room(self, host: bool = True, **_: Any):
-        return await self._run_entry(lambda: self._service.open_coop_room(host=host))
+    async def sts2_open_coop_room(self, host: bool = True, resume: bool = False, **_: Any):
+        return await self._run_entry(lambda: self._service.open_coop_room(host=host, resume=resume))
 
     @plugin_entry(
         id="sts2_enable_companion_mode",
@@ -372,25 +373,27 @@ class STS2AutoplayPlugin(NekoPluginBase):
         return await self._run_entry(lambda: self._service.neko.set_companion_mode(False))
 
     @plugin_entry(
-        id="sts2_get_settings", name="读取参数配置",
-        description="只读取可公开的参数及取值范围，不启动游戏、不下载模型、不修改设置。",
+        id="sts2_get_settings", name=tr("entries.sts2_get_settings.name", default="读取参数配置"),
+        description=tr("entries.sts2_get_settings.description", default="只读取可公开的参数及取值范围，不启动游戏、不下载模型、不修改设置。"),
         input_schema={"type": "object", "properties": {}}, metadata={"agent_auto": False},
     )
-    @_ui.action(id="sts2_get_settings", label="读取参数配置", group="settings", order=10)
+    @_ui.action(id="sts2_get_settings", label=tr("entries.sts2_get_settings.name", default="读取参数配置"), group="settings", order=10)
     async def sts2_get_settings(self, **_: Any):
         async def read() -> JsonObject:
             return self._service.get_settings()
         return await self._run_entry(read)
 
     @plugin_entry(
-        id="sts2_update_settings", name="保存参数配置",
-        description="只保存提交的参数；先校验并持久化，再应用。启动偏好下次启动生效。",
+        id="sts2_update_settings", name=tr("entries.sts2_update_settings.name", default="保存参数配置"),
+        description=tr("entries.sts2_update_settings.description", default="只保存提交的参数；先校验并持久化，再应用。启动偏好下次启动生效。"),
         input_schema={"type": "object", "properties": {"patch": {"type": "object"}},
                       "required": ["patch"], "additionalProperties": False},
         metadata={"agent_auto": False},
     )
-    @_ui.action(id="sts2_update_settings", label="保存参数配置", group="settings", order=20)
-    async def sts2_update_settings(self, patch: JsonObject, **extra: Any):
+    @_ui.action(id="sts2_update_settings", label=tr("entries.sts2_update_settings.name", default="保存参数配置"), group="settings", order=20)
+    async def sts2_update_settings(self, patch: JsonObject, *, _ctx: Any = None, **extra: Any):
+        # N.E.K.O injects _ctx on every /runs invocation. It is transport metadata,
+        # not a settings field; consume it separately while rejecting other extras.
         from .settings_config import validate_patch
 
         async def apply() -> JsonObject:

@@ -50,9 +50,11 @@ namespace NekoComm.Game
 
         private readonly object _gate = new();
         private bool _started;
-        private bool _inFlight;
+        private volatile bool _inFlight;
         private bool _openedMultiplayerMenu;
         private bool _runEnded;
+        private volatile bool _coopRejoinPending;
+        private int _coopSessionGeneration;
         private double _lastActionAt;
         private double _cooldownUntil;
         private int _combatSolverFails;
@@ -76,6 +78,34 @@ namespace NekoComm.Game
         private bool _bundleChosen;
         private string _capstoneSignature = "";
         private int _capstoneLastOption = -1;
+
+        internal async Task PauseForCoopRejoinAsync()
+        {
+            lock (_gate)
+            {
+                _coopRejoinPending = true;
+                _coopSessionGeneration++;
+            }
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (_inFlight && DateTime.UtcNow < deadline) await Task.Delay(50);
+            if (_inFlight)
+            {
+                _coopRejoinPending = false;
+                throw new ApiException(409, "coop_client_busy", "猫娘仍在处理上一动作，请稍后重试。");
+            }
+        }
+
+        internal bool CoopRejoinPending => _coopRejoinPending;
+        internal void CancelCoopRejoin() => _coopRejoinPending = false;
+        internal void ResumeAfterCoopRejoin()
+        {
+            _runEnded = false;
+            _openedMultiplayerMenu = false;
+            _cooldownUntil = 0;
+            _lastActionAt = 0;
+            _combatSolverFails = 0;
+            _coopRejoinPending = false;
+        }
 
         public void Start()
         {
@@ -123,9 +153,10 @@ namespace NekoComm.Game
 
         private async Task TickAsync()
         {
-            if (_inFlight)
+            if (_coopRejoinPending || _inFlight)
                 return;
 
+            var generation = _coopSessionGeneration;
             var now = Now();
             if (now < _cooldownUntil)
                 return;
@@ -175,6 +206,9 @@ namespace NekoComm.Game
                 return;
             }
 
+            if (ExternalControl.HoldAutoplay(NekoConfig.Current.coop_control_mode, state.screen, ExternalControl.IsActive))
+                return;
+
             // Plugin /action calls are still allowed. Only this autonomous driver yields,
             // so speech/chat windows also work in the catgirl co-op process. Combat stays fast.
             if (NekoConfig.Current.livestream_enabled && !state.in_combat &&
@@ -197,8 +231,15 @@ namespace NekoComm.Game
 
             if (req == null)
                 return;
+            // Adoption may arrive while DecideAsync awaits the solver/LLM. Drop that stale decision too.
+            if (ExternalControl.HoldAutoplay(NekoConfig.Current.coop_control_mode, state.screen, ExternalControl.IsActive))
+                return;
 
-            _inFlight = true;
+            lock (_gate)
+            {
+                if (_coopRejoinPending || generation != _coopSessionGeneration) return;
+                _inFlight = true;
+            }
             try
             {
                 var resp = await ExecuteActionAsync(req);

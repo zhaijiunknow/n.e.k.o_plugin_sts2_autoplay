@@ -39,7 +39,7 @@ def _src() -> str:
     """读 mod 源码；仓库根找不到时**在测试内**跳过（模块级 skip 会变成 collection error）。"""
     if _GS is None:  # pragma: no cover
         pytest.skip("找不到 game_mod/nekospire（只装了插件产物）⇒ 无法核对 mod 源码")
-    return _GS.read_bytes().decode("utf-8")
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(_GS.parent.glob(_GS.stem + "*.cs")))
 
 
 def _src_action() -> str:
@@ -52,7 +52,7 @@ def _src_action() -> str:
     """
     if _GA is None:  # pragma: no cover
         pytest.skip("找不到 game_mod/nekospire（只装了插件产物）⇒ 无法核对 mod 源码")
-    return _GA.read_bytes().decode("utf-8")
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(_GA.parent.glob(_GA.stem + "*.cs")))
 
 
 # ======================================================================================

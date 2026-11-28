@@ -18,6 +18,9 @@ namespace NekoComm.Game
         private static readonly object FileGate = new();
         private static bool _saveBlocked;
         public bool coop_enabled { get; set; }
+        // Process-local plugin takeover; never leak the hold into the shared settings file.
+        [JsonIgnore]
+        public string coop_control_mode { get; set; } = "auto";
         // The plugin owns noncombat presentation windows; standalone co-op must not race it.
         public bool livestream_enabled { get; set; }
         // Port of the catgirl (co-op client) instance. Autoplay drives the local player when this
@@ -48,9 +51,9 @@ namespace NekoComm.Game
         public string coop_map_policy { get; set; } = "wait";
         public bool coop_map_follow_player { get; set; } = true;
         public int coop_map_vote_wait_seconds { get; set; } = 20;
-        // When the main menu shows a resumable run (Continue enabled), the catgirl refuses to click
-        // Continue / start a new room on its own. Both game processes share user://, so resuming the run in
-        // the catgirl process makes the co-op save unreachable for the host.
+        // Autonomous catgirl menu behavior: leave the human's single-player Continue untouched
+        // and only join the host. Explicit room creation is not gated by existing saves
+        // or this flag; the user chooses new room versus continuation.
         public bool coop_yield_to_saved_run { get; set; } = true;
         public string llm_base_url { get; set; } = "https://api.openai.com/v1";
         public string llm_api_key { get; set; } = "";

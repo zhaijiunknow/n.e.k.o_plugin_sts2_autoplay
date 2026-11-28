@@ -14,7 +14,7 @@ window.Spire = (() => {
     if (characters[key]) return key;
     return Object.keys(characters).find(k => characters[k].name === value || characters[k].short === value) || '';
   }
-  const art = key => characters[key] ? `assets/${key.toLowerCase()}.webp` : '';
+  const art = key => characters[key] ? `local-art/${key.toLowerCase()}.webp` : '';
   function message(data) {
     const error = data?.error || data?.detail || data;
     if (error?.code === 'NOT_READY' || error?.code === 'PLUGIN_NOT_READY') return '插件尚未运行。请先在 N.E.K.O 插件管理中启动「杀戮尖塔 2 陪玩」，再重试。';
@@ -37,7 +37,7 @@ window.Spire = (() => {
     const created = await request('/runs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plugin_id:'sts2_autoplay',entry_id:entryId,args})});
     if (!created.run_id) throw new Error(message(created) || '未收到任务编号');
     const path = '/runs/' + encodeURIComponent(created.run_id);
-    const deadline = Date.now() + 45000;
+    const deadline = Date.now() + (entryId === 'sts2_open_coop_room' ? 120000 : 45000);
     while (Date.now() < deadline) {
       const run = await request(path);
       if (['failed','cancelled','canceled'].includes(run.status)) throw new Error(message(run.error || run));
@@ -54,7 +54,7 @@ window.Spire = (() => {
     }
     throw new Error('等待结果超时。操作可能仍在后台执行，请先刷新状态，不要重复提交。');
   }
-  const uiRevision='20261127-parameters2';
+  const uiRevision='20261128-coop-direct';
   function shell(page) {
     const links = [['index','总览'],['sts2','游玩控制'],['policy','策略网络'],['history','游玩历史'],['settings','参数配置']];
     const header = document.getElementById('masthead');

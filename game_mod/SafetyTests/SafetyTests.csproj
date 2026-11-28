@@ -12,5 +12,7 @@
     <Compile Include="../nekospire/Game/NekoConfig.cs" />
     <Compile Include="../nekospire/Game/ExternalControl.cs" />
     <Compile Include="../nekospire/Game/DanmakuPacing.cs" />
+    <Compile Include="../nekospire/Game/CoopSaveIdentity.cs" />
+    <Compile Include="../nekospire/Game/CoopClientPeer.cs" />
   </ItemGroup>
 </Project>

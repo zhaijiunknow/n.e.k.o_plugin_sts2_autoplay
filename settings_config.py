@@ -22,7 +22,7 @@ def field(group, label, default, hint, *, minimum=None, maximum=None, choices=No
 
 
 FIELDS = {
-    "policy_enabled": field("policy", "启用策略网络", True, "优先使用已下载的角色模型；未下载或推理失败时回退到求解器与启发式。不会自动下载。"),
+    "policy_enabled": field("policy", "启用策略网络", True, "优先使用已下载的角色模型；未下载或推理失败时回退到求解器与启发式。此开关不会下载文件；运行环境和模型需在策略网络页点击下载。"),
     "policy_timeout_seconds": field("policy", "推理超时（秒）", 20, "策略网络请求的最长等待时间。", minimum=1, maximum=300),
     "action_interval_seconds": field("pace", "常规操作间隔（秒）", 1.5, "常规自动操作的基础间隔；实际节奏还受动画、求解和等待状态影响。", minimum=0.05, maximum=60),
     "combat_replay_interval_seconds": field("pace", "战斗计划回放间隔（秒）", 0.5, "已有整回合计划时的出牌间隔；太快可能等待游戏动画。", minimum=0.05, maximum=60),
@@ -65,3 +65,19 @@ def validate_patch(patch: Any) -> dict[str, Any]:
             raise ValueError(f"{spec['label']}：类型或范围不正确")
         clean[key] = value
     return clean
+
+
+def read_settings(values: dict[str, Any]) -> dict[str, Any]:
+    """Legacy values remain editable. Strict validation belongs to writes only.
+
+    Non-finite TOML floats must be represented as text to keep the HTTP response
+    valid JSON. They remain invalid, never silently become defaults.
+    """
+    settings, errors = {}, {}
+    for key, value in values.items():
+        try:
+            validate_patch({key: value})
+        except ValueError as exc:
+            errors[key] = str(exc)
+        settings[key] = str(value) if isinstance(value, float) and not math.isfinite(value) else value
+    return {"settings": settings, "field_errors": errors, "fields": FIELDS, "groups": GROUPS}

@@ -332,8 +332,8 @@ def test_danmaku_disabled_blocks_llm_avatar_and_post_entirely() -> None:
 
 
 @pytest.mark.unit
-def test_danmaku_disabled_also_blocks_the_host_digest_push() -> None:
-    """弹幕总闸门还顺带挡住"给本体的局势速报"——速报与弹幕同生共死。"""
+def test_host_digest_survives_overlay_toggle_without_repeating() -> None:
+    """宿主速报不依赖弹幕开关，切换弹幕也不能重复播报同一局势。"""
     calls: list[dict[str, Any]] = []
     service = STS2AutoplayService(DummyLogger(), lambda payload: None, lambda **k: calls.append(k))
     service._danmaku_enabled = False
@@ -342,14 +342,14 @@ def test_danmaku_disabled_also_blocks_the_host_digest_push() -> None:
         {"screen": "COMBAT", "floor": 5, "turn": 2, "raw_state": {"combat": {"enemies": []}}},
         {"screen": "COMBAT", "summary_kind": "combat", "player": {"current_hp": 60, "max_hp": 80}},
     )
-    assert calls == []
+    assert len(calls) == 1, "弹幕关闭时，已开启的速报仍应发送"
 
     service._danmaku_enabled = True
     service._push_host_situation_digest(
         {"screen": "COMBAT", "floor": 5, "turn": 2, "raw_state": {"combat": {"enemies": []}}},
         {"screen": "COMBAT", "summary_kind": "combat", "player": {"current_hp": 60, "max_hp": 80}},
     )
-    assert len(calls) == 1, "闸门打开后速报应当恢复"
+    assert len(calls) == 1, "重新开启弹幕不能重复播报同一局势"
 
 
 @pytest.mark.unit

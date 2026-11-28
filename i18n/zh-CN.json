@@ -142,5 +142,12 @@
   "summary.shop": "我在逛商店，血量 {hp}，金币 {gold}。",
   "summary.rest": "我在休息点，血量 {hp}，能做的动作：{actions}。",
   "summary.selection": "我在选牌，血量 {hp}，能做的动作：{actions}。",
-  "summary.actions.none": "无"
+  "summary.actions.none": "无",
+  "entries.sts2_get_settings.name": "读取参数配置",
+  "entries.sts2_get_settings.description": "只读取可公开的参数及取值范围，不启动游戏、不下载模型、不修改设置。",
+  "entries.sts2_update_settings.name": "保存参数配置",
+  "entries.sts2_update_settings.description": "只保存提交的参数；先校验并持久化，再应用。启动偏好下次启动生效。",
+  "settings.saved": "已保存修改的参数；运行参数已应用。",
+  "settings.restart": "启动偏好将在下次启动时读取。",
+  "settings.mod_pending": "mod 尚未同步，重新连接时重试。"
 }

@@ -64,7 +64,8 @@ def test_patch_is_idempotent(vendor):
     assert vendor.apply_local_patch_updates("new", [("old", "new")]) == "new"
 
 
-def test_policy_patches_replay_and_manifest_matches():
+def test_policy_patches_replay_and_manifest_matches(monkeypatch):
+    monkeypatch.syspath_prepend(str(SCRIPTS))
     vendor = load("vendor-alphadefect")
     manifest = json.loads(vendor.MANIFEST_PATH.read_text(encoding="utf-8"))
     files = {rel: (vendor.VENDOR / rel).read_text(encoding="utf-8") for rel in manifest["files"]}

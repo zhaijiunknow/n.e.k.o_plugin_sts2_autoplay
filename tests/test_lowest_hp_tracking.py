@@ -52,7 +52,7 @@ import pytest
 #     `PYTHONPATH=D:\NekoClaw\N.E.K.O`（既有 1282 条用例都这么跑）。
 from plugin.plugins.sts2_autoplay.service import STS2AutoplayService as service
 
-SERVICE_SRC = (Path(__file__).resolve().parent.parent / "service.py").read_text(encoding="utf-8")
+SERVICE_SRC = (Path(__file__).resolve().parent.parent / "service_history.py").read_text(encoding="utf-8")
 
 
 # ======================================================================================

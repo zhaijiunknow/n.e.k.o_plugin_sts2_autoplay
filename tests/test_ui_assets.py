@@ -53,18 +53,18 @@ def test_controller_dom_targets_exist(name):
     assert targets <= set(page.ids), targets - set(page.ids)
 
 
-def test_every_model_has_a_packaged_portrait():
-    manifest = json.loads((ROOT / "policy_manifest.json").read_text(encoding="utf-8"))
-    sources = json.loads((STATIC / "assets/sources.json").read_text(encoding="utf-8"))
-    for character in manifest["models"]:
-        filename = character.lower() + ".webp"
-        data = (STATIC / "assets" / filename).read_bytes()
-        assert data[:4] == b"RIFF" and data[8:12] == b"WEBP"
-        assert filename in sources
+def test_game_art_is_optional_and_excluded_from_distribution():
+    config = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"local-art"' in config
+    assert "static/local-art/" in (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert not list((STATIC / "assets").glob("*.webp"))
     css = (STATIC / "ui.css").read_text(encoding="utf-8")
     assert "prefers-reduced-motion" in css
-    for resource in re.findall(r"url\(['\"]?([^)'\"]+)", css):
-        assert (STATIC / resource).is_file()
+    assert "gradient" in css
+    script = (STATIC / "policy.js").read_text(encoding="utf-8")
+    assert "img.hidden=true" in script
+    assert "character-copy" in script
+    assert "local-art/" in (STATIC / "ui.js").read_text(encoding="utf-8")
 
 
 def test_entry_and_file_snapshots_share_host_timestamp(tmp_path, monkeypatch):
@@ -110,3 +110,16 @@ def test_navigation_and_asset_versions_match():
         for resource in page.resources:
             if resource.split("?")[0].endswith((".js", ".css")):
                 assert resource.endswith("?v=" + revision)
+
+
+def test_coop_ui_separates_create_and_resume_without_autoplay():
+    html = (STATIC / "sts2.html").read_text(encoding="utf-8")
+    assert '新建联机房间' in html and '继续联机存档' in html
+    assert '"resume":true' in html and '"resume":false' in html
+    assert 'data-confirm=' not in html
+    assert '替换原多人进度' in html
+    js = (STATIC / "sts2.js").read_text(encoding="utf-8")
+    assert "catgirl_adoption?.adopted" in js
+    assert "button.dataset.confirm" not in js
+    shared = (STATIC / "ui.js").read_text(encoding="utf-8")
+    assert "entryId === 'sts2_open_coop_room' ? 120000 : 45000" in shared

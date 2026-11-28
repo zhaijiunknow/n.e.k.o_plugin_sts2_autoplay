@@ -27,7 +27,7 @@ def test_normalized_combat_turns_no_longer_share_instant_key():
 async def test_burst_from_all_producers_is_dropped_not_queued(monkeypatch):
     service = _service()
     clock = [0.0]
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.monotonic", lambda: clock[0])
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_danmaku.monotonic", lambda: clock[0])
     service._client = SimpleNamespace(push_danmaku=AsyncMock())
     await asyncio.gather(*(service._push_catgirl(f"短句{i}", fetch_avatar=False) for i in range(20)))
     assert service._client.push_danmaku.await_count == 1
@@ -44,7 +44,7 @@ async def test_burst_from_all_producers_is_dropped_not_queued(monkeypatch):
 async def test_text_dedup_does_not_consume_cooldown(monkeypatch):
     service = _service()
     clock = [0.0]
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.monotonic", lambda: clock[0])
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_danmaku.monotonic", lambda: clock[0])
     service._client = SimpleNamespace(push_danmaku=AsyncMock())
     await service._push_catgirl("小心攻击！", fetch_avatar=False)
     clock[0] = 6.0
@@ -136,7 +136,7 @@ def test_same_turn_changed_facts_can_speak_but_unchanged_scene_does_not(monkeypa
 @pytest.mark.asyncio
 async def test_slow_generation_times_out_and_falls_back(monkeypatch):
     service = _service()
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.DANMAKU_GENERATION_TIMEOUT", 0.01)
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_danmaku.DANMAKU_GENERATION_TIMEOUT", 0.01)
     async def generate(**kwargs):
         await asyncio.Event().wait()
     service._catgirl_llm = SimpleNamespace(generate=generate)
@@ -163,7 +163,7 @@ def test_instant_line_selects_one_threat_and_does_not_invent_max_hp():
 def test_cooldown_does_not_consume_next_turn(monkeypatch):
     service = _service()
     clock = [1.0]
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.monotonic", lambda: clock[0])
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_danmaku.monotonic", lambda: clock[0])
     lines = []
     monkeypatch.setattr(service, "_schedule_catgirl_push", lambda text, **kw: lines.append(text))
     service._last_danmaku_at = 0.0

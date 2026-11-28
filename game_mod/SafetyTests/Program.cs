@@ -47,6 +47,20 @@ foreach (var policy in new[] { "wait", "follow", "auto" })
     Check(ExternalControl.MapPolicy(policy, true, false) == "follow", "offline standalone follow");
     Check(ExternalControl.MapPolicy(policy, false, false) == "auto", "offline standalone auto");
 }
+foreach (var mode in new[] { "auto", "hold" })
+{
+    var req = await Parse($"{{\"coop_control_mode\":\"{mode}\"}}");
+    req.Validate(); Check(req.coop_control_mode == mode, "control mode parsed, not ignored");
+}
+Reject((await Parse("{\"coop_control_mode\":\"garbage\"}")).Validate, 400);
+foreach (var screen in new[] { "MAIN_MENU", "MULTIPLAYER_LOBBY", "CHARACTER_SELECT" })
+    Check(!ExternalControl.HoldAutoplay("hold", screen, true), "takeover still allows bootstrap");
+foreach (var screen in new[] { "MAP", "COMBAT", "EVENT", "REWARD", "GAME_OVER", "UNKNOWN" })
+{
+    Check(ExternalControl.HoldAutoplay("hold", screen, true), "plugin owns run decisions");
+    Check(!ExternalControl.HoldAutoplay("hold", screen, false), "expired lease restores standalone");
+    Check(!ExternalControl.HoldAutoplay("auto", screen, true), "auto remains standalone");
+}
 Check(!ExternalControl.IsActive, "no lease initially");
 ExternalControl.Touch(); Check(ExternalControl.IsActive, "request activates lease");
 
@@ -59,12 +73,14 @@ try
     NekoConfig.LoadFromPath(path);
     Check(NekoConfig.Current.coop_map_vote_wait_seconds == 0, "legacy config loaded");
     NekoConfig.Current.coop_map_policy = "wait";
+    NekoConfig.Current.coop_control_mode = "hold";
     NekoConfig.Current.SaveToPath(path);
     using (var doc = JsonDocument.Parse(File.ReadAllText(path)))
     {
         Check(doc.RootElement.GetProperty("schema_version").GetInt32() == 1, "legacy migration");
         Check(doc.RootElement.GetProperty("custom").GetProperty("keep").GetBoolean(), "unknown fields preserved");
         Check(!doc.RootElement.TryGetProperty("coop_map_policy", out _), "runtime policy not persisted");
+        Check(!doc.RootElement.TryGetProperty("coop_control_mode", out _), "process hold not persisted");
     }
     foreach (var json in new[] { "{\"schema_version\":99}", "{\"SCHEMA_VERSION\":99}", "{\"schema_version\":\"new\"}" })
     {
@@ -113,4 +129,22 @@ Check(DanmakuPacing.Clean(new string('长', 100)).Length == 32, "danmaku length 
 Check(System.Globalization.StringInfo.ParseCombiningCharacters(DanmakuPacing.Clean(string.Concat(Enumerable.Repeat("🐱", 50)))).Length == 32,
     "danmaku truncation preserves unicode");
 Check(DanmakuPacing.LifetimeSeconds < 2 * DanmakuPacing.MinIntervalSeconds, "danmaku lifetime fits two lanes");
+Check(CoopSaveIdentity.TryResolve(true, new ulong[] { 1, 25324 }, out var oldId) && oldId == 25324,
+    "old process-derived identity survives restart without editing save");
+Check(CoopSaveIdentity.TryResolve(true, new ulong[] { 8832, 1 }, out oldId) && oldId == 8832,
+    "saved player order does not determine host");
+Check(CoopSaveIdentity.TryResolve(true, new ulong[] { 1, 2 }, out oldId) && oldId == 2, "new stable ID");
+Check(!CoopSaveIdentity.TryResolve(false, new ulong[] { 1, 2 }, out _), "never convert Steam saves");
+foreach (var ids in new[] { new ulong[] { 1 }, new ulong[] { 1, 2, 3 }, new ulong[] { 2, 3 },
+    new ulong[] { 1, 1 }, new ulong[] { 1, 0 }, Array.Empty<ulong>() })
+    Check(!CoopSaveIdentity.TryResolve(true, ids, out _), "reject ambiguous party identity");
+Check(CoopSaveIdentity.ParseClientId(null) == 2, "new ID not based on PID");
+Check(CoopSaveIdentity.ParseClientId("25324") == 25324, "launch preserves old identity");
+foreach (var value in new[] { "0", "1", "-2", "oops", "18446744073709551616" })
+{
+    bool rejected = false;
+    try { CoopSaveIdentity.ParseClientId(value); } catch (InvalidOperationException) { rejected = true; }
+    Check(rejected, "bad launch identity fails closed");
+}
+await CoopPeerChecks.RunAsync(Check);
 Console.WriteLine($"ALL PASS ({checks} checks)");

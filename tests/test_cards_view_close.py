@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_simple_cards_view_uses_confirm_with_the_existing_safety_guards():
     source = (ROOT / "game_mod/nekospire/Game/GameStateService.cs").read_text(encoding="utf-8")
     method = source.split("public static NButton? GetCardsViewBackButton(", 1)[1].split(
-        "public static Creature? ResolveEnemyTarget", 1
+        "\n    }", 1
     )[0]
     assert "currentScreen is not NCardsViewScreen" in method
     assert 'cardsViewScreen is NSimpleCardsViewScreen ? "ConfirmButton" : "BackButton"' in method
@@ -21,6 +21,8 @@ def test_simple_cards_view_uses_confirm_with_the_existing_safety_guards():
     for guard in ("backButton != null", "GodotObject.IsInstanceValid(backButton)",
                   "backButton.IsVisibleInTree()", "backButton.IsEnabled"):
         assert guard in method
+    assert "MissingCardsViewButtons.Add(diagnosticKey)" in method
+    assert "Log.Warn" in method and "GetType().FullName" in method
     assert "ForceClick" not in method  # reading the state never dismisses the overlay
 
 

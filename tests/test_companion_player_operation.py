@@ -147,7 +147,7 @@ def test_observe_companion_player_operation_skips_recent_plugin_action() -> None
         "available_actions": [{"type": "choose_reward_card", "raw": {"name": "choose_reward_card"}}],
     }
 
-    from plugin.plugins.sts2_autoplay import service as service_module
+    from plugin.plugins.sts2_autoplay import service_history as service_module
 
     original_time = service_module.time
     service_module.time = lambda: 10_001.0

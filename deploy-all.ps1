@@ -1,7 +1,7 @@
 ﻿<#
 .SYNOPSIS
   一键部署：改完本仓库后，把 Mod 部署到游戏、把插件部署到 NEKO。
-    - Mod   : 构建 Release 并部署到创意工坊订阅文件夹（游戏从此加载），并刷新 ModUploader 上传内容。
+    - Mod   : 构建 Release 并部署到本地 mods/nekospire 和创意工坊订阅文件夹（本地同版或高版优先），并刷新 ModUploader 上传内容。
     - 插件 : 把仓库根部的插件源码同步到 NEKO 插件目录 plugin/plugins/sts2_autoplay。
 
 .DESCRIPTION
@@ -61,10 +61,18 @@ foreach ($target in $NekoPluginDir) {
     }
     foreach ($dir in @("static", "strategies", "i18n", "policy_sidecar")) {
         $src = Join-Path $ProjectRoot $dir
-        if (Test-Path $src) { Copy-Item -Recurse -Force $src $target }
+        if (Test-Path $src) { Copy-Item -Recurse -Force $src $target -Exclude "control_status.json", "policy_status.json", "__pycache__" }
     }
-    Get-ChildItem -Path $target -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    # Resolve and check every recursive cleanup target before deleting it.
+    $resolvedTarget = (Resolve-Path -LiteralPath $target).ProviderPath.TrimEnd('\', '/')
+    foreach ($cache in @(Get-ChildItem -LiteralPath $resolvedTarget -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue)) {
+        $cachePath = [System.IO.Path]::GetFullPath($cache.FullName)
+        if (-not $cachePath.StartsWith($resolvedTarget + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or
+            ($cache.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw "Refusing cache cleanup outside plugin directory or through a link: $cachePath"
+        }
+        Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Write-Host "[deploy-all] plugin deployed -> $target"
 }
 

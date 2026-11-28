@@ -225,9 +225,98 @@ async def test_open_coop_room_never_sends_test_scene_lobby_actions() -> None:
 @pytest.mark.asyncio
 async def test_open_coop_room_result_reports_post_action_state() -> None:
     """返回值里的 screen / available_actions 取动作之后的状态，和调用方看到的一致。"""
-    service, _ = build_service(("MAIN_MENU", MAIN_MENU_ACTIONS))
+    service, _ = build_service(("MAIN_MENU", MAIN_MENU_ACTIONS), ("CHARACTER_SELECT", {"embark", "select_character"}))
 
     result = await service.open_coop_room(host=True)
 
     assert result["screen"] == "CHARACTER_SELECT"
     assert result["available_actions"] == ["embark", "select_character"]
+
+
+@pytest.mark.asyncio
+async def test_resume_coop_uses_only_saved_session_action():
+    service, client = build_service(("MAIN_MENU", {"continue_coop_session", "start_coop_session"}))
+    result = await service.open_coop_room(resume=True)
+    assert client.calls == ["continue_coop_session"]
+    assert result["resume"] is True
+    assert service._state.autoplay_state != "running"
+
+
+@pytest.mark.asyncio
+async def test_resume_not_supported_never_falls_back_to_new_room():
+    service, client = build_service(("MAIN_MENU", MAIN_MENU_ACTIONS))
+    with pytest.raises(STS2TransportError, match="continue_coop_session"):
+        await service.open_coop_room(resume=True)
+    assert client.calls == []
+    assert not service._coop_opening
+
+
+@pytest.mark.asyncio
+async def test_coop_failure_does_not_adopt_or_open_new_room():
+    service, client = build_service(("MAIN_MENU", {"continue_coop_session"}))
+    async def fail(action, **kwargs):
+        client.calls.append(action)
+        raise STS2TransportError("save is incompatible")
+    client.execute_action = fail
+    with pytest.raises(STS2TransportError, match="save is incompatible"):
+        await service.open_coop_room(resume=True)
+    assert client.calls == ["continue_coop_session"]
+    assert not service._coop_opening
+
+
+@pytest.mark.asyncio
+async def test_coop_does_not_send_host_action_to_active_catgirl():
+    service, host = build_service(("MAIN_MENU", {"continue_coop_session"}))
+    catgirl = ScriptedClient(("COMBAT", {"end_turn"}))
+    service._host_client = host
+    service._client = catgirl
+    service._state.active_instance = service.INSTANCE_CATGIRL
+    async def adopted(**kwargs):
+        return {"adopted": True}
+    service.adopt_coop_catgirl = adopted
+    result = await service.open_coop_room(resume=True)
+    assert host.calls == ["continue_coop_session"]
+    assert catgirl.calls == []
+    assert result["catgirl_adoption"]["adopted"]
+
+
+@pytest.mark.asyncio
+async def test_coop_adoption_failure_is_visible_not_success_claim():
+    service, client = build_service(("MAIN_MENU", MAIN_MENU_ACTIONS))
+    result = await service.open_coop_room()
+    assert not result["catgirl_adoption"]["adopted"]
+    assert "未成功接管" in result["summary"]
+    assert service._state.autoplay_state != "running"
+
+
+@pytest.mark.asyncio
+async def test_coop_rejects_running_autoplay_and_invalid_join_resume():
+    service, client = build_service(("MAIN_MENU", MAIN_MENU_ACTIONS))
+    with pytest.raises(STS2TransportError, match="主机"):
+        await service.open_coop_room(host=False, resume=True)
+    service._state.autoplay_state = "running"
+    with pytest.raises(STS2TransportError, match="暂停"):
+        await service.open_coop_room()
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_coop_duplicate_request_rejected_while_first_in_flight():
+    import asyncio
+    service, client = build_service(("MAIN_MENU", MAIN_MENU_ACTIONS))
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def adopt(**kwargs):
+        entered.set()
+        await release.wait()
+        return {"adopted": True}
+    service.adopt_coop_catgirl = adopt
+    task = asyncio.create_task(service.open_coop_room())
+    await entered.wait()
+    try:
+        with pytest.raises(STS2TransportError, match="不要重复"):
+            await service.open_coop_room()
+        assert client.calls == ["start_coop_session"]
+    finally:
+        release.set()
+        await task
+    assert not service._coop_opening

@@ -52,7 +52,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('pack', type=Path)
     args = parser.parse_args()
-    output = Path(__file__).resolve().parents[1] / 'static' / 'assets'
+    output = Path(__file__).resolve().parents[1] / 'static' / 'local-art'
     output.mkdir(parents=True, exist_ok=True)
     names = {f'char_select_{c}': c for c in ('ironclad', 'silent', 'defect', 'regent', 'necrobinder', 'fool')}
     names['silent1_epoch'] = 'spire-backdrop'

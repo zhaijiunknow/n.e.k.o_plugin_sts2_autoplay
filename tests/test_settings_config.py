@@ -138,7 +138,9 @@ def test_effective_settings_follow_control_page_changes():
     assert result["danmaku_enabled"] is False
     assert result["host_digest_enabled"] is False
     assert result["run_reflection_enabled"] is False
-    assert result["host_commentary_min_interval_seconds"] == 5
+    assert result["host_commentary_min_interval_seconds"] == 0
+    assert "host_commentary_min_interval_seconds" in service.get_settings()["field_errors"]
+    assert service._host_commentary_min_interval() == 5
     assert plugin.memory_config.patches == []
 
 
@@ -216,3 +218,88 @@ def test_control_page_talk_switches_survive_service_restart():
             await restarted.shutdown()
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("key,value", [
+    ("poll_fallback_seconds", 3), ("memory_report_interval_seconds", -1),
+    ("autoplay_push_probability", 1.5), ("companion_push_probability", "bad"),
+    ("policy_timeout_seconds", 0), ("livestream_profile", "old-profile"),
+    ("danmaku_enabled", "yes"),
+])
+def test_legacy_invalid_settings_are_readable_and_do_not_break_other_saves(key, value):
+    plugin = SettingsPlugin()
+    plugin._service._cfg[key] = value
+    result = asyncio.run(plugin.sts2_get_settings())
+    assert result["settings"][key] == value
+    assert key in result["field_errors"]
+    assert plugin.memory_config.patches == []
+    saved = asyncio.run(plugin.sts2_update_settings(patch={"action_interval_seconds": 2.5}))
+    assert saved["saved"] is True
+    assert key in saved["field_errors"]
+    assert plugin._service._cfg[key] == value
+    assert plugin.memory_config.patches == [{"sts2": {"action_interval_seconds": 2.5}}]
+    fixed = asyncio.run(plugin.sts2_update_settings(patch={key: FIELDS[key]["default"]}))
+    assert key not in fixed["field_errors"]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_legacy_value_is_json_safe_without_silently_fixing_it(value):
+    import json
+
+    plugin = SettingsPlugin()
+    plugin._service._cfg["autoplay_push_probability"] = value
+    result = plugin._service.get_settings()
+    assert result["settings"]["autoplay_push_probability"] == str(value)
+    assert "autoplay_push_probability" in result["field_errors"]
+    json.dumps(result, allow_nan=False)
+
+
+def test_repaired_restart_preference_overrides_invalid_legacy_readback():
+    plugin = SettingsPlugin()
+    plugin._service._cfg["autoplay_on_start"] = "old-invalid-value"
+    assert "autoplay_on_start" in plugin._service.get_settings()["field_errors"]
+    saved = asyncio.run(plugin.sts2_update_settings(patch={"autoplay_on_start": False}))
+    assert saved["saved"] is True
+    assert saved["settings"]["autoplay_on_start"] is False
+    assert "autoplay_on_start" not in saved["field_errors"]
+    # The current session keeps its original startup preference until restart.
+    assert plugin._service._cfg["autoplay_on_start"] == "old-invalid-value"
+    assert plugin._service._pending_restart_settings["autoplay_on_start"] is False
+
+
+@pytest.mark.parametrize("context", [None, {}, {"run_id": "settings-regression", "lanlan_name": "test", "entry_timeout": 30}])
+def test_save_accepts_host_injected_context_without_persisting_it(context):
+    from plugin.sdk.shared.core.decorators import EVENT_META_ATTR
+    from plugin.sdk.shared.core.entry_runtime import prepare_entry_kwargs
+
+    plugin = SettingsPlugin()
+    handler = plugin.sts2_update_settings
+    patch = {"action_interval_seconds": 2.5}
+    args = prepare_entry_kwargs(plugin_id="sts2_autoplay", entry_id="sts2_update_settings",
+                                handler=handler, meta=getattr(handler, EVENT_META_ATTR),
+                                args={"patch": patch, "_ctx": context})
+    result = asyncio.run(handler(**args))
+    assert result["saved"]
+    assert plugin.memory_config.patches == [{"sts2": patch}]
+    assert "_ctx" not in plugin._cfg
+    assert "_ctx" not in result["settings"]
+
+
+@pytest.mark.parametrize("extra", [{"base_url": "unsafe"}, {"run_id": "unexpected"},
+                                   {"_unexpected": True}])
+def test_host_context_does_not_allow_arbitrary_top_level_arguments(extra):
+    plugin = SettingsPlugin()
+    before = deepcopy(plugin._service._cfg)
+    with pytest.raises(ValueError, match="包含不支持的请求参数"):
+        asyncio.run(plugin.sts2_update_settings(patch={"policy_enabled": False},
+                                               _ctx={"run_id": "test"}, **extra))
+    assert plugin.memory_config.patches == []
+    assert plugin._service._cfg == before
+
+
+def test_host_context_cannot_bypass_patch_validation():
+    plugin = SettingsPlugin()
+    with pytest.raises(ValueError):
+        asyncio.run(plugin.sts2_update_settings(patch={"_ctx": {"run_id": "test"}},
+                                               _ctx={"run_id": "test"}))
+    assert plugin.memory_config.patches == []

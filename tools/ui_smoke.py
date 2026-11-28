@@ -55,7 +55,7 @@ def fixtures():
                   autoplay=dict(state='paused', standby=False), companion_mode=dict(enabled=True), danmaku=dict(enabled=False),
                   policy=dict(enabled=True, runtime_ready=True, decisions=286, fallbacks=3, characters=['IRONCLAD', 'SILENT'],
                               last_note='最近决策：COMBAT · play DEFEND'), map_policy=dict(policy='follow', vote_wait_seconds=20))
-    status.update(host_digest=dict(enabled=True), run_reflection=dict(enabled=False))
+    status.update(host_digest=dict(enabled=True), run_reflection=dict(enabled=False), instance=dict(active='host'))
     return policy, history, status
 
 
@@ -103,10 +103,17 @@ def main():
             if entry == 'sts2_set_danmaku':
                 status['danmaku']['enabled'] = entry_args['enabled']
             result = policy if entry.startswith('sts2_policy_') else status if entry == 'sts2_get_status' else dict(message='测试操作已完成', **(status['map_policy'] if entry == 'sts2_set_map_policy' else {}))
+            if entry == 'sts2_open_coop_room':
+                adopted = not mode.get('coop_adopt_fail', False)
+                if adopted:
+                    status['instance'] = dict(active='catgirl')
+                result = dict(status='opened', resume=entry_args.get('resume', False),
+                              catgirl_adoption=dict(adopted=adopted),
+                              message='联机读档大厅已打开' if adopted else '房间已打开，但未成功接管猫娘实例。不要重复建房。')
             if entry == 'sts2_update_settings':
                 preferences['settings'].update(entry_args['patch'])
             if entry in ('sts2_get_settings', 'sts2_update_settings'):
-                result = dict(**preferences, summary='参数测试保存完成')
+                result = dict(**SETTINGS_SCHEMA['read_settings'](preferences['settings']), summary='参数测试保存完成')
             task_id = str(len(tasks) + 1)
             tasks[task_id] = copy.deepcopy(result)
             if entry.startswith('sts2_policy_'):
@@ -114,7 +121,15 @@ def main():
             send(dict(run_id=task_id))
         elif path.startswith('/runs/'):
             task_id = path.split('/')[2]
+            if not path.endswith('/export') and mode.get('coop_pending_polls', 0) > 0:
+                mode['coop_pending_polls'] -= 1
+                send(dict(status='running'))
+                return
             send(dict(items=[dict(json=dict(data=tasks[task_id]))]) if path.endswith('/export') else dict(status='succeeded'))
+        elif path.startswith('/local-art/'):
+            send(dict(error='Optional artwork deliberately absent'), 404)
+        elif path == '/control_status.json':
+            send(dict(**status, updated_at=time.time() - mode.get('control_age', 0)))
         elif path == '/policy_status.json':
             send(mode['stale_policy'] or dict(**policy, updated_at=time.time()))
         elif path == '/autoplay_history.json':
@@ -132,6 +147,7 @@ def main():
             page.goto(origin + '/policy.html')
             expect(page.locator('.character')).to_have_count(6)
             expect(page.locator('#model-name')).to_have_text('铁甲战士')
+            assert calls[-1]['entry_id'] == 'sts2_policy_status', 'Opening the page must not prepare/download the runtime'
             initial_calls = len(calls)
             page.get_by_role('button', name='储君 · 待下载', exact=True).click()
             expect(page.locator('#model-name')).to_have_text('储君')
@@ -197,6 +213,30 @@ def main():
             expect(page.locator('#live-floor')).to_have_text('23')
             expect(page.locator('#map-form')).to_have_count(0)
             expect(page.locator('#live-brain')).to_have_text('未接管')
+            expect(page.locator('#active-instance')).to_have_text('当前：主机')
+            before_room = len(calls)
+            room_dialogs = []
+            def reject_room_dialog(dialog):
+                room_dialogs.append(dialog.message)
+                dialog.dismiss()
+            page.on('dialog', reject_room_dialog)
+            mode['coop_pending_polls'] = 3
+            page.get_by_role('button', name='继续联机存档', exact=True).click()
+            expect(page.get_by_role('button', name='新建联机房间', exact=True)).to_be_disabled()
+            expect(page.locator('#active-instance')).to_have_text('当前：猫娘')
+            expect(page.locator('#feedback')).to_contain_text('联机读档大厅已打开')
+            room_calls = calls[before_room:]
+            assert [c['entry_id'] for c in room_calls] == ['sts2_open_coop_room', 'sts2_get_status']
+            assert room_calls[0]['args'] == dict(host=True, resume=True)
+            assert status['autoplay']['state'] == 'paused', 'Opening a room must not enable autoplay'
+            mode['coop_adopt_fail'] = True
+            page.get_by_role('button', name='新建联机房间', exact=True).click()
+            expect(page.locator('#feedback')).to_contain_text('未成功接管')
+            expect(page.locator('#feedback')).to_have_class('action-feedback is-error')
+            assert calls[-2]['args'] == dict(host=True, resume=False)
+            assert not room_dialogs, 'Room buttons must execute without confirmation dialogs'
+            page.remove_listener('dialog', reject_room_dialog)
+            mode['coop_adopt_fail'] = False
             page.get_by_role('button', name='开始自动玩 ↗', exact=True).click()
             expect(page.locator('#autoplay-title')).to_have_text('正在攀登中')
             expect(page.locator('[data-entry="sts2_get_status"]').first).to_be_enabled()
@@ -209,7 +249,16 @@ def main():
             expect(page.locator('#live-brain')).to_have_text('求解器', timeout=10000)
             expect(page.locator('#live-brain-phase')).to_have_text('规划中')
             expect(page.locator('#live-brain-detail')).to_contain_text('没有下载 SILENT')
-            assert all(c['entry_id'] == 'sts2_get_status' for c in calls[before_poll:])
+            assert len(calls) == before_poll, 'Background polling must not create host runs'
+            # Missing freshness must not leave the last known brain presented as live.
+            for age in (60, -30):
+                mode['control_age'] = age
+                page.evaluate('pollStatus()')
+                expect(page.locator('#live-brain')).to_have_text('状态未知')
+                assert len(calls) == before_poll
+                mode['control_age'] = 0
+                page.evaluate('pollStatus()')
+                expect(page.locator('#live-brain')).to_have_text('求解器')
             status['decision_engine'].update(engine='heuristic', phase='ready')
             page.locator('[data-entry="sts2_get_status"]').click()
             expect(page.locator('#live-brain')).to_have_text('启发式后备')
@@ -361,6 +410,21 @@ def main():
             expect(page.locator('#preferences-feedback')).to_contain_text('参数测试保存完成')
             assert calls[-1]['args'] == {'patch': {'policy_timeout_seconds': 12.5}}
 
+            # An invalid legacy field remains visible and does not block another save.
+            preferences['settings']['poll_fallback_seconds'] = 3
+            page.locator('#preferences-refresh').click()
+            expect(page.locator('#preferences-load-state')).to_contain_text('1 项待修正')
+            expect(page.locator('#pref-poll_fallback_seconds')).to_have_value('3')
+            expect(page.locator('#pref-poll_fallback_seconds')).to_have_attribute('aria-invalid', 'true')
+            page.locator('#pref-action_interval_seconds').fill('2.5')
+            page.locator('#preferences-save').click()
+            expect(page.locator('#preferences-feedback')).to_contain_text('参数测试保存完成')
+            assert calls[-1]['args'] == {'patch': {'action_interval_seconds': 2.5}}
+            expect(page.locator('#pref-poll_fallback_seconds')).to_have_value('3')
+            page.locator('#pref-poll_fallback_seconds').fill('5')
+            page.locator('#preferences-save').click()
+            expect(page.locator('#preferences-load-state')).not_to_contain_text('待修正')
+
             page.goto(origin + '/history.html')
             expect(page.locator('.run-choice')).to_have_count(12)
             expect(page.locator('.route')).to_be_visible()
@@ -408,7 +472,7 @@ def main():
                         expect(page.locator('#live-floor')).to_have_text('23')
                     page.wait_for_timeout(150)
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1'), f'{name} overflows at {width}'
-                    assert page.locator('img').evaluate_all('(imgs)=>imgs.every(img=>img.complete && img.naturalWidth > 0)'), f'{name} missing artwork'
+                    assert page.locator('img').evaluate_all('(imgs)=>imgs.every(img=>img.hidden || (img.complete && img.naturalWidth > 0))'), f'{name} missing artwork'
                     if width != 768:
                         page.screenshot(path=str(OUT / f'{name}-{label}.png'), full_page=True)
             # Empty data and a fresh failure are distinct, not fake victories.

@@ -120,11 +120,11 @@ async function poll() {
   if(generation===pollGeneration)schedulePoll();
 }
 $('runtime-repair').addEventListener('click',()=>act('sts2_policy_prepare_runtime'));
-$('page-retry').addEventListener('click',()=>act('sts2_policy_prepare_runtime'));
+$('page-retry').addEventListener('click',()=>act('sts2_policy_status'));
 $('model-download').addEventListener('click',()=>act('sts2_policy_download_model',{character:selected}));
 $('model-remove').addEventListener('click',()=>{
   const m=snapshot.models.find(m=>m.character===selected);
   if(confirm(`删除「${m.label || selected}」的模型？该角色将回退求解器与启发式。`))act('sts2_policy_remove_model',{character:selected});
 });
-// Preserve the existing page-open preparation behavior; make repair explicit and discoverable.
-act('sts2_policy_prepare_runtime');
+// Opening/retrying the page is read-only. Downloads require an explicit action.
+act('sts2_policy_status');

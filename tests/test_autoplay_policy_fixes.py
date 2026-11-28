@@ -93,11 +93,15 @@ def test_maybe_emit_catgirl_llm_suppressed_when_danmaku_disabled() -> None:
 
 
 @pytest.mark.unit
-def test_fallback_still_pushes_when_danmaku_is_enabled() -> None:
+def test_fallback_still_pushes_when_danmaku_is_enabled(monkeypatch) -> None:
     """闸门默认开：catgirl_llm_enabled=False 仍走启发式兜底推弹幕（老行为不能被闸门误伤）。"""
     service, client = _service()
     service._catgirl_llm_enabled = False
     assert service._danmaku_enabled is True
+
+    # Unit test: optional host avatar HTTP must not race a fixed one-second sleep.
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(service, "_catgirl_avatar_base64", AsyncMock(return_value=None))
 
     async def go() -> None:
         service._maybe_emit_catgirl_llm(
@@ -105,8 +109,11 @@ def test_fallback_still_pushes_when_danmaku_is_enabled() -> None:
             {"should_comment": True, "primary_message": "建议先防御。"},
             {"message": "建议先防御。"},
         )
-        # 兜底推送是 fire-and-forget（内部会先试一次头像 HTTP），给足时间再断言。
-        await asyncio.sleep(1.0)
+        # Wait for the actual push, not a live host/avatar request or an arbitrary delay.
+        async def wait_pushed():
+            while not client.pushed:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(wait_pushed(), timeout=1.0)
 
     asyncio.run(go())
     assert client.pushed == [("建议先防御。", "catgirl")]

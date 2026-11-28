@@ -142,7 +142,7 @@ async def test_only_one_generation_is_in_flight():
 def test_same_commentary_is_not_resubmitted_after_scene_or_punctuation_change(monkeypatch):
     service, plugin, _ = _with_plan()
     now = [1000.0]
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.time", lambda: now[0])
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_host.time", lambda: now[0])
     assert service._push_host_commentary("先打痛击，再补冷光！", scene_key="turn-a")
     now[0] += 80
     assert not service._push_host_commentary("先打痛击再补冷光。", scene_key="turn-b")
@@ -157,7 +157,7 @@ def test_same_commentary_is_not_resubmitted_after_scene_or_punctuation_change(mo
 def test_content_dedup_is_run_scoped_and_bounded(monkeypatch):
     service, _, snapshot = _with_plan()
     now = [1000.0]
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.time", lambda: now[0])
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_host.time", lambda: now[0])
     assert service._push_host_commentary("先防御。", scene_key="run-a-turn-1")
     now[0] += 80
     snapshot["run_id"] = "run-b"

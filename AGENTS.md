@@ -144,5 +144,24 @@ What it cannot cover: a human at the controls in the real game (UI-driven action
 
 ## Deploying
 
-`deploy-all.ps1` copies the plugin into N.E.K.O and builds/deploys the mod into the game. It changes the
+`deploy-all.ps1` copies the plugin into N.E.K.O and builds/deploys the mod into the game. The mod is
+written to both local `mods/nekospire` and the Workshop directory: the local same/newer version survives
+Workshop auto-updates that otherwise replace it before the catgirl child starts. It changes the
 user's live install — only run it when asked.
+
+
+## Handwritten module ownership (A1773 split)
+
+- `service.py` composes `Service*Mixin` classes: configuration in `service_settings.py`, history/review in
+  `service_history.py`, host delivery in `service_host.py`, overlay commentary in `service_danmaku.py`,
+  status and the static control-page snapshot in `service_status.py`. Patch time/I/O in the owning module in tests.
+- `heuristic_planner.py` remains the public `STS2HeuristicPlanner` facade; domain mixins are in
+  `planner_{combat,choices,map,shop,lessons}.py`, with shared helpers in `planner_common.py`.
+- `GameStateService.cs` and `GameActionService.cs` are partial-class facades. Implementations live in
+  their `GameStateService.*.cs` / `GameActionService.*.cs` siblings; `*.Payloads.cs` holds DTOs.
+  Source-inspection tests must read all relevant parts, not assume every method is in the facade.
+- `static/control_status.json` is generated on runtime status updates; it is not shipped.
+  Periodic browser status reads use this snapshot, not new host `/runs` tasks.
+- Game artwork is optional under ignored `static/local-art/`, excluded from plugin packaging.
+  `tools/ui_smoke.py` deliberately serves it as missing to validate clean-install fallbacks.
+- See `docs/module-layout.md` and `docs/report-a1773-review.md` for boundaries and validation.

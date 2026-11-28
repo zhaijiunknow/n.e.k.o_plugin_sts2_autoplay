@@ -16,6 +16,11 @@ internal static class ExternalControl
             return seen != 0 && Stopwatch.GetElapsedTime(seen).TotalSeconds < 15;
         }
     }
+    // Keep joining/readying the lobby even after the plugin adopts this process.
+    // An expired plugin lease restores standalone play rather than leaving a stuck client.
+    public static bool HoldAutoplay(string mode, string screen, bool active) =>
+        active && mode == "hold" && screen is not ("MAIN_MENU" or "MULTIPLAYER_LOBBY" or "CHARACTER_SELECT");
+
     public static string MapPolicy(string policy, bool follow, bool active) =>
         active ? policy : follow ? "follow" : "auto";
 }

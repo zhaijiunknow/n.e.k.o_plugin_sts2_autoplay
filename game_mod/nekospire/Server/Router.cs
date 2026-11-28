@@ -11,7 +11,7 @@ internal static class Router
 {
     private const string ServiceName = "nekospire";
     private const string ProtocolVersion = "2026-03-11-v1";
-    private const string ModVersion = "0.1.11";
+    private const string ModVersion = "0.1.12";
     private const string LogPrefix = "[NekoComm.Router]";
 
     private static long _requestCounter;
@@ -284,6 +284,10 @@ internal static class Router
                     data = new
                     {
                         coop_enabled = cfg.coop_enabled,
+                        coop_client_port = cfg.coop_client_port,
+                        coop_role = NekoAutoplayDriver.IsCatgirlProcess() ? "catgirl" : "host",
+                        coop_rejoin_supported = true,
+                        coop_control_mode = cfg.coop_control_mode,
                         livestream_enabled = cfg.livestream_enabled,
                         llm_enabled = cfg.llm_enabled,
                         danmaku_enabled = cfg.danmaku_enabled,
@@ -319,6 +323,7 @@ internal static class Router
                 cfg.danmaku_enabled = cfgWrite.danmaku_enabled ?? cfg.danmaku_enabled;
                 cfg.danmaku_push_enabled = cfgWrite.danmaku_push_enabled ?? cfg.danmaku_push_enabled;
                 cfg.coop_enabled = cfgWrite.coop_enabled ?? cfg.coop_enabled;
+                cfg.coop_control_mode = cfgWrite.coop_control_mode ?? cfg.coop_control_mode;
                 cfg.livestream_enabled = cfgWrite.livestream_enabled ?? cfg.livestream_enabled;
                 cfg.coop_client_port = cfgWrite.coop_client_port ?? cfg.coop_client_port;
                 cfg.coop_map_follow_player = cfgWrite.coop_map_follow_player ?? cfg.coop_map_follow_player;
@@ -342,6 +347,7 @@ internal static class Router
                     data = new
                     {
                         status = "updated",
+                        coop_control_mode = cfg.coop_control_mode,
                         coop_map_policy = cfg.coop_map_policy,
                         coop_map_vote_wait_seconds = cfg.coop_map_vote_wait_seconds,
                         livestream_enabled = cfg.livestream_enabled,

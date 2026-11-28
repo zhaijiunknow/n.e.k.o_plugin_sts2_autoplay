@@ -230,6 +230,12 @@ class STS2TransportClient:
         return await self._request("POST", "/policy/data", json={"files": dict(files)})
 
     async def execute_action(self, action: str, **kwargs: Any) -> Dict[str, Any]:
+        # Hosting can prepare/rejoin a running child, including a game-over -> menu transition.
+        if action in {"start_coop_session", "continue_coop_session"}:
+            return await self._request(
+                "POST", "/action", json=self._build_action_payload(action, **kwargs),
+                read_timeout=max(60.0, self.request_timeout),
+            )
         return await self._request("POST", "/action", json=self._build_action_payload(action, **kwargs))
 
     async def subscribe_events(self) -> AsyncIterator[Dict[str, Any]]:

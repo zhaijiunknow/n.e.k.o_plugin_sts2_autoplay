@@ -148,7 +148,7 @@ The plugin attaches that header to every request (including the SSE stream) and 
 Note: `safe` is a **heuristic** conservative score (avoid elites, prefer rests below 60% HP), **not** a real battle-loss forecast; and changing a vote only works before the map advances. Legacy configs that only set `map_follow_player` are still understood (`true`→follow, `false`→auto).
 
 - **Back to the save**: when the main menu has a resumable run, the plugin's main-menu decision now **prefers `continue_run`** (it used to prefer `open_character_select`, which started a new run ahead of the save), and the catgirl process **never touches the save** (both processes share `user://`, so whoever clicks Continue consumes it) — it only keeps the ability to rejoin a room. `sts2_continue_run` is the explicit recovery entry point, and `continue_run` now pops any open main-menu submenu first (an open submenu hides the Continue button, which previously just returned 409).
-- **Guard**: with a resumable save present, `start_coop_session` / `start_multiplayer_host` return `409 active_run_present` instead of silently starting a new run (`POST /config {coop_yield_to_saved_run:false}` disables this guard).
+- **Direct actions**: new-room and resume buttons execute without confirmation dialogs. Existing saves do not block room creation; saving a new multiplayer run replaces previous multiplayer progress. Choose resume to keep that run. Failed continuation never falls back to creating a new run.
 - **Known limitation**: the game appears to have no join-in-progress. Even if the host resumes the co-op save, the AI teammate may not get back into that run — a game-side capability boundary, not something the plugin can work around.
 
 ## Control modes (play on your own / listen / stop)

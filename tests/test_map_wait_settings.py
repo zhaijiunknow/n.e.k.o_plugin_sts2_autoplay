@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 from plugin.plugins.sts2_autoplay import STS2AutoplayPlugin
-from plugin.plugins.sts2_autoplay import heuristic_planner as planner_module
+from plugin.plugins.sts2_autoplay import planner_map as planner_module
 from plugin.plugins.sts2_autoplay.heuristic_planner import validate_map_vote_wait_seconds
 from plugin.plugins.sts2_autoplay.tests.test_autoplay_policy_fixes import _MAP_NODES, _map_context, _service
 

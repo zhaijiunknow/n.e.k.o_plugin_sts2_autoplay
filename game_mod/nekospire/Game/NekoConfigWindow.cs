@@ -177,12 +177,7 @@ namespace NekoComm.Game
 
         private void OnHostCoopPressed()
         {
-            // Host-side: enable coop (so the catgirl autoplay activates when launched as the client) and open
-            // an ENet multiplayer room. The config window overlays the main menu, so open_multiplayer_menu then
-            // start_multiplayer_host work while the player is at the main menu.
-            var cfg = NekoConfig.Current;
-            cfg.coop_enabled = true;
-            cfg.Save();
+            // Centralized executor validates the host and duplicate clients before enabling co-op.
             Close();
             _ = StartCoopSessionAsync();
         }
@@ -191,14 +186,7 @@ namespace NekoComm.Game
         {
             try
             {
-                // The config window is opened from the mods submenu; pop back to the actual main menu first so
-                // the multiplayer actions (open_multiplayer_menu -> start_multiplayer_host) are valid (they
-                // require currentScreen to be NMainMenu, not the mods submenu).
-                await CloseMainMenuSubmenusAsync();
-                await GameThread.InvokeAsync(() => GameActionService.ExecuteAsync(new ActionRequest { action = "open_multiplayer_menu" }));
-                await GameThread.InvokeAsync(() => GameActionService.ExecuteAsync(new ActionRequest { action = "start_multiplayer_host" }));
-                GD.Print("[NekoSpire] host co-op room opened; launching catgirl...");
-                LaunchCatgirlProcess();
+                await GameThread.InvokeAsync(() => GameActionService.ExecuteAsync(new ActionRequest { action = "start_coop_session" }));
             }
             catch (Exception ex)
             {
@@ -226,7 +214,7 @@ namespace NekoComm.Game
 
         // Internal so the HTTP path can reuse it: GameActionService's start_coop_session action spawns the
         // second game instance through here — there is no other way to reach it from outside the UI.
-        internal static void LaunchCatgirlProcess()
+        internal static void LaunchCatgirlProcess(ulong clientId)
         {
             try
             {
@@ -242,12 +230,15 @@ namespace NekoComm.Game
                 var catgirlPort = NekoConfig.Current.coop_client_port;
                 startInfo.Environment["STS2_API_PORT"] = catgirlPort.ToString();
                 startInfo.Environment["STS2_ENABLE_DEBUG_ACTIONS"] = "1";
-                System.Diagnostics.Process.Start(startInfo);
+                startInfo.Environment["STS2_COOP_NET_ID"] = clientId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                using var process = System.Diagnostics.Process.Start(startInfo)
+                    ?? throw new InvalidOperationException("未能启动猫娘进程。");
                 GD.Print($"[NekoSpire] catgirl process launched (port {catgirlPort}, debug on)");
             }
             catch (Exception ex)
             {
                 GD.PrintErr("[NekoSpire] catgirl launch failed: " + ex.Message);
+                throw new InvalidOperationException("房间已打开，但猫娘进程启动失败。请退出大厅检查游戏路径后重试；存档未删除。", ex);
             }
         }
     }

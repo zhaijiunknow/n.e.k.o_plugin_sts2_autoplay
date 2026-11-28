@@ -17,7 +17,7 @@ from plugin.plugins.sts2_autoplay.tests.test_danmaku_timeliness import (
 def setup_idle(monkeypatch):
     service = _service()
     clock = [0.0]
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.monotonic", lambda: clock[0])
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_danmaku.monotonic", lambda: clock[0])
     snapshot, payload = _combat_snapshot(), _combat_payload()
     service._state.snapshot = snapshot
     service._state.transport_state = "connected"
@@ -142,7 +142,7 @@ async def test_idle_shares_generation_slot_with_event_commentary(monkeypatch):
 @pytest.mark.parametrize("result", ["repeat", "empty", "error", "timeout"])
 async def test_failed_or_repeated_idle_generation_uses_safe_fallback(monkeypatch, result):
     service, clock, snapshot, payload = setup_idle(monkeypatch)
-    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service.DANMAKU_GENERATION_TIMEOUT", 0.01)
+    monkeypatch.setattr("plugin.plugins.sts2_autoplay.service_danmaku.DANMAKU_GENERATION_TIMEOUT", 0.01)
     service._recent_idle_lines = ["我也想歇一歇。"]
     async def generate(**kwargs):
         assert kwargs["summary_kind"] == "idle"

@@ -323,7 +323,7 @@ def test_terminal_screen_triggers_run_record_and_history_snapshot(tmp_path, monk
     `_maybe_record_run_memory` 才是真正被线上调用的那一处 —— 这里从"分类为 terminal 的快照"
     一路验到"记忆里有这条记录 + 历史快照文件被写出来"。
     """
-    import plugin.plugins.sts2_autoplay.service as service_module
+    import plugin.plugins.sts2_autoplay.service_history as service_module
 
     service = _service()
     service._catgirl_memory = CatgirlMemoryStore(path=str(tmp_path / "mem.json"), logger=DummyLogger())
@@ -333,7 +333,7 @@ def test_terminal_screen_triggers_run_record_and_history_snapshot(tmp_path, monk
     _seed_trail(service, [(80, "COMBAT", 6), (38, "COMBAT", 6), (0, "COMBAT", 7)])
 
     written: list[str] = []
-    # service.py 是 `from .history_view import write_history_view` 的模块级绑定，
+    # service_history.py 是 `from .history_view import write_history_view` 的模块级绑定，
     # 所以要补 service 里的那个名字，而不是 history_view 里的。
     monkeypatch.setattr(
         service_module, "write_history_view",
